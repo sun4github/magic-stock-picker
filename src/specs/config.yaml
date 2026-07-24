@@ -1,0 +1,91 @@
+# Master Configuration for Google ADK Agent System
+
+system:
+  project_name: "Magic Formula Skeptical Decomposer Engine"
+  environment: "development"
+  framework: "google-adk" # Google Agent Development Kit
+
+logging:
+  console_output: true
+  log_level: "INFO"
+  log_directory: "logs"
+  filename_pattern: "run_{timestamp}.log"
+
+agents:
+  screener_agent:
+    name: "Magic_Formula_Screener"
+    model: "gemini-2.5-flash"
+    top_n_candidates: 30
+    script_path: "magic_formulae_screener.py"
+
+  sec_agent:
+    name: "SEC_Filings_Data_Agent"
+    model: "gemini-2.5-flash"
+    sec_user_agent: "YourName FinancialAnalysis/1.0 (contact@example.com)"
+
+  metrics_agent:
+    name: "Quantitative_Metrics_Agent"
+    model: "gemini-2.5-flash"
+    fmp_api_key_env: "FMP_API_KEY"
+
+  bear_search_agent:
+    name: "Search_And_Bear_Case_Agent"
+    model: "gemini-2.5-flash"
+    # Two complementary sources: FMP for hard factual news, Tavily for the
+    # qualitative open-web bear case (see agent_architecture.md Section 2C).
+    news_provider: "fmp"                      # ticker-tagged financial news
+    news_api_key_env: "FMP_API_KEY"
+    search_provider: "tavily"                 # Replaceable open-web search adapter
+    search_api_key_env: "TAVILY_API_KEY"
+
+tools:
+  web_search:
+    default_engine: "tavily"
+    search_depth: "advanced"                  # 'basic' (1 credit) or 'advanced' (2 credits)
+    time_range: "year"                        # recency window for results
+    max_results: 5
+
+analysis_agent:
+    name: "Analysis_And_Composition_Agent"
+    model: "gemini-2.5-pro" # Note: Recommend a heavier reasoning model here for synthesis
+    instructions_file: "research-instructions.md"
+    output_format: "markdown"
+
+database:
+  enabled: true
+  connection_string_env: "DATABASE_URL" # e.g., postgresql://user:pass@localhost:5432/investing_db
+  embedding_model: "text-embedding-004"
+  vector_dimension: 768
+
+# LLM pricing used to estimate per-run spend from actual token usage.
+# Update these to the current Google AI pricing for your model/tier (USD per 1M tokens).
+llm_pricing:
+  input_usd_per_1m: 0.30
+  output_usd_per_1m: 2.50
+
+# Tavily web-search pricing (USD per 1,000 searches) for per-run cost estimates.
+# Tavily bills per credit ($0.008/credit on Pay-as-you-go); an 'advanced' search
+# = 2 credits, so ~$16 per 1,000 searches. The free 'Researcher' tier includes
+# 1,000 credits/month (actual $ = 0 until exhausted).
+search_pricing:
+  tavily_usd_per_1k: 16.00
+
+rate_limits:
+  fmp_starter:
+    max_calls_per_minute: 300
+    delay_between_calls_seconds: 0.20 # Guarantees ~5 calls/sec max
+  sec_edgar:
+    max_calls_per_second: 10
+    delay_between_calls_seconds: 0.12 # Guarantees ~8 calls/sec max
+    user_agent: "Suneel MagicStockPicker/1.0 (suneel.kanuri@gmail.com)"
+  tavily_search:
+    delay_between_calls_seconds: 0.5
+
+screening_parameters:
+  min_market_cap: 100000000  # $100 Million minimum
+  universe_limit: 2500        # Max companies to pull from the FMP screener universe (raise to capture more mid/small caps)
+  excluded_sectors:
+    - "Financial Services"
+    - "Financial"
+    - "Utilities"
+    - "Banking"

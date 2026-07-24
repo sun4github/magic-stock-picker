@@ -1,0 +1,10 @@
+google-adk
+requests
+pandas
+python-dotenv
+pyyaml
+edgartools
+sec-edgar-downloader
+mcp
+psycopg2-binary
+pgvector
