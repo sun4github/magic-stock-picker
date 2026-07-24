@@ -19,23 +19,22 @@ The application must execute a strict 4-stage sequential workflow managed by a p
    - **Agent:** `MagicFormulaScreenerAgent`
    - **Action:** Triggers the MCP Tool wrapping `magic_formulae_screener.py`.
    - **Output:** Identifies and ranks valid candidates, extracting exactly the **Top 30 ranked companies**.
-2. **Phase B: Skeptical Decomposer Analysis** (Loop over Top 30)
-   - **Agent 1: SEC Filings Data Agent**
-     - Uses Python `edgar-tools` wrapped in an MCP tool to parse SEC 10-K filings for product/business segment revenue breakdowns and explicit **>10% customer concentration notes**.
-   - **Agent 2: Quantitative Metrics Agent**
-     - Uses an MCP tool calling FMP endpoints to extract 3-year trailing metrics, 5-year historical P/E averages, competitor metrics, and analyst consensus targets.
-   - **Agent 3: Search & Bear Case Agent**
-     - Uses **two complementary sources**: `fmp_stock_news` (FMP, ticker-tagged factual financial news and catalysts) and a modular `web_search_tool` (Tavily, qualitative open-web bear-case and risk research) to find news within the last year, valuation drop catalysts, and bear-case risks. See Section 2C for when each is used.
-   - **Agent 4: Analysis & Composition Agent (The Synthesizer)**
-        - **Role:** This is the final agent in the Phase B loop. It does **not** fetch data. It acts as the reasoning engine.
-        - **Inputs:** 
-        1. The raw JSON/text outputs from the `SEC_Filings_Data_Agent`, `Quantitative_Metrics_Agent`, and `Search_And_Bear_Case_Agent`.
-        2. The exact text of the user's `research-instructions.md` prompt.
-        - **Execution Logic:**
-        - Instruct the coding agent to load the contents of `research-instructions.md` as the core `system_instruction` for this ADK Agent.
-        - The agent must be instructed to strictly synthesize the provided context without hallucinating external data.
-        - **Crucial Addition:** Instruct the agent to append a final section titled `## Final Verdict` that explicitly outputs a `Buy`, `Watch`, or `Avoid` verdict — written for an investor who does **not** currently own the stock (Buy = worth initiating; Watch = not compelling now / watchlist; Avoid = actively unattractive). The verdict must weigh the **bull** case (the Magic Formula value + quality signal that surfaced the stock, passed to the agent as `screen_context`) against the **bear** case from the skeptical research, and state a one-paragraph justification of how they net out. The skeptical research body stays skeptical; only the verdict is balanced.
-        - **Output:** Write the final synthesized response to `reports/{Ticker}_Skeptical_Analysis.md`.
+2. **Phase B: Balanced Decomposer Analysis** (per ticker)
+
+   **Data gathering — direct tool calls (no LLM):**
+   - **SEC 10-K** (`fetch_sec_10k_data`, `edgar-tools`): Item 1 business/segment data and **>10% customer concentration notes**.
+   - **FMP metrics** (`fmp_metrics_extractor`): 3-year trailing metrics, 5-year P/E average, competitor metrics, analyst consensus targets.
+   - **Magic Formula value/quality signal** (`screen_context`): ROC + Earnings Yield + rank. For on-demand single tickers (where the screener didn't run), `compute_ticker_magic_metrics` computes ROC/EY on the fly.
+
+   These are gathered once and seeded into session state (`sec_data`, `metrics_data`, `screen_context`) for the three reasoning agents below.
+
+   **Reasoning — a `SequentialAgent` of two advocates and a neutral judge:**
+   - **Agent 1: Bear Agent** — instruction = `research-instructions.md` (skeptical). Uses `fmp_stock_news` + `web_search_tool` (Tavily, bear queries) plus the SEC/metrics data to build the **bear case** → `state['bear_data']`.
+   - **Agent 2: Bull Agent** — instruction = `bullish-research-instructions.md`. Runs **after** the bear agent (its Section 4 directly refutes the bear case). Uses `fmp_stock_news` + `web_search_tool` (Tavily, bull queries) plus SEC/metrics/`screen_context` to build the **bull case** → `state['bull_data']`.
+   - **Agent 3: Analyst Agent (Neutral Judge)** — carries **no** skeptical prompt. Weighs `bear_data` vs `bull_data` (plus `screen_context`) and emits a combined Markdown report with `## Bull Case`, `## Bear Case`, and `## Final Verdict` sections.
+        - **Verdict:** exactly one of `Buy` / `Watch` / `Avoid`, written for an investor who does **not** currently own the stock (Buy = worth initiating; Watch = not compelling now / watchlist; Avoid = actively unattractive), with a one-paragraph justification of how the two cases net out.
+        - **Balance:** skepticism lives in the Bear Agent, balanced by an equal Bull Agent; the judge itself is neutral. This removes the structural bear bias.
+        - **Output:** written to `reports/{Ticker}_Skeptical_Analysis.md`; `bear_data`/`bull_data` are also persisted separately as `agent_outputs` (BEAR_CASE / BULL_CASE) for drill-down.
 
 ---
 
@@ -221,22 +220,23 @@ Phase B distinguishes **data-relay** steps from **reasoning** steps:
   deterministic tools, so `analyze_ticker` calls them **directly** and seeds
   their raw output into session state as `sec_data` / `metrics_data`. This gives
   100% data fidelity (no LLM summarization) and costs zero tokens.
-- **Reasoning — an ADK `SequentialAgent` graph.** Only the steps that require
-  reasoning are LLM agents: `search_agent` (combines FMP news + Tavily, writing
-  `output_key='search_data'`) then `analysis_agent` (synthesizes the report,
-  reading `{sec_data}` / `{metrics_data}` / `{search_data}` via instruction
-  templating). `ticker`, `company_name`, `sec_data`, and `metrics_data` are
-  seeded into session state before the graph runs.
+- **Reasoning — an ADK `SequentialAgent` graph of three roles:** `bear_agent`
+  (`research-instructions.md`, → `bear_data`) → `bull_agent`
+  (`bullish-research-instructions.md`, → `bull_data`; runs after bear so §4 can
+  refute it) → `analyst_agent` (neutral judge → `final_report`). Both advocates
+  read `{sec_data}` / `{metrics_data}` / `{screen_context}`; the bull agent also
+  reads `{bear_data}`; the judge reads `{bear_data}` / `{bull_data}`. `ticker`,
+  `company_name`, `sec_data`, `metrics_data`, and `screen_context` are seeded
+  into session state before the graph runs.
 
-**Model tiers:** data-gathering historically used a lite/non-thinking model, but
-since SEC/metrics are now direct calls, the two remaining agents run on the
-thinking `gemini-flash-latest` (`search_agent` genuinely combines sources;
-`analysis_agent` reasons over everything).
+**Model tiers:** all three reasoning agents run on the thinking
+`gemini-flash-latest` (they do genuine research/weighing). SEC/metrics are direct
+tool calls, so no lite/data-gathering agents remain.
 
 The per-ticker logic is factored into `analyze_ticker(run_id, ticker,
-company_name)`, which does the direct tool calls, runs the graph, and persists
-the SEC/metrics/search outputs plus the final report. All execution modes call
-it, so persistence and verdict logic are identical across modes.
+company_name, screen_context)`, which does the direct tool calls, runs the graph,
+and persists SEC/metrics/bear/bull outputs plus the final report. All execution
+modes call it, so persistence and verdict logic are identical across modes.
 
 ### A. Execution Modes
 

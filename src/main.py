@@ -18,6 +18,7 @@ from google.genai import types
 # Import custom MCP tool wrappers
 from mcp_server import (
     run_magic_formula_screener,
+    compute_ticker_magic_metrics,
     fetch_sec_10k_data,
     fmp_metrics_extractor,
     fmp_stock_news,
@@ -69,88 +70,108 @@ PRICE_OUTPUT_PER_1M = float(_pricing.get("output_usd_per_1m", 2.50))
 # Web search (Tavily) pricing (USD per 1,000 requests) for per-run cost estimates.
 TAVILY_PRICE_PER_1K = float(config.get("search_pricing", {}).get("tavily_usd_per_1k", 16.00))
 
-# Load Instructions for Analysis Agent
+# Load research instructions. research-instructions.md drives the BEAR (skeptical)
+# agent; bullish-research-instructions.md drives the BULL agent. Neither file
+# contains '{' so both are safe to embed in state-templated instructions.
 instructions_path = os.path.join(os.path.dirname(__file__), "research-instructions.md")
 with open(instructions_path, "r") as f:
     research_instructions = f.read()
 
+bullish_path = os.path.join(os.path.dirname(__file__), "bullish-research-instructions.md")
+with open(bullish_path, "r") as f:
+    bullish_instructions = f.read()
+
 # --- 2. AGENT DEFINITIONS (Phase B) ---
-# Phase B has two kinds of steps:
-#   1. Pure data relays (SEC 10-K, FMP metrics) — deterministic tool calls, so we
-#      invoke the tools DIRECTLY in analyze_ticker rather than wrapping them in an
-#      LLM. That gives 100% data fidelity (no summarization) and costs zero tokens.
-#      Their raw output is seeded into session state as sec_data / metrics_data.
-#   2. Reasoning steps — LLM agents wired into a SequentialAgent that hands off via
-#      shared session state (spec section 8):
-#         search_agent  -> state['search_data']
-#         analysis_agent reads {sec_data}/{metrics_data}/{search_data}
-# ticker, company_name, sec_data and metrics_data are seeded into session state
-# before the graph runs; each agent templates the keys it references.
+# Two kinds of steps:
+#   1. Pure data relays (SEC 10-K, FMP metrics) — deterministic tool calls invoked
+#      DIRECTLY in analyze_ticker (100% fidelity, 0 tokens), seeded into session
+#      state as sec_data / metrics_data (shared by both advocates below).
+#   2. Reasoning — a SequentialAgent of THREE roles that hand off via session state:
+#         bear_agent  (research-instructions.md) -> state['bear_data']
+#         bull_agent  (bullish-research-instructions.md) -> state['bull_data']
+#                     (runs after bear so it can refute it)
+#         analyst_agent (neutral judge) reads {bear_data}/{bull_data} -> final_report
+# ticker, company_name, sec_data, metrics_data, screen_context are seeded before
+# the graph runs; each agent templates the keys it references.
 APP_NAME = "skeptical_decomposer"
 
-search_agent = LlmAgent(
-    name="search_agent",
-    model="gemini-flash-latest",  # thinking model: it genuinely combines two sources
+# --- Advocate 1: BEAR (skeptical research) ---
+bear_agent = LlmAgent(
+    name="bear_agent",
+    model="gemini-flash-latest",
     instruction=(
-        "Research recent developments and the bear case for {company_name} ({ticker}) "
-        "using BOTH of your tools, then combine their outputs:\n"
-        "1. Call fmp_stock_news with ticker '{ticker}' for hard, factual, "
-        "company-specific news and catalysts (earnings, guidance, downgrades, M&A, "
-        "lawsuits).\n"
-        "2. Call web_search_tool with a query about {company_name}'s bear case, "
-        "valuation risks, and competitive/regulatory threats for the qualitative "
-        "analyst/short-seller perspective.\n"
-        "Return a combined summary of the factual news AND the bear-case risks, "
-        "keeping source URLs."
+        research_instructions
+        + "\n\n## How to run this research\n"
+        "You are building the BEAR case for {company_name} ({ticker}). Use your tools: "
+        "call fmp_stock_news for recent factual news, and web_search_tool for bear-case "
+        "risks, short-seller theses, and competitive/regulatory threats. Answer the "
+        "questions above skeptically, using the gathered research plus the financial "
+        "data below. Do not invent facts; cite sources.\n\n"
+        "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
+        "<SEC_DATA>\n{sec_data}\n</SEC_DATA>\n\n"
+        "<METRICS_DATA>\n{metrics_data}\n</METRICS_DATA>\n"
     ),
     tools=[fmp_stock_news, web_search_tool],
-    output_key="search_data",
+    output_key="bear_data",
 )
 
-# research_instructions contains no braces, so it is safe to embed in a
-# state-templated instruction. The braces below are ADK state placeholders.
-# The research body stays skeptical (that is the point); only the FINAL VERDICT
-# is rebalanced so it fairly weighs the bull case (the Magic Formula value+quality
-# signal that got the stock onto the list) against the bear case.
-analysis_instruction = (
-    research_instructions
-    + "\n\n## Final Verdict Instructions\n"
-    "Append a final section titled '## Final Verdict'. Before deciding, explicitly "
-    "weigh the BULL case against the BEAR case:\n"
-    "- BULL: the Magic Formula screen surfaced this stock as statistically cheap AND "
-    "high-quality (see MAGIC_FORMULA_CONTEXT below), plus any genuine strengths in "
-    "the metrics/financials.\n"
-    "- BEAR: the risks and skeptical findings established in the research above.\n"
-    "Then output exactly one verdict, written for an investor who does NOT currently "
-    "own the stock:\n"
-    "- 'Buy'   = attractive enough to initiate a position even after this skeptical review.\n"
-    "- 'Watch' = not compelling enough to buy now; worth keeping on a watchlist.\n"
-    "- 'Avoid' = actively unattractive; do not buy.\n"
-    "State it exactly as 'Verdict: Buy', 'Verdict: Watch', or 'Verdict: Avoid', "
-    "followed by a one-paragraph justification that explicitly states how the bull "
-    "and bear cases net out. Do NOT default to the middle — choose 'Watch' only if "
-    "the case is genuinely balanced.\n\n"
-    "Analyze {company_name} (Ticker: {ticker}) using the collected data below. "
-    "Do not invent facts; explain complex terms simply.\n\n"
-    "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
-    "<SEC_DATA>\n{sec_data}\n</SEC_DATA>\n\n"
-    "<METRICS_DATA>\n{metrics_data}\n</METRICS_DATA>\n\n"
-    "<SEARCH_DATA>\n{search_data}\n</SEARCH_DATA>\n"
+# --- Advocate 2: BULL (runs after bear; §4 refutes the bear case) ---
+bull_agent = LlmAgent(
+    name="bull_agent",
+    model="gemini-flash-latest",
+    instruction=(
+        bullish_instructions
+        + "\n\n## How to run this research\n"
+        "You are building the BULL case for {company_name} ({ticker}). The required "
+        "inputs — Earnings Yield and ROC — are in MAGIC_FORMULA_CONTEXT below, and the "
+        "Bear Case Research Output is in BEAR_CASE below. Use your tools: call "
+        "fmp_stock_news for positive catalysts, and web_search_tool for bull-thesis "
+        "evidence (moat/pricing power, growth catalysts, historical resilience). Answer "
+        "every bullish question above; for Section 4, directly refute the specific "
+        "points raised in BEAR_CASE. Do not invent facts; cite sources.\n\n"
+        "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
+        "<SEC_DATA>\n{sec_data}\n</SEC_DATA>\n\n"
+        "<METRICS_DATA>\n{metrics_data}\n</METRICS_DATA>\n\n"
+        "<BEAR_CASE>\n{bear_data}\n</BEAR_CASE>\n"
+    ),
+    tools=[fmp_stock_news, web_search_tool],
+    output_key="bull_data",
 )
 
-analysis_agent = LlmAgent(
-    name="analysis_agent",
-    model="gemini-flash-latest",  # flash (not pro) to de-risk 429 rate limits
-    instruction=analysis_instruction,
-    tools=[],  # The Synthesizer doesn't fetch data, just reasons.
+# --- Judge: NEUTRAL analyst (no skeptical prompt) weighs bull vs bear ---
+analyst_agent = LlmAgent(
+    name="analyst_agent",
+    model="gemini-flash-latest",
+    instruction=(
+        "You are a NEUTRAL, balanced investment analyst — neither skeptical-by-default "
+        "nor promotional. You are given a fully-argued BEAR case and a fully-argued BULL "
+        "case for {company_name} ({ticker}), plus the Magic Formula value/quality "
+        "context. Weigh them fairly and write a Markdown report with EXACTLY these "
+        "sections:\n"
+        "## Bull Case (summary)\n"
+        "## Bear Case (summary)\n"
+        "## Final Verdict\n"
+        "In the Final Verdict, explicitly weigh the bull case against the bear case, then "
+        "state exactly one verdict for an investor who does NOT currently own the stock:\n"
+        "- 'Verdict: Buy'   = attractive enough to initiate a position.\n"
+        "- 'Verdict: Watch' = not compelling enough to buy now; watchlist.\n"
+        "- 'Verdict: Avoid' = actively unattractive; do not buy.\n"
+        "Follow the verdict with a one-paragraph justification of how the two cases net "
+        "out. Do NOT default to the middle — choose 'Watch' only if genuinely balanced. "
+        "Do not invent facts beyond the two cases provided.\n\n"
+        "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
+        "<BEAR_CASE>\n{bear_data}\n</BEAR_CASE>\n\n"
+        "<BULL_CASE>\n{bull_data}\n</BULL_CASE>\n"
+    ),
+    tools=[],
     output_key="final_report",
 )
 
-# The Phase-B reasoning graph: sequential handoff search -> analysis. (SEC and
-# metrics are gathered by direct tool calls in analyze_ticker, not by agents.)
+# The Phase-B reasoning graph: bear -> bull -> neutral analyst. (SEC and metrics are
+# gathered by direct tool calls in analyze_ticker, not by agents.)
 skeptical_pipeline = SequentialAgent(
     name="skeptical_pipeline",
-    sub_agents=[search_agent, analysis_agent],
+    sub_agents=[bear_agent, bull_agent, analyst_agent],
 )
 
 # --- 2b. AGENT EXECUTION HELPER ---
@@ -357,7 +378,7 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     sec_data = fetch_sec_10k_data(ticker)
     metrics_data = fmp_metrics_extractor(ticker)
 
-    logger.info(f"[{ticker}] Running search + analysis graph...")
+    logger.info(f"[{ticker}] Running bear -> bull -> analyst graph...")
     try:
         state, usage = run_pipeline(run_id, ticker, company_name, sec_data, metrics_data, screen_context)
     except Exception as e:
@@ -366,13 +387,17 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
 
     _log_usage(ticker, usage)
 
-    search_data = state.get("search_data", "") or ""
+    bear_data = state.get("bear_data", "") or ""
+    bull_data = state.get("bull_data", "") or ""
     report_text = state.get("final_report", "") or ""
 
-    # Persist each sub-agent's raw output (spec section 5B)
-    _check_db(db_store_agent_output(run_id, ticker, "SEC_DATA", sec_data, json.dumps({"ticker": ticker})), f"{ticker} SEC output")
-    _check_db(db_store_agent_output(run_id, ticker, "QUANT_METRICS", metrics_data, json.dumps({"ticker": ticker})), f"{ticker} metrics output")
-    _check_db(db_store_agent_output(run_id, ticker, "SEARCH_BEAR", search_data, json.dumps({"ticker": ticker})), f"{ticker} search output")
+    # Persist each step's raw output (spec section 5B). SEC/metrics are raw
+    # provenance (reproducible, low search value) -> stored without an embedding.
+    # Bear/bull are the analytical content -> embedded for semantic search.
+    _check_db(db_store_agent_output(run_id, ticker, "SEC_DATA", sec_data, json.dumps({"ticker": ticker}), embed=False), f"{ticker} SEC output")
+    _check_db(db_store_agent_output(run_id, ticker, "QUANT_METRICS", metrics_data, json.dumps({"ticker": ticker}), embed=False), f"{ticker} metrics output")
+    _check_db(db_store_agent_output(run_id, ticker, "BEAR_CASE", bear_data, json.dumps({"ticker": ticker})), f"{ticker} bear case")
+    _check_db(db_store_agent_output(run_id, ticker, "BULL_CASE", bull_data, json.dumps({"ticker": ticker})), f"{ticker} bull case")
 
     if not report_text:
         logger.error(f"[{ticker}] No final report produced; skipping report persistence.")
@@ -381,7 +406,7 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     verdict = _extract_verdict(report_text)
     _check_db(db_store_final_report(run_id, ticker, verdict, report_text), f"{ticker} final report")
 
-    report_path = os.path.join("reports", f"{ticker}_Skeptical_Analysis.md")
+    report_path = os.path.join("reports", f"{ticker}_Final_Report_{verdict.title()}.md")
     with open(report_path, "w", encoding='utf-8') as f:
         f.write(report_text)
 
@@ -391,18 +416,33 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
 
 # --- 4. ORCHESTRATOR WORKFLOWS ---
 def _format_screen_context(candidate: dict) -> str:
-    """Turn a Magic Formula candidate row into the bull-case context the analysis
-    agent weighs against the bear case."""
-    return (
-        "This stock was surfaced by a Magic Formula screen (Joel Greenblatt's value + "
-        "quality strategy). A high rank means it is statistically BOTH cheap (high "
-        "earnings yield) AND high-quality (high return on capital) — this is the "
-        "bullish starting point that must be weighed against the bear case.\n"
-        f"- Magic Formula rank: #{candidate.get('Final_Rank')} (lower is better)\n"
-        f"- Return on Capital (quality signal): {candidate.get('ROC_Pct')}\n"
-        f"- Earnings Yield (cheapness signal): {candidate.get('EY_Pct')}\n"
-        f"- Combined Magic Formula score: {candidate.get('MagicFormula_Score')}"
+    """Turn a Magic Formula candidate row (or single-ticker computed metrics) into
+    the value/quality bull context that the agents weigh against the bear case."""
+    rank = candidate.get("Final_Rank")
+    if rank is not None:
+        header = (
+            "This stock was surfaced by a Magic Formula screen (Joel Greenblatt's value "
+            "+ quality strategy). A high rank means it is statistically BOTH cheap (high "
+            "earnings yield) AND high-quality (high return on capital)."
+        )
+        rank_line = f"- Magic Formula rank: #{rank} (lower is better)\n"
+    else:
+        header = (
+            "Magic Formula value/quality metrics were computed on demand for this ticker "
+            "(it was not ranked against a screen universe). A high ROC + high earnings "
+            "yield means it is statistically BOTH cheap AND high-quality."
+        )
+        rank_line = "- Magic Formula rank: n/a (single-ticker run)\n"
+    ctx = (
+        header
+        + " This is the bullish starting point that must be weighed against the bear case.\n"
+        + rank_line
+        + f"- Return on Capital (quality signal): {candidate.get('ROC_Pct')}\n"
+        + f"- Earnings Yield (cheapness signal): {candidate.get('EY_Pct')}"
     )
+    if candidate.get("MagicFormula_Score") is not None:
+        ctx += f"\n- Combined Magic Formula score: {candidate.get('MagicFormula_Score')}"
+    return ctx
 
 
 def _run_phase_b(top_candidates: list, source_label: str):
@@ -477,13 +517,24 @@ def run_single_ticker(ticker: str, company_name: str = None):
     # Parent pipeline_runs row for just this company (FK target for outputs).
     _check_db(db_create_pipeline_run(run_id, [ticker]), "create pipeline run")
 
-    # On-demand tickers did not come through the Magic Formula screen, so there is
-    # no value/quality signal to weigh — tell the analysis agent so explicitly.
-    screen_context = (
-        "This ticker was analyzed on demand and did NOT come through the Magic Formula "
-        "screen, so there is no screen-based value/quality (bull) signal available. "
-        "Base the verdict on the fundamentals and research below."
-    )
+    # The screener didn't run for a single ticker, so compute ROC + Earnings Yield
+    # on demand (the bull agent needs them). Fall back gracefully if unavailable.
+    logger.info(f"[{ticker}] Computing Magic Formula ROC / Earnings Yield...")
+    try:
+        candidate = json.loads(compute_ticker_magic_metrics(ticker))
+    except Exception as e:
+        candidate = {"error": str(e)}
+    if candidate.get("error") or "ROC_Pct" not in candidate:
+        logger.warning(f"[{ticker}] Could not compute ROC/EY ({candidate.get('error', 'unknown')}); proceeding without the bull signal.")
+        screen_context = (
+            "This ticker was analyzed on demand and its Magic Formula ROC/Earnings Yield "
+            "could not be computed, so no value/quality (bull) signal is available. Base "
+            "the bull case on the fundamentals and research below."
+        )
+    else:
+        candidate.setdefault("CompanyName", company_name)
+        screen_context = _format_screen_context(candidate)
+
     usage = analyze_ticker(run_id, ticker, company_name, screen_context)
 
     _finalize_run(run_id, usage, "On-Demand Run")

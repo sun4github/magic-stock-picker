@@ -14,23 +14,24 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     And the "Magic Formula Screener Agent" filters and selects exactly the Top 30 ranked companies
     And hands off the list of Top 30 companies to the Orchestrator Agent for Phase B analysis
 
-  Scenario: Execute Phase B Skeptical Analysis on Top Candidates
-    Given the Orchestrator Agent has received the Top 30 stock candidates
-    When it iterates over each candidate company sequentially
-    Then it delegates task execution to the following sub-agents:
-      | Agent Name                 | MCP Tool Used                | Objective                                              |
-      | SEC Filings Data Agent     | sec_edgar_extractor          | Extract segment data and >10% customer concentration    |
-      | Quantitative Metrics Agent | fmp_metrics_extractor        | Extract 3-yr metric trends & 5-yr P/E averages         |
-      | Search & Bear Case Agent   | fmp_stock_news + web_search_tool (Tavily) | Find recent factual news (FMP) and qualitative bear-case risks (Tavily) |
-    And the Orchestrator synthesizes the sub-agent outputs into a comprehensive Skeptical Investment Thesis report
+  Scenario: Execute Phase B Balanced Analysis on Candidates
+    Given the Orchestrator has received the candidates (or a single on-demand ticker)
+    When it processes each company sequentially
+    Then it gathers evidence via direct tool calls (SEC 10-K, FMP metrics) and the Magic Formula value/quality signal (ROC/Earnings Yield)
+    And for an on-demand single ticker it computes ROC/Earnings Yield on the fly since the screener did not run
+    And it runs a SequentialAgent of two advocates and a neutral judge:
+      | Agent Name    | Instruction / Tools                                  | Objective                                                       |
+      | Bear Agent    | research-instructions.md + fmp_stock_news + Tavily   | Build the skeptical BEAR case (bear_data)                       |
+      | Bull Agent    | bullish-research-instructions.md + fmp_stock_news + Tavily | Build the BULL case (bull_data); Section 4 refutes the bear case |
+      | Analyst Agent | neutral judge (no skeptical prompt)                  | Weigh bull vs bear and compose the final report + verdict       |
 
-  Scenario: Synthesize Data and Compose Final Research Report
-    Given the three data extraction agents (SEC, Quant, Search) have completed their tasks for a specific company
-    When the Orchestrator passes all collected raw context and the "research-instructions.md" file to the "Analysis & Composition Agent"
-    Then the "Analysis & Composition Agent" must adopt the persona of a skeptical decomposer
-    And it must generate a structured Markdown report answering every question in "research-instructions.md"
-    And it must enforce the rule to not invent facts and explain complex terms simply
-    And the final section of the report must explicitly state a "Buy", "Watch", or "Avoid" verdict (written for a non-owner) that weighs the Magic Formula bull signal against the skeptical bear case
+  Scenario: Synthesize Bull vs Bear and Compose Final Research Report
+    Given the Bear Agent and Bull Agent have produced bear_data and bull_data for a company
+    When the neutral Analyst Agent weighs the two cases (plus the Magic Formula value/quality context)
+    Then it must remain balanced (skepticism lives in the Bear Agent, offset by the Bull Agent)
+    And it must generate a Markdown report with "## Bull Case", "## Bear Case", and "## Final Verdict" sections
+    And it must enforce the rule to not invent facts beyond the two provided cases
+    And the final section must explicitly state a "Buy", "Watch", or "Avoid" verdict (written for a non-owner) reached by weighing the bull case against the bear case
     And export the final report to a local Markdown file
 
  Scenario: Persist Intermediate Outputs and Final Report to PostgreSQL

@@ -27,7 +27,11 @@ logger = logging.getLogger("mcp_server")
 # ==========================================
 # TOOL 1: Magic Formula Screener
 # ==========================================
-from magic_formula_starter_screener import main as run_screener_main, OUTPUT_FILENAME
+from magic_formula_starter_screener import (
+    main as run_screener_main,
+    OUTPUT_FILENAME,
+    calculate_company_metrics,
+)
 
 @mcp.tool()
 def run_magic_formula_screener() -> str:
@@ -38,7 +42,7 @@ def run_magic_formula_screener() -> str:
     logger.info("Executing Magic Formula Screener...")
     # Run the screener which writes to CSV
     run_screener_main()
-    
+
     # Read the CSV
     try:
         df = pd.read_csv(OUTPUT_FILENAME)
@@ -48,6 +52,41 @@ def run_magic_formula_screener() -> str:
     except Exception as e:
         logger.error(f"Error reading screener output: {e}")
         return json.dumps([])
+
+
+@mcp.tool()
+def compute_ticker_magic_metrics(ticker: str) -> str:
+    """
+    Computes Magic Formula Return on Capital (ROC) and Earnings Yield for a SINGLE
+    ticker, reusing the screener's own math. Used for on-demand runs where the full
+    screener is not executed, so the bull-case agent still gets the value/quality
+    signal. Returns a candidate-shaped JSON object (or {"error": ...}).
+    """
+    api_key = os.getenv("FMP_API_KEY")
+    if not api_key:
+        return json.dumps({"error": "FMP_API_KEY not configured"})
+    try:
+        # /stable/batch-quote is restricted on the Starter plan; use the
+        # market-capitalization endpoint (available on Starter) for live market cap.
+        time.sleep(0.20)
+        mc = requests.get(
+            "https://financialmodelingprep.com/stable/market-capitalization",
+            params={"symbol": ticker, "apikey": api_key}, timeout=20,
+        ).json()
+        live_cap = mc[0].get("marketCap", 0) if isinstance(mc, list) and mc else 0
+        metrics = calculate_company_metrics(ticker, live_cap, api_key)
+        if not metrics:
+            return json.dumps({"error": f"Could not compute ROC/Earnings Yield for {ticker}"})
+        return json.dumps({
+            "Symbol": ticker,
+            "CompanyName": metrics.get("CompanyName", ticker),
+            "ROC_Pct": f"{round(metrics['ROC'] * 100, 2)}%",
+            "EY_Pct": f"{round(metrics['EarningsYield'] * 100, 2)}%",
+            "Final_Rank": None,
+            "MagicFormula_Score": None,
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
 # ==========================================
 # TOOL 2: SEC EDGAR Extractor
@@ -453,12 +492,16 @@ def db_finalize_pipeline_run(
         return f"Error finalizing pipeline run: {str(e)}"
 
 @mcp.tool()
-def db_store_agent_output(run_id: str, ticker: str, agent_type: str, raw_content: str, metadata_json: str) -> str:
+def db_store_agent_output(run_id: str, ticker: str, agent_type: str, raw_content: str,
+                          metadata_json: str, embed: bool = True) -> str:
     """
-    Stores agent output in PostgreSQL database with vector embeddings.
+    Stores agent output in PostgreSQL. When `embed` is True a text-embedding-004
+    vector is generated for semantic search; pass embed=False for raw provenance
+    rows (e.g. SEC/metrics) to store the text with a NULL embedding and skip the
+    embedding API call.
     """
     try:
-        embedding = get_embedding(raw_content)
+        embedding = get_embedding(raw_content) if embed else None
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute('''
