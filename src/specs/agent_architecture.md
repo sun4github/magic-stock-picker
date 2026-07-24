@@ -34,7 +34,7 @@ The application must execute a strict 4-stage sequential workflow managed by a p
         - **Execution Logic:**
         - Instruct the coding agent to load the contents of `research-instructions.md` as the core `system_instruction` for this ADK Agent.
         - The agent must be instructed to strictly synthesize the provided context without hallucinating external data.
-        - **Crucial Addition:** Instruct the agent to append a final section titled `## Final Verdict` that explicitly outputs a `Buy`, `Sell`, or `Hold` suggestion with a one-paragraph justification summarizing the bear case vs. the valuation reality.
+        - **Crucial Addition:** Instruct the agent to append a final section titled `## Final Verdict` that explicitly outputs a `Buy`, `Watch`, or `Avoid` verdict — written for an investor who does **not** currently own the stock (Buy = worth initiating; Watch = not compelling now / watchlist; Avoid = actively unattractive). The verdict must weigh the **bull** case (the Magic Formula value + quality signal that surfaced the stock, passed to the agent as `screen_context`) against the **bear** case from the skeptical research, and state a one-paragraph justification of how they net out. The skeptical research body stays skeptical; only the verdict is balanced.
         - **Output:** Write the final synthesized response to `reports/{Ticker}_Skeptical_Analysis.md`.
 
 ---
@@ -214,42 +214,57 @@ The coding agent must strictly separate sensitive credentials and runtime parame
 
 ## 8. ORCHESTRATOR & WORKFLOW
 
-Construct an ADK `SequentialAgent` graph to execute the Phase B sequential
-handoffs across the sub-agents. The four Phase-B agents (`sec_agent`,
-`metrics_agent`, `search_agent`, `analysis_agent`) hand off natively through
-shared session state via each agent's `output_key`; the Analysis agent reads the
-three upstream outputs through `{sec_data}` / `{metrics_data}` / `{search_data}`
-instruction templating. The per-ticker `ticker` and `company_name` are seeded
-into session state before the graph runs.
+Phase B distinguishes **data-relay** steps from **reasoning** steps:
 
-The per-ticker Phase-B logic is factored into a single reusable routine
-(`analyze_ticker(run_id, ticker, company_name)`) that runs the graph and
-persists the three agent outputs plus the final report. Both execution modes
-call it, so persistence and verdict logic are identical across modes.
+- **Data relays — direct tool calls (no LLM).** SEC 10-K extraction
+  (`fetch_sec_10k_data`) and FMP metrics (`fmp_metrics_extractor`) are
+  deterministic tools, so `analyze_ticker` calls them **directly** and seeds
+  their raw output into session state as `sec_data` / `metrics_data`. This gives
+  100% data fidelity (no LLM summarization) and costs zero tokens.
+- **Reasoning — an ADK `SequentialAgent` graph.** Only the steps that require
+  reasoning are LLM agents: `search_agent` (combines FMP news + Tavily, writing
+  `output_key='search_data'`) then `analysis_agent` (synthesizes the report,
+  reading `{sec_data}` / `{metrics_data}` / `{search_data}` via instruction
+  templating). `ticker`, `company_name`, `sec_data`, and `metrics_data` are
+  seeded into session state before the graph runs.
+
+**Model tiers:** data-gathering historically used a lite/non-thinking model, but
+since SEC/metrics are now direct calls, the two remaining agents run on the
+thinking `gemini-flash-latest` (`search_agent` genuinely combines sources;
+`analysis_agent` reasons over everything).
+
+The per-ticker logic is factored into `analyze_ticker(run_id, ticker,
+company_name)`, which does the direct tool calls, runs the graph, and persists
+the SEC/metrics/search outputs plus the final report. All execution modes call
+it, so persistence and verdict logic are identical across modes.
 
 ### A. Execution Modes
 
 1. **Full pipeline run** (`run_orchestrator`)
-   - Runs Phase A (screener), creates a `pipeline_runs` row for the Top N
-     tickers, then loops `analyze_ticker` over each candidate.
-2. **On-demand single-ticker run** (`run_single_ticker`)
-   - Skips Phase A entirely. Accepts a user-supplied ticker (and optional
-     company name), creates a `pipeline_runs` row containing only that ticker,
-     runs `analyze_ticker` once, and marks the run `COMPLETED`.
-   - The resulting record (pipeline run + agent outputs + final report) is
-     structurally identical to a single candidate inside a full run, so it is
-     fully queryable by `run_id`.
+   - Runs Phase A (screener → writes the rankings CSV), then Phase B over the Top N.
+2. **CSV run — skip Phase A** (`run_from_csv`)
+   - Phase A (the full FMP universe scan) is slow. This mode **reuses the
+     rankings CSV from a previous run**, picks the Top N, and runs Phase B — no
+     screener re-run. Accepts an optional CSV path (defaults to the screener's
+     `magic_formula_rankings_live.csv`).
+3. **On-demand single-ticker run** (`run_single_ticker`)
+   - Skips Phase A entirely for a single user-supplied ticker.
+
+All three create a `pipeline_runs` row and produce records that are structurally
+identical and fully queryable by `run_id`.
 
 ### B. Invocation
 
 ```
 python main.py                    # full pipeline (Phase A screener + Phase B)
+python main.py --from-csv         # skip Phase A; Phase B on top N from the rankings CSV
+python main.py --from-csv PATH    # same, from a specific CSV file
 python main.py TICKER             # on-demand Phase B for one ticker
 python main.py TICKER "Company"   # on-demand with an explicit company name
 ```
 
-`run_single_ticker(ticker, company_name)` is also directly importable for
-driving the on-demand mode from a service endpoint or notebook.
+`run_from_csv(path)` and `run_single_ticker(ticker, company_name)` are also
+directly importable for driving these modes from a service endpoint or notebook.
 
 ### C. Ordering Constraint
 

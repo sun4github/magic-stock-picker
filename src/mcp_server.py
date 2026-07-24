@@ -326,11 +326,20 @@ def initialize_database():
                 run_id UUID REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
                 ticker VARCHAR(10) NOT NULL,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                verdict VARCHAR(10) CHECK (verdict IN ('BUY', 'SELL', 'HOLD')),
+                verdict VARCHAR(10) CHECK (verdict IN ('BUY', 'WATCH', 'AVOID', 'HOLD', 'SELL')),
                 markdown_report TEXT NOT NULL,
                 embedding vector(768)
             )
         ''')
+
+        # The verdict vocabulary is Buy/Watch/Avoid (written for a non-owner). Legacy
+        # BUY/SELL/HOLD values are kept valid so pre-existing rows don't break. This
+        # replaces the original constraint on already-created tables.
+        cur.execute("ALTER TABLE final_reports DROP CONSTRAINT IF EXISTS final_reports_verdict_check")
+        cur.execute(
+            "ALTER TABLE final_reports ADD CONSTRAINT final_reports_verdict_check "
+            "CHECK (verdict IN ('BUY', 'WATCH', 'AVOID', 'HOLD', 'SELL'))"
+        )
 
         cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_ticker ON agent_outputs(ticker)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_final_reports_ticker ON final_reports(ticker)")
@@ -468,13 +477,13 @@ def db_store_agent_output(run_id: str, ticker: str, agent_type: str, raw_content
 def db_store_final_report(run_id: str, ticker: str, verdict: str, markdown_report: str) -> str:
     """
     Stores final report in PostgreSQL database with vector embeddings.
-    The verdict is normalized to the uppercase BUY/SELL/HOLD values required by
-    the final_reports CHECK constraint.
+    The verdict is normalized to the uppercase BUY/WATCH/AVOID values allowed by
+    the final_reports CHECK constraint (WATCH is the neutral default).
     """
     try:
         normalized = (verdict or "").strip().upper()
-        if normalized not in ("BUY", "SELL", "HOLD"):
-            normalized = "HOLD"
+        if normalized not in ("BUY", "WATCH", "AVOID"):
+            normalized = "WATCH"
         embedding = get_embedding(markdown_report)
         conn = get_db_connection()
         cur = conn.cursor()

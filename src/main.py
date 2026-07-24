@@ -7,6 +7,7 @@ import logging
 from datetime import datetime
 import uuid
 import yaml
+import pandas as pd
 from dotenv import load_dotenv
 
 from google.adk.agents import LlmAgent, SequentialAgent
@@ -27,6 +28,8 @@ from mcp_server import (
     db_store_agent_output,
     db_store_final_report
 )
+# The screener's CSV output path (default source for --from-csv mode).
+from magic_formula_starter_screener import OUTPUT_FILENAME
 
 load_dotenv()
 
@@ -71,44 +74,23 @@ instructions_path = os.path.join(os.path.dirname(__file__), "research-instructio
 with open(instructions_path, "r") as f:
     research_instructions = f.read()
 
-# --- 2. AGENT DEFINITIONS (Phase B ADK Sequential Workflow Graph) ---
-# The four Phase-B agents are wired into an ADK SequentialAgent so the handoffs
-# happen natively through shared session state (spec section 8):
-#   sec_agent  -> state['sec_data']
-#   metrics_agent -> state['metrics_data']
-#   search_agent -> state['search_data']
-#   analysis_agent reads all three via {sec_data}/{metrics_data}/{search_data}
-# The per-ticker 'ticker' and 'company_name' are seeded into session state, so
-# each agent's instruction templates them with {ticker} / {company_name}.
+# --- 2. AGENT DEFINITIONS (Phase B) ---
+# Phase B has two kinds of steps:
+#   1. Pure data relays (SEC 10-K, FMP metrics) — deterministic tool calls, so we
+#      invoke the tools DIRECTLY in analyze_ticker rather than wrapping them in an
+#      LLM. That gives 100% data fidelity (no summarization) and costs zero tokens.
+#      Their raw output is seeded into session state as sec_data / metrics_data.
+#   2. Reasoning steps — LLM agents wired into a SequentialAgent that hands off via
+#      shared session state (spec section 8):
+#         search_agent  -> state['search_data']
+#         analysis_agent reads {sec_data}/{metrics_data}/{search_data}
+# ticker, company_name, sec_data and metrics_data are seeded into session state
+# before the graph runs; each agent templates the keys it references.
 APP_NAME = "skeptical_decomposer"
-
-sec_agent = LlmAgent(
-    name="sec_agent",
-    model="gemini-flash-latest",
-    instruction=(
-        "Call the fetch_sec_10k_data tool with ticker '{ticker}' to extract Item 1 "
-        "segment data and >10% customer concentration notes. Return the tool's "
-        "output verbatim without summarizing or omitting content."
-    ),
-    tools=[fetch_sec_10k_data],
-    output_key="sec_data",
-)
-
-metrics_agent = LlmAgent(
-    name="metrics_agent",
-    model="gemini-flash-latest",
-    instruction=(
-        "Call the fmp_metrics_extractor tool with ticker '{ticker}' to fetch 3-year "
-        "metric trends, P/E history, analyst consensus, and competitor data. Return "
-        "the tool's output verbatim."
-    ),
-    tools=[fmp_metrics_extractor],
-    output_key="metrics_data",
-)
 
 search_agent = LlmAgent(
     name="search_agent",
-    model="gemini-flash-latest",
+    model="gemini-flash-latest",  # thinking model: it genuinely combines two sources
     instruction=(
         "Research recent developments and the bear case for {company_name} ({ticker}) "
         "using BOTH of your tools, then combine their outputs:\n"
@@ -127,13 +109,30 @@ search_agent = LlmAgent(
 
 # research_instructions contains no braces, so it is safe to embed in a
 # state-templated instruction. The braces below are ADK state placeholders.
+# The research body stays skeptical (that is the point); only the FINAL VERDICT
+# is rebalanced so it fairly weighs the bull case (the Magic Formula value+quality
+# signal that got the stock onto the list) against the bear case.
 analysis_instruction = (
     research_instructions
-    + "\n\nAdditionally, append a final section titled '## Final Verdict' that "
-    "explicitly outputs a 'Buy', 'Sell', or 'Hold' suggestion with a one-paragraph "
-    "justification summarizing the bear case vs. the valuation reality.\n\n"
-    "Analyze {company_name} (Ticker: {ticker}) using ONLY the collected data below. "
+    + "\n\n## Final Verdict Instructions\n"
+    "Append a final section titled '## Final Verdict'. Before deciding, explicitly "
+    "weigh the BULL case against the BEAR case:\n"
+    "- BULL: the Magic Formula screen surfaced this stock as statistically cheap AND "
+    "high-quality (see MAGIC_FORMULA_CONTEXT below), plus any genuine strengths in "
+    "the metrics/financials.\n"
+    "- BEAR: the risks and skeptical findings established in the research above.\n"
+    "Then output exactly one verdict, written for an investor who does NOT currently "
+    "own the stock:\n"
+    "- 'Buy'   = attractive enough to initiate a position even after this skeptical review.\n"
+    "- 'Watch' = not compelling enough to buy now; worth keeping on a watchlist.\n"
+    "- 'Avoid' = actively unattractive; do not buy.\n"
+    "State it exactly as 'Verdict: Buy', 'Verdict: Watch', or 'Verdict: Avoid', "
+    "followed by a one-paragraph justification that explicitly states how the bull "
+    "and bear cases net out. Do NOT default to the middle — choose 'Watch' only if "
+    "the case is genuinely balanced.\n\n"
+    "Analyze {company_name} (Ticker: {ticker}) using the collected data below. "
     "Do not invent facts; explain complex terms simply.\n\n"
+    "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
     "<SEC_DATA>\n{sec_data}\n</SEC_DATA>\n\n"
     "<METRICS_DATA>\n{metrics_data}\n</METRICS_DATA>\n\n"
     "<SEARCH_DATA>\n{search_data}\n</SEARCH_DATA>\n"
@@ -147,10 +146,11 @@ analysis_agent = LlmAgent(
     output_key="final_report",
 )
 
-# The Phase-B workflow graph: sequential handoffs across the four sub-agents.
+# The Phase-B reasoning graph: sequential handoff search -> analysis. (SEC and
+# metrics are gathered by direct tool calls in analyze_ticker, not by agents.)
 skeptical_pipeline = SequentialAgent(
     name="skeptical_pipeline",
-    sub_agents=[sec_agent, metrics_agent, search_agent, analysis_agent],
+    sub_agents=[search_agent, analysis_agent],
 )
 
 # --- 2b. AGENT EXECUTION HELPER ---
@@ -243,20 +243,29 @@ def _finalize_run(run_id: str, usage: dict, run_label: str) -> None:
     logger.info(f"{run_label} {run_id} COMPLETED. Estimated spend (LLM+Tavily): ${total_cost:.4f}")
 
 
-async def _run_pipeline_async(run_id: str, ticker: str, company_name: str):
-    """Run the SequentialAgent graph for one ticker. Returns (state, usage) where
-    state holds sec_data/metrics_data/search_data/final_report and usage holds the
-    aggregated token counts for this ticker's model calls."""
+async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
+                              sec_data: str, metrics_data: str, screen_context: str):
+    """Run the search->analysis graph for one ticker. Returns (state, usage) where
+    state holds search_data/final_report (plus the seeded sec_data/metrics_data)
+    and usage holds the aggregated token counts for this ticker's model calls."""
     session_service = InMemorySessionService()
     runner = Runner(app_name=APP_NAME, agent=skeptical_pipeline, session_service=session_service)
     session_id = f"{run_id}:{ticker}"
 
-    # Seed per-ticker context so each sub-agent instruction can template it.
+    # Seed per-ticker context. sec_data/metrics_data come from direct tool calls
+    # (100% fidelity); screen_context carries the Magic Formula bull signal. All are
+    # read by the analysis agent via {sec_data}/{metrics_data}/{screen_context}.
     await session_service.create_session(
         app_name=APP_NAME,
         user_id="orchestrator",
         session_id=session_id,
-        state={"ticker": ticker, "company_name": company_name or ticker},
+        state={
+            "ticker": ticker,
+            "company_name": company_name or ticker,
+            "sec_data": sec_data,
+            "metrics_data": metrics_data,
+            "screen_context": screen_context,
+        },
     )
 
     message = types.Content(
@@ -277,7 +286,8 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str):
     return (dict(final.state) if final else {}), usage
 
 
-def run_pipeline(run_id: str, ticker: str, company_name: str):
+def run_pipeline(run_id: str, ticker: str, company_name: str, sec_data: str,
+                 metrics_data: str, screen_context: str):
     """Synchronous wrapper around the Phase-B graph with 429 exponential backoff.
     Returns (state, usage). Note: tokens from a failed attempt before a 429 are
     not counted (the retry re-runs the whole ticker); this is a minor undercount.
@@ -287,7 +297,7 @@ def run_pipeline(run_id: str, ticker: str, company_name: str):
     """
     for attempt in range(MAX_AGENT_RETRIES):
         try:
-            state, usage = asyncio.run(_run_pipeline_async(run_id, ticker, company_name))
+            state, usage = asyncio.run(_run_pipeline_async(run_id, ticker, company_name, sec_data, metrics_data, screen_context))
             time.sleep(INTER_CALL_DELAY_SECONDS)  # gentle throttle between tickers
             return state, usage
         except Exception as e:
@@ -315,40 +325,47 @@ def _check_db(result: str, context: str) -> None:
 
 # --- 3. PHASE B: PER-TICKER ANALYSIS (shared by full + on-demand runs) ---
 def _extract_verdict(report_text: str) -> str:
-    """Extract BUY/SELL/HOLD from the report's '## Final Verdict' section.
+    """Extract BUY/WATCH/AVOID from the report's '## Final Verdict' section.
 
     Anchors on the explicit 'Verdict: X' declaration rather than a naive
     substring search — the justification prose often mentions the word 'buy'
-    when weighing the bull case, which would misclassify a Hold.
+    when weighing the bull case, which would misclassify the verdict.
     """
     section = report_text.split("## Final Verdict")[-1]
-    m = re.search(r"verdict[^A-Za-z]{0,12}(buy|sell|hold)", section, re.IGNORECASE)
+    m = re.search(r"verdict[^A-Za-z]{0,12}(buy|watch|avoid)", section, re.IGNORECASE)
     if m:
         return m.group(1).upper()
     lowered = section.lower()
-    positions = {w: lowered.find(w) for w in ("buy", "sell", "hold") if lowered.find(w) != -1}
-    return min(positions, key=positions.get).upper() if positions else "HOLD"
+    positions = {w: lowered.find(w) for w in ("buy", "watch", "avoid") if lowered.find(w) != -1}
+    return min(positions, key=positions.get).upper() if positions else "WATCH"
 
 
-def analyze_ticker(run_id: str, ticker: str, company_name: str) -> dict:
+def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: str = "") -> dict:
     """Run the Phase-B SequentialAgent graph for one ticker and persist its
     outputs and final report. Returns the ticker's token-usage dict (zero usage
     if the pipeline failed).
 
+    `screen_context` carries the Magic Formula bull signal (rank / ROC / earnings
+    yield) so the verdict can weigh it against the bear case. Empty for tickers
+    that did not come through the screen (on-demand runs).
+
     Assumes the parent pipeline_runs row for `run_id` already exists (the
     agent_outputs/final_reports tables have a FK onto it).
     """
-    logger.info(f"[{ticker}] Running skeptical decomposer pipeline...")
+    logger.info(f"[{ticker}] Gathering SEC + metrics (direct tool calls)...")
+    # Pure data relays: call the deterministic tools directly (100% fidelity, 0 tokens).
+    sec_data = fetch_sec_10k_data(ticker)
+    metrics_data = fmp_metrics_extractor(ticker)
+
+    logger.info(f"[{ticker}] Running search + analysis graph...")
     try:
-        state, usage = run_pipeline(run_id, ticker, company_name)
+        state, usage = run_pipeline(run_id, ticker, company_name, sec_data, metrics_data, screen_context)
     except Exception as e:
         logger.error(f"[{ticker}] Skipping after pipeline failure: {e}")
         return _new_usage()
 
     _log_usage(ticker, usage)
 
-    sec_data = state.get("sec_data", "") or ""
-    metrics_data = state.get("metrics_data", "") or ""
     search_data = state.get("search_data", "") or ""
     report_text = state.get("final_report", "") or ""
 
@@ -373,15 +390,47 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str) -> dict:
 
 
 # --- 4. ORCHESTRATOR WORKFLOWS ---
+def _format_screen_context(candidate: dict) -> str:
+    """Turn a Magic Formula candidate row into the bull-case context the analysis
+    agent weighs against the bear case."""
+    return (
+        "This stock was surfaced by a Magic Formula screen (Joel Greenblatt's value + "
+        "quality strategy). A high rank means it is statistically BOTH cheap (high "
+        "earnings yield) AND high-quality (high return on capital) — this is the "
+        "bullish starting point that must be weighed against the bear case.\n"
+        f"- Magic Formula rank: #{candidate.get('Final_Rank')} (lower is better)\n"
+        f"- Return on Capital (quality signal): {candidate.get('ROC_Pct')}\n"
+        f"- Earnings Yield (cheapness signal): {candidate.get('EY_Pct')}\n"
+        f"- Combined Magic Formula score: {candidate.get('MagicFormula_Score')}"
+    )
+
+
+def _run_phase_b(top_candidates: list, source_label: str):
+    """Create a pipeline run and analyze each candidate through Phase B.
+    Shared by the full-pipeline and CSV modes."""
+    run_id = str(uuid.uuid4())
+    logger.info(f"Starting Workflow Run: {run_id} (candidates from {source_label})")
+
+    # Parent pipeline_runs row BEFORE any agent_outputs/final_reports inserts —
+    # those tables have a foreign key onto pipeline_runs(run_id).
+    tickers = [c.get("Symbol") for c in top_candidates if c.get("Symbol")]
+    _check_db(db_create_pipeline_run(run_id, tickers), "create pipeline run")
+
+    run_usage = _new_usage()
+    for idx, candidate in enumerate(top_candidates):
+        ticker = candidate.get("Symbol")
+        company_name = candidate.get("CompanyName")
+        logger.info(f"--- Processing {idx+1}/{len(top_candidates)}: {ticker} ({company_name}) ---")
+        screen_context = _format_screen_context(candidate)
+        _merge_usage(run_usage, analyze_ticker(run_id, ticker, company_name, screen_context))
+
+    _finalize_run(run_id, run_usage, "Workflow Run")
+
+
 def run_orchestrator():
     """Full pipeline: Phase A screener -> Phase B analysis over the Top N."""
-    run_id = str(uuid.uuid4())
-    logger.info(f"Starting Workflow Run: {run_id}")
-
-    # Phase A: Screener
-    # We invoke the screener tool directly (deterministic JSON) rather than via
-    # the LLM screener_agent — the agent only wraps this same tool, and going
-    # direct avoids running the full FMP universe scan (and an LLM call) twice.
+    # Phase A: Screener. We invoke the screener tool directly (deterministic JSON);
+    # this also writes the rankings CSV that --from-csv can reuse later.
     logger.info("Executing Phase A: Screener...")
     try:
         top_candidates = json.loads(run_magic_formula_screener())
@@ -391,21 +440,30 @@ def run_orchestrator():
 
     top_candidates = top_candidates[:top_n]
     logger.info(f"Phase A Complete. Retrieved {len(top_candidates)} candidates.")
+    _run_phase_b(top_candidates, "Phase A screener")
 
-    # Create the parent pipeline_runs row BEFORE any agent_outputs/final_reports
-    # inserts — those tables have a foreign key onto pipeline_runs(run_id).
-    tickers = [c.get("Symbol") for c in top_candidates if c.get("Symbol")]
-    _check_db(db_create_pipeline_run(run_id, tickers), "create pipeline run")
 
-    # Phase B: Skeptical Decomposer Analysis (ADK SequentialAgent graph per ticker)
-    run_usage = _new_usage()
-    for idx, candidate in enumerate(top_candidates):
-        ticker = candidate.get("Symbol")
-        company_name = candidate.get("CompanyName")
-        logger.info(f"--- Processing {idx+1}/{len(top_candidates)}: {ticker} ({company_name}) ---")
-        _merge_usage(run_usage, analyze_ticker(run_id, ticker, company_name))
+def run_from_csv(csv_path: str = None):
+    """Skip Phase A: load the screener's rankings CSV from a previous run and run
+    Phase B over the top N. Phase A (the full FMP universe scan) is slow, so this
+    reuses its output when you just want to (re)run the analysis."""
+    csv_path = csv_path or OUTPUT_FILENAME
+    logger.info(f"Skipping Phase A. Loading candidates from '{csv_path}'...")
+    try:
+        df = pd.read_csv(csv_path)
+    except Exception as e:
+        logger.error(f"Failed to read CSV '{csv_path}': {e}")
+        return
 
-    _finalize_run(run_id, run_usage, "Workflow Run")
+    if "Final_Rank" in df.columns:
+        df = df.sort_values("Final_Rank")
+    top_candidates = df.head(top_n).to_dict(orient="records")
+    if not top_candidates:
+        logger.error(f"No candidates found in '{csv_path}'.")
+        return
+
+    logger.info(f"Loaded top {len(top_candidates)} candidates from CSV.")
+    _run_phase_b(top_candidates, f"CSV '{csv_path}'")
 
 
 def run_single_ticker(ticker: str, company_name: str = None):
@@ -419,20 +477,43 @@ def run_single_ticker(ticker: str, company_name: str = None):
     # Parent pipeline_runs row for just this company (FK target for outputs).
     _check_db(db_create_pipeline_run(run_id, [ticker]), "create pipeline run")
 
-    usage = analyze_ticker(run_id, ticker, company_name)
+    # On-demand tickers did not come through the Magic Formula screen, so there is
+    # no value/quality signal to weigh — tell the analysis agent so explicitly.
+    screen_context = (
+        "This ticker was analyzed on demand and did NOT come through the Magic Formula "
+        "screen, so there is no screen-based value/quality (bull) signal available. "
+        "Base the verdict on the fundamentals and research below."
+    )
+    usage = analyze_ticker(run_id, ticker, company_name, screen_context)
 
     _finalize_run(run_id, usage, "On-Demand Run")
 
 
 if __name__ == "__main__":
-    import sys
+    import argparse
 
-    # Usage:
-    #   python main.py                    -> full pipeline (Phase A screener + Phase B)
-    #   python main.py TICKER [Company]   -> on-demand Phase B for one ticker
-    if len(sys.argv) > 1:
-        arg_ticker = sys.argv[1]
-        arg_company = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else None
-        run_single_ticker(arg_ticker, arg_company)
+    parser = argparse.ArgumentParser(
+        description="Magic Formula Skeptical Decomposer",
+        epilog=(
+            "Modes:\n"
+            "  python main.py                  full pipeline (Phase A screener + Phase B)\n"
+            "  python main.py --from-csv       skip Phase A; run Phase B on top N from the rankings CSV\n"
+            "  python main.py --from-csv PATH  same, from a specific CSV file\n"
+            "  python main.py TICKER [Company] on-demand Phase B for one ticker"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("ticker", nargs="?", help="On-demand Phase B for a single ticker (skips Phase A)")
+    parser.add_argument("company", nargs="?", help="Optional company name for the single-ticker run")
+    parser.add_argument(
+        "--from-csv", nargs="?", const=OUTPUT_FILENAME, metavar="PATH", default=None,
+        help=f"Skip Phase A; read candidates from the screener CSV (default: {OUTPUT_FILENAME}) and run Phase B on the top N",
+    )
+    args = parser.parse_args()
+
+    if args.from_csv:
+        run_from_csv(args.from_csv)
+    elif args.ticker:
+        run_single_ticker(args.ticker, args.company)
     else:
         run_orchestrator()

@@ -20,17 +20,17 @@ agents:
 
   sec_agent:
     name: "SEC_Filings_Data_Agent"
-    model: "gemini-2.5-flash"
+    model: "gemini-flash-lite-latest"   # non-thinking lite tier (data gathering)
     sec_user_agent: "YourName FinancialAnalysis/1.0 (contact@example.com)"
 
   metrics_agent:
     name: "Quantitative_Metrics_Agent"
-    model: "gemini-2.5-flash"
+    model: "gemini-flash-lite-latest"   # non-thinking lite tier (data gathering)
     fmp_api_key_env: "FMP_API_KEY"
 
   bear_search_agent:
     name: "Search_And_Bear_Case_Agent"
-    model: "gemini-2.5-flash"
+    model: "gemini-flash-lite-latest"   # non-thinking lite tier (data gathering)
     # Two complementary sources: FMP for hard factual news, Tavily for the
     # qualitative open-web bear case (see agent_architecture.md Section 2C).
     news_provider: "fmp"                      # ticker-tagged financial news
@@ -47,7 +47,7 @@ tools:
 
 analysis_agent:
     name: "Analysis_And_Composition_Agent"
-    model: "gemini-2.5-pro" # Note: Recommend a heavier reasoning model here for synthesis
+    model: "gemini-flash-latest" # Thinking model retained here for synthesis reasoning
     instructions_file: "research-instructions.md"
     output_format: "markdown"
 

@@ -37,7 +37,9 @@ CREATE TABLE final_reports (
     run_id UUID REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
     ticker VARCHAR(10) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    verdict VARCHAR(10) CHECK (verdict IN ('BUY', 'SELL', 'HOLD')),
+    -- Verdict vocabulary is Buy/Watch/Avoid (written for a non-owner deciding whether
+    -- to initiate). Legacy BUY/SELL/HOLD kept valid for historical rows.
+    verdict VARCHAR(10) CHECK (verdict IN ('BUY', 'WATCH', 'AVOID', 'HOLD', 'SELL')),
     markdown_report TEXT NOT NULL,
     embedding vector(768)
 );

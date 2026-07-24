@@ -30,7 +30,7 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     Then the "Analysis & Composition Agent" must adopt the persona of a skeptical decomposer
     And it must generate a structured Markdown report answering every question in "research-instructions.md"
     And it must enforce the rule to not invent facts and explain complex terms simply
-    And the final section of the report must explicitly state a "Buy", "Sell", or "Hold" suggestion based on the skeptical thesis
+    And the final section of the report must explicitly state a "Buy", "Watch", or "Avoid" verdict (written for a non-owner) that weighs the Magic Formula bull signal against the skeptical bear case
     And export the final report to a local Markdown file
 
  Scenario: Persist Intermediate Outputs and Final Report to PostgreSQL
@@ -40,6 +40,14 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     And when the "Analysis & Composition Agent" completes the research report
     Then the Orchestrator executes the MCP tool "db_store_final_report" with the verdict and markdown body
     And verifies the record is saved with a non-null vector embedding
+
+  Scenario: Run Phase B from an existing screener CSV (skip Phase A)
+    Given a previous run wrote the rankings CSV "magic_formula_rankings_live.csv"
+    And Phase A (the full FMP universe scan) is slow to repeat
+    When the Orchestrator is invoked with the --from-csv option
+    Then it loads the ranked candidates from the CSV instead of running the screener
+    And it selects the Top N (top_n_candidates from config.yaml)
+    And it runs Phase B over those candidates, persisting a normal pipeline run
 
   Scenario: Execute On-Demand Skeptical Analysis for a Single Ticker
     Given a user supplies a specific stock ticker directly, bypassing Phase A screening
