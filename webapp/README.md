@@ -6,6 +6,10 @@ PostgreSQL database the agent writes to.
 
 ## What it does
 
+It offers **two ways to browse the same reports**, switchable at the top of the page.
+
+### Browse by ticker
+
 1. Pick a **ticker** — an alphabetical dropdown / type-ahead text box (any ticker
    that has at least one analysis run).
 2. Pick a **pipeline run** — sorted newest-first, with the run date shown.
@@ -13,8 +17,21 @@ PostgreSQL database the agent writes to.
    rendered as markdown, with the **recommendation** (Buy / Watch / Avoid) badge.
 4. **Download** any report as a `.md` file to the viewing device.
 
+### Browse by pipeline run
+
+1. Pick a **pipeline run** — sorted newest-first, with the run date and ticker
+   count shown.
+2. See **every ticker analyzed in that run**, listed A–Z, each with its
+   **Buy / Watch / Avoid** recommendation badge and a summary tally.
+3. Click **View reports** on any ticker to open its Bear / Bull / Final reports
+   for that specific run (a "Back to run" link returns to the list).
+4. **Download CSV** — all tickers and their recommendations for the run
+   (`Ticker,Company,Recommendation`) to the viewing device.
+
 Data comes from the `ticker_runs`, `agent_outputs`, and `final_reports` tables —
-the app is read-only and never modifies the database.
+the app is read-only and never modifies the database. The "by pipeline run" view
+is `ticker_runs` grouped by `run_id`; the per-ticker view is `ticker_runs`
+filtered by `ticker`.
 
 ## Requirements
 

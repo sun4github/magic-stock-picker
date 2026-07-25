@@ -33,6 +33,12 @@
       background: var(--panel); border: 1px solid var(--border);
       border-radius: 12px; padding: 16px; margin-bottom: 18px;
     }
+    .modes { display: inline-flex; gap: 4px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 4px; margin-bottom: 18px; }
+    .mode {
+      padding: 8px 16px; cursor: pointer; border: none; border-radius: 7px;
+      color: var(--muted); font-weight: 600; font-size: 0.9rem; background: transparent;
+    }
+    .mode.active { color: #fff; background: var(--accent); }
     .field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 220px; }
     .field label { font-size: 0.75rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
     input, select {
@@ -68,6 +74,23 @@
     .btn:hover { border-color: var(--accent); color: var(--accent); }
     .muted { color: var(--muted); }
     .hint { color: var(--muted); font-size: 0.85rem; padding: 40px 0; text-align: center; }
+    /* per-run decisions table */
+    .run-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+    .run-head .label { color: var(--muted); font-size: 0.85rem; }
+    .run-head .spacer { flex: 1; }
+    .decisions {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+    }
+    .decision {
+      display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+      border-top: 1px solid var(--border); flex-wrap: wrap;
+    }
+    .decision:first-child { border-top: none; }
+    .decision .sym { font-weight: 700; font-size: 0.98rem; min-width: 62px; }
+    .decision .co { color: var(--muted); font-size: 0.88rem; flex: 1 1 140px; }
+    .decision .badge { flex-shrink: 0; }
+    .decision .view { margin-left: auto; }
+    .back { background: transparent; border: none; color: var(--accent); cursor: pointer; font-weight: 600; font-size: 0.9rem; padding: 0; }
     /* markdown content */
     .md h1, .md h2, .md h3 { line-height: 1.25; margin: 1.3em 0 .5em; }
     .md h1 { font-size: 1.5rem; } .md h2 { font-size: 1.25rem; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
@@ -86,26 +109,57 @@
 <body>
   <header>
     <h1>📈 Magic Stock Picker — Report Viewer</h1>
-    <p>Browse Bear / Bull / Final reports for any analyzed ticker.</p>
+    <p>Browse Bear / Bull / Final reports by ticker, or view a whole pipeline run's decisions.</p>
   </header>
 
   <div class="wrap">
-    <div class="controls">
-      <div class="field">
-        <label for="ticker">Ticker (type 3+ letters or pick)</label>
-        <input id="ticker" list="tickerlist" placeholder="e.g. BKNG" autocomplete="off">
-        <datalist id="tickerlist"></datalist>
+    <div class="modes">
+      <button class="mode active" data-mode="ticker">By ticker</button>
+      <button class="mode" data-mode="run">By pipeline run</button>
+    </div>
+
+    <!-- Mode: by ticker -->
+    <div id="tickerMode">
+      <div class="controls">
+        <div class="field">
+          <label for="ticker">Ticker (type 3+ letters or pick)</label>
+          <input id="ticker" list="tickerlist" placeholder="e.g. BKNG" autocomplete="off">
+          <datalist id="tickerlist"></datalist>
+        </div>
+        <div class="field">
+          <label for="run">Pipeline run (newest first)</label>
+          <select id="run" disabled><option>Select a ticker first…</option></select>
+        </div>
       </div>
-      <div class="field">
-        <label for="run">Pipeline run (newest first)</label>
-        <select id="run" disabled><option>Select a ticker first…</option></select>
+    </div>
+
+    <!-- Mode: by pipeline run -->
+    <div id="runMode" style="display:none;">
+      <div class="controls">
+        <div class="field">
+          <label for="pipelineRun">Pipeline run (newest first)</label>
+          <select id="pipelineRun"><option>Loading runs…</option></select>
+        </div>
+      </div>
+      <div id="runList" style="display:none;">
+        <div class="run-head">
+          <span class="label">Tickers analyzed in this run (A–Z):</span>
+          <span id="runSummary" class="muted"></span>
+          <span class="spacer"></span>
+          <a id="downloadCsv" class="btn" href="#">⬇ Download CSV</a>
+        </div>
+        <div class="decisions" id="decisions"></div>
       </div>
     </div>
 
     <div id="viewer" style="display:none;">
+      <div id="backRow" style="display:none; margin-bottom:12px;">
+        <button id="backToRun" class="back">← Back to run</button>
+      </div>
       <div class="verdict-row">
         <span class="label">Recommendation:</span>
         <span id="verdict" class="badge na">—</span>
+        <span id="ticmeta" class="muted"></span>
         <span id="runmeta" class="muted"></span>
       </div>
       <div class="tabs">
@@ -122,11 +176,15 @@
     </div>
 
     <div id="empty" class="hint">Pick a ticker to view its analysis runs.</div>
+    <div id="runEmpty" class="hint" style="display:none;">Pick a pipeline run to see its decisions.</div>
   </div>
 
   <script>
     const $ = (id) => document.getElementById(id);
-    const state = { ticker: null, runId: null, kind: "final", data: null, tickers: new Set() };
+    const state = {
+      mode: "ticker", ticker: null, runId: null, kind: "final",
+      data: null, tickers: new Set(), pipelineRunsLoaded: false,
+    };
 
     async function loadTickers() {
       const res = await fetch("/api/tickers");
@@ -172,6 +230,11 @@
       loadReport(ticker, runs[0].run_id, runs[0].run_date);  // auto-load newest
     }
 
+    function verdictClass(v) {
+      v = (v || "").toUpperCase();
+      return "badge " + (["BUY", "WATCH", "AVOID"].includes(v) ? v.toLowerCase() : "na");
+    }
+
     async function loadReport(ticker, runId, runDate) {
       state.ticker = ticker; state.runId = runId;
       const res = await fetch("/api/report?ticker=" + encodeURIComponent(ticker) + "&run_id=" + encodeURIComponent(runId));
@@ -180,10 +243,17 @@
       const v = (state.data.verdict || "").toUpperCase();
       const badge = $("verdict");
       badge.textContent = v || "—";
-      badge.className = "badge " + (["BUY","WATCH","AVOID"].includes(v) ? v.toLowerCase() : "na");
+      badge.className = verdictClass(v);
+      // In run mode the run is fixed; lead with the ticker. In ticker mode, lead with the run date.
+      $("ticmeta").textContent = state.mode === "run" ? "· " + ticker : "";
       $("runmeta").textContent = runDate ? "· run " + fmtDate(runDate) : "";
+      $("backRow").style.display = state.mode === "run" ? "block" : "none";
+      state.kind = "final";
+      document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.kind === "final"));
+      $("runList").style.display = "none";
       $("viewer").style.display = "block";
       $("empty").style.display = "none";
+      $("runEmpty").style.display = "none";
       renderTab();
     }
 
@@ -195,7 +265,82 @@
         "&run_id=" + encodeURIComponent(state.runId) + "&kind=" + state.kind;
     }
 
+    // ---- Browse by pipeline run ----
+    async function loadPipelineRuns() {
+      const res = await fetch("/api/pipeline-runs");
+      const runs = await res.json();
+      const sel = $("pipelineRun");
+      sel.innerHTML = "";
+      if (!runs.length) {
+        sel.innerHTML = "<option>No pipeline runs found</option>";
+        sel.disabled = true;
+        return;
+      }
+      runs.forEach(r => {
+        const o = document.createElement("option");
+        o.value = r.run_id;
+        o.dataset.date = r.run_date || "";
+        const n = r.ticker_count;
+        o.textContent = fmtDate(r.run_date) + "  —  " + n + (n === 1 ? " ticker" : " tickers");
+        sel.appendChild(o);
+      });
+      sel.disabled = false;
+      state.pipelineRunsLoaded = true;
+      loadRunDecisions(runs[0].run_id);  // auto-load newest
+    }
+
+    async function loadRunDecisions(runId) {
+      state.runId = runId;
+      const res = await fetch("/api/pipeline-run?run_id=" + encodeURIComponent(runId));
+      const rows = await res.json();
+      const box = $("decisions");
+      box.innerHTML = "";
+      const counts = { BUY: 0, WATCH: 0, AVOID: 0 };
+      rows.forEach(r => {
+        const v = (r.verdict || "").toUpperCase();
+        if (v in counts) counts[v]++;
+        const row = document.createElement("div");
+        row.className = "decision";
+        const co = r.company_name && r.company_name !== r.ticker ? r.company_name : "";
+        row.innerHTML =
+          '<span class="sym">' + r.ticker + '</span>' +
+          '<span class="co">' + co + '</span>' +
+          '<span class="' + verdictClass(v) + '">' + (v || "—") + '</span>';
+        const btn = document.createElement("button");
+        btn.className = "btn view";
+        btn.textContent = "View reports →";
+        btn.addEventListener("click", () => loadReport(r.ticker, runId, r.run_date));
+        row.appendChild(btn);
+        box.appendChild(row);
+      });
+      $("runSummary").textContent =
+        rows.length + " tickers · " + counts.BUY + " Buy / " + counts.WATCH + " Watch / " + counts.AVOID + " Avoid";
+      $("downloadCsv").href = "/download-run?run_id=" + encodeURIComponent(runId);
+      $("runList").style.display = "block";
+      $("viewer").style.display = "none";
+      $("runEmpty").style.display = "none";
+    }
+
+    function setMode(mode) {
+      state.mode = mode;
+      document.querySelectorAll(".mode").forEach(m => m.classList.toggle("active", m.dataset.mode === mode));
+      $("tickerMode").style.display = mode === "ticker" ? "block" : "none";
+      $("runMode").style.display = mode === "run" ? "block" : "none";
+      $("viewer").style.display = "none";
+      $("empty").style.display = mode === "ticker" ? "block" : "none";
+      $("runEmpty").style.display = mode === "run" && !state.pipelineRunsLoaded ? "block" : "none";
+      if (mode === "run" && !state.pipelineRunsLoaded) loadPipelineRuns();
+    }
+
     // events
+    document.querySelectorAll(".mode").forEach(btn => {
+      btn.addEventListener("click", () => setMode(btn.dataset.mode));
+    });
+    $("pipelineRun").addEventListener("change", (e) => loadRunDecisions(e.target.value));
+    $("backToRun").addEventListener("click", () => {
+      $("viewer").style.display = "none";
+      $("runList").style.display = "block";
+    });
     $("ticker").addEventListener("change", (e) => {
       const t = e.target.value.trim().toUpperCase();
       e.target.value = t;

@@ -285,7 +285,11 @@ run finishes.
 
 A separate, **read-only** web application (`webapp/`) lets a user browse stored
 reports. It is decoupled from the agent — it only reads the shared PostgreSQL
-database — and is designed to run on a Raspberry Pi.
+database — and is designed to run on a Raspberry Pi. It offers **two browse
+modes** over the same data (see `specs/webapp.feature`):
+
+1. **By ticker** — drill into one company's history across runs.
+2. **By pipeline run** — see every ticker's decision from a single run at once.
 
 ### A. Stack & Deployment
 - **Flask** (Python) — lightweight, reuses the `psycopg2` stack, no build step.
@@ -297,17 +301,37 @@ database — and is designed to run on a Raspberry Pi.
   (see `webapp/README.md` and the root `README.md`).
 
 ### B. Data Flow
-The UI is driven by the `ticker_runs` index table; report bodies are fetched
-on demand from `agent_outputs` (`BEAR_CASE` / `BULL_CASE`) and `final_reports`:
+The UI is driven by the `ticker_runs` index table (which carries both the
+per-ticker and per-run views — no report text is duplicated there); report
+bodies are fetched on demand from `agent_outputs` (`BEAR_CASE` / `BULL_CASE`)
+and `final_reports`:
 
+**By ticker**
 - `GET /api/tickers` → distinct tickers (alphabetical; optional `?q=` substring).
 - `GET /api/runs?ticker=` → that ticker's runs, newest first, with `run_date` + `verdict`.
+
+**By pipeline run**
+- `GET /api/pipeline-runs` → every run, newest first, each with its `run_date`,
+  `ticker_count`, and a Buy/Watch/Avoid breakdown (`GROUP BY run_id` over
+  `ticker_runs`).
+- `GET /api/pipeline-run?run_id=` → all tickers in that run, alphabetical, each
+  with `company_name` + `verdict`.
+- `GET /download-run?run_id=` → the run's tickers + recommendations as a
+  `.csv` attachment (`Ticker,Company,Recommendation`).
+
+**Shared (report drill-down + download)**
 - `GET /api/report?ticker=&run_id=` → server-rendered HTML for the bear, bull, and
   final reports plus the verdict.
 - `GET /download?ticker=&run_id=&kind=bear|bull|final` → the raw markdown as a
   `.md` attachment for the viewing device.
 
-### C. User Flow
-Pick a ticker (alphabetical dropdown / 3-letter type-ahead) → pick a run (sorted
-by date, date shown) → view Bear / Bull / Final reports as rendered markdown with
-the Buy/Watch/Avoid recommendation badge → optionally download any report.
+### C. User Flows
+- **By ticker:** pick a ticker (alphabetical dropdown / 3-letter type-ahead) →
+  pick a run (sorted by date, date shown) → view Bear / Bull / Final reports as
+  rendered markdown with the Buy/Watch/Avoid recommendation badge → optionally
+  download any report.
+- **By pipeline run:** pick a run (sorted by date, newest first, ticker count
+  shown) → see every analyzed ticker A–Z with its Buy/Watch/Avoid badge and a
+  "View reports" link into that ticker's reports **for that run** → optionally
+  download the whole run's decisions as CSV. The report drill-down reuses the
+  shared viewer (a "Back to run" control returns to the decisions list).

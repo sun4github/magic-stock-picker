@@ -44,15 +44,6 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     Then the Orchestrator executes "db_store_final_report" with the Buy/Watch/Avoid verdict and markdown body
     And it executes "db_store_ticker_run" to index the run under the ticker for the web UI
 
-  Scenario: Browse reports in the web UI (report viewer)
-    Given the web app is running and connected to the database via its own ".env"
-    When a user selects a ticker (alphabetical dropdown or 3-letter type-ahead search)
-    Then the app lists that ticker's pipeline runs from "ticker_runs", sorted by date (date shown)
-    And when the user selects a run
-    Then the app displays the Bear Case, Bull Case, and Final Report as rendered markdown
-    And it shows the Buy/Watch/Avoid recommendation for that run
-    And it offers a download of each report as a markdown (.md) file to the viewing device
-
   Scenario: Run Phase B from an existing screener CSV (skip Phase A)
     Given a previous run wrote the rankings CSV "magic_formula_rankings_live.csv"
     And Phase A (the full FMP universe scan) is slow to repeat

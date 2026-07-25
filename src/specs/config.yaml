@@ -58,6 +58,19 @@ database:
   embedding_model: "text-embedding-004"
   vector_dimension: 768
 
+# Read-only Flask report viewer (webapp/). Decoupled from the agent: it reads its
+# OWN webapp/.env at runtime (DATABASE_URL, PORT) — this block documents its shape,
+# it is not loaded by the app. See specs/webapp.feature & agent_architecture.md §9.
+webapp:
+  default_port: 8000                        # webapp/.env PORT overrides; binds 0.0.0.0
+  render_markdown: "server"                 # python-markdown -> HTML, no CDN/JS dep
+  browse_modes:
+    - name: "by_ticker"                     # pick ticker -> pick run -> Bear/Bull/Final
+      source_table: "ticker_runs"
+    - name: "by_pipeline_run"               # pick run -> all tickers A-Z with verdicts
+      source_table: "ticker_runs"           # grouped by run_id
+      csv_export: true                       # Ticker,Company,Recommendation download
+
 # LLM pricing used to estimate per-run spend from actual token usage.
 # Update these to the current Google AI pricing for your model/tier (USD per 1M tokens).
 llm_pricing:

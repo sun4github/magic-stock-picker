@@ -1,11 +1,18 @@
 """
 Magic Stock Picker — Report Viewer
 A small Flask web app (designed to run on a Raspberry Pi) that reads the pipeline's
-PostgreSQL database and lets you browse per-ticker pipeline runs and their Bear /
-Bull / Final reports, rendered as markdown with a download option.
+PostgreSQL database. It supports two ways to browse the same stored reports:
+
+  1. By ticker  — pick a ticker, pick one of its runs, read the Bear / Bull /
+     Final reports (rendered markdown) with a download option.
+  2. By pipeline run — pick a run (newest first), see every ticker analyzed in
+     that run with its Buy / Watch / Avoid recommendation, drill into any
+     ticker's reports, and download the whole run's decisions as CSV.
 
 Reads DATABASE_URL from a local .env file (see .env.example). Read-only.
 """
+import csv
+import io
 import os
 
 import markdown
@@ -89,6 +96,91 @@ def api_runs():
         d["run_date"] = d["run_date"].isoformat() if d["run_date"] else None
         out.append(d)
     return jsonify(out)
+
+
+@app.route("/api/pipeline-runs")
+def api_pipeline_runs():
+    """All pipeline runs, newest first. One row per run with its date and a
+    verdict breakdown, so the run picker can show 'N tickers' at a glance."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """SELECT run_id::text AS run_id,
+                  MAX(run_date) AS run_date,
+                  COUNT(*) AS ticker_count,
+                  COUNT(*) FILTER (WHERE UPPER(verdict) = 'BUY')   AS buy_count,
+                  COUNT(*) FILTER (WHERE UPPER(verdict) = 'WATCH') AS watch_count,
+                  COUNT(*) FILTER (WHERE UPPER(verdict) = 'AVOID') AS avoid_count
+           FROM ticker_runs
+           GROUP BY run_id
+           ORDER BY MAX(run_date) DESC"""
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["run_date"] = d["run_date"].isoformat() if d["run_date"] else None
+        out.append(d)
+    return jsonify(out)
+
+
+def _fetch_run_tickers(run_id: str):
+    """Return every ticker in one pipeline run, alphabetical, with its verdict."""
+    conn = get_conn()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    cur.execute(
+        """SELECT ticker, company_name, verdict, run_date
+           FROM ticker_runs WHERE run_id = %s ORDER BY ticker""",
+        (run_id,),
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+@app.route("/api/pipeline-run")
+def api_pipeline_run():
+    """Tickers analyzed in a single pipeline run, alphabetical, each with its
+    Buy/Watch/Avoid recommendation (drives the per-run decisions table)."""
+    run_id = request.args.get("run_id")
+    if not run_id:
+        return jsonify([])
+    rows = _fetch_run_tickers(run_id)
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["run_date"] = d["run_date"].isoformat() if d["run_date"] else None
+        out.append(d)
+    return jsonify(out)
+
+
+@app.route("/download-run")
+def download_run():
+    """Download every ticker + recommendation for one pipeline run as CSV."""
+    run_id = request.args.get("run_id")
+    if not run_id:
+        abort(400)
+    rows = _fetch_run_tickers(run_id)
+    if not rows:
+        abort(404)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["Ticker", "Company", "Recommendation"])
+    for r in rows:
+        writer.writerow(
+            [r["ticker"], r["company_name"] or "", (r["verdict"] or "").upper()]
+        )
+    run_date = rows[0]["run_date"]
+    stamp = run_date.strftime("%Y%m%d") if run_date else "run"
+    fname = f"pipeline_run_{stamp}.csv"
+    return Response(
+        buf.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 def _fetch_reports(run_id: str, ticker: str):
