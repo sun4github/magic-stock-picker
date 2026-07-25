@@ -20,7 +20,8 @@ It offers **two ways to browse the same reports**, switchable at the top of the 
 ### Browse by pipeline run
 
 1. Pick a **pipeline run** — sorted newest-first, with the run date and ticker
-   count shown.
+   count shown. Only **multi-ticker** runs appear here (value-discovery screens);
+   single-ticker on-demand one-offs are excluded — browse those under "by ticker".
 2. See **every ticker analyzed in that run**, listed A–Z, each with its
    **Buy / Watch / Avoid** recommendation badge and a summary tally.
 3. Click **View reports** on any ticker to open its Bear / Bull / Final reports

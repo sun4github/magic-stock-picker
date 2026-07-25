@@ -100,8 +100,11 @@ def api_runs():
 
 @app.route("/api/pipeline-runs")
 def api_pipeline_runs():
-    """All pipeline runs, newest first. One row per run with its date and a
-    verdict breakdown, so the run picker can show 'N tickers' at a glance."""
+    """Multi-ticker pipeline runs, newest first. One row per run with its date and
+    a verdict breakdown, so the run picker can show 'N tickers' at a glance.
+
+    Single-ticker runs are on-demand one-offs (not value-discovery screens), so
+    they are excluded here (HAVING COUNT(*) > 1) per specs/webapp.feature."""
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
@@ -113,6 +116,7 @@ def api_pipeline_runs():
                   COUNT(*) FILTER (WHERE UPPER(verdict) = 'AVOID') AS avoid_count
            FROM ticker_runs
            GROUP BY run_id
+           HAVING COUNT(*) > 1
            ORDER BY MAX(run_date) DESC"""
     )
     rows = cur.fetchall()

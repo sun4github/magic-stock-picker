@@ -68,7 +68,8 @@ webapp:
     - name: "by_ticker"                     # pick ticker -> pick run -> Bear/Bull/Final
       source_table: "ticker_runs"
     - name: "by_pipeline_run"               # pick run -> all tickers A-Z with verdicts
-      source_table: "ticker_runs"           # grouped by run_id
+      source_table: "ticker_runs"           # grouped by run_id (HAVING count > 1)
+      multi_ticker_only: true                # exclude single-ticker on-demand one-offs
       csv_export: true                       # Ticker,Company,Recommendation download
 
 # LLM pricing used to estimate per-run spend from actual token usage.

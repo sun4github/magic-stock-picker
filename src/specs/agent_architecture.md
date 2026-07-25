@@ -311,9 +311,10 @@ and `final_reports`:
 - `GET /api/runs?ticker=` → that ticker's runs, newest first, with `run_date` + `verdict`.
 
 **By pipeline run**
-- `GET /api/pipeline-runs` → every run, newest first, each with its `run_date`,
-  `ticker_count`, and a Buy/Watch/Avoid breakdown (`GROUP BY run_id` over
-  `ticker_runs`).
+- `GET /api/pipeline-runs` → **multi-ticker** runs, newest first, each with its
+  `run_date`, `ticker_count`, and a Buy/Watch/Avoid breakdown (`GROUP BY run_id`
+  over `ticker_runs`, `HAVING COUNT(*) > 1`). Single-ticker on-demand one-offs
+  are excluded — this view is for value-discovery screens.
 - `GET /api/pipeline-run?run_id=` → all tickers in that run, alphabetical, each
   with `company_name` + `verdict`.
 - `GET /download-run?run_id=` → the run's tickers + recommendations as a
