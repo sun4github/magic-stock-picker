@@ -31,6 +31,8 @@ from magic_formula_starter_screener import (
     main as run_screener_main,
     OUTPUT_FILENAME,
     calculate_company_metrics,
+    fmp_get,
+    FMPError,
 )
 
 @mcp.tool()
@@ -68,11 +70,13 @@ def compute_ticker_magic_metrics(ticker: str) -> str:
     try:
         # /stable/batch-quote is restricted on the Starter plan; use the
         # market-capitalization endpoint (available on Starter) for live market cap.
+        # Routed through fmp_get for timeout + retry + clear errors.
         time.sleep(0.20)
-        mc = requests.get(
+        mc = fmp_get(
             "https://financialmodelingprep.com/stable/market-capitalization",
-            params={"symbol": ticker, "apikey": api_key}, timeout=20,
-        ).json()
+            params={"symbol": ticker, "apikey": api_key},
+            context=f"{ticker} market-cap",
+        )
         live_cap = mc[0].get("marketCap", 0) if isinstance(mc, list) and mc else 0
         metrics = calculate_company_metrics(ticker, live_cap, api_key)
         if not metrics:
