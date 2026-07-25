@@ -36,11 +36,22 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
 
  Scenario: Persist Intermediate Outputs and Final Report to PostgreSQL
     Given the PostgreSQL database with pgvector is initialized
-    When a sub-agent completes its research task for a company
-    Then the Orchestrator executes the MCP tool "db_store_agent_output" to store the text and its vector embedding
-    And when the "Analysis & Composition Agent" completes the research report
-    Then the Orchestrator executes the MCP tool "db_store_final_report" with the verdict and markdown body
-    And verifies the record is saved with a non-null vector embedding
+    When the pipeline gathers SEC and metrics data (direct tool calls)
+    Then it stores them via "db_store_agent_output" with embed=False (raw provenance, no embedding)
+    And when the Bear Agent and Bull Agent complete their research
+    Then it stores BEAR_CASE and BULL_CASE via "db_store_agent_output" with vector embeddings
+    And when the neutral Analyst Agent completes the report
+    Then the Orchestrator executes "db_store_final_report" with the Buy/Watch/Avoid verdict and markdown body
+    And it executes "db_store_ticker_run" to index the run under the ticker for the web UI
+
+  Scenario: Browse reports in the web UI (report viewer)
+    Given the web app is running and connected to the database via its own ".env"
+    When a user selects a ticker (alphabetical dropdown or 3-letter type-ahead search)
+    Then the app lists that ticker's pipeline runs from "ticker_runs", sorted by date (date shown)
+    And when the user selects a run
+    Then the app displays the Bear Case, Bull Case, and Final Report as rendered markdown
+    And it shows the Buy/Watch/Avoid recommendation for that run
+    And it offers a download of each report as a markdown (.md) file to the viewing device
 
   Scenario: Run Phase B from an existing screener CSV (skip Phase A)
     Given a previous run wrote the rankings CSV "magic_formula_rankings_live.csv"
@@ -54,7 +65,8 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     Given a user supplies a specific stock ticker directly, bypassing Phase A screening
     When the Orchestrator starts an on-demand run for that single company
     Then it creates a "pipeline_runs" record containing only that one ticker
-    And it executes the Phase B SequentialAgent graph (SEC, Quant, Search, Analysis) for that ticker
+    And it computes the Magic Formula ROC/Earnings Yield on the fly (the screener did not run)
+    And it executes the Phase B graph (direct SEC/metrics gathering, then Bear -> Bull -> neutral Analyst) for that ticker
     And it persists the agent outputs and the final report under that run_id
     And it marks the pipeline run status as "COMPLETED"
     And the single-company record is structurally identical to one candidate within a full pipeline run

@@ -24,7 +24,7 @@ CREATE TABLE agent_outputs (
     output_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     run_id UUID REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
     ticker VARCHAR(10) NOT NULL,
-    agent_type VARCHAR(50) NOT NULL, -- 'SEC_DATA', 'QUANT_METRICS', 'SEARCH_BEAR'
+    agent_type VARCHAR(50) NOT NULL, -- 'SEC_DATA', 'QUANT_METRICS', 'BEAR_CASE', 'BULL_CASE'
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     raw_content TEXT NOT NULL,
     metadata JSONB, -- Stores structured JSON like customer concentration %, P/E, etc.
@@ -44,8 +44,21 @@ CREATE TABLE final_reports (
     embedding vector(768)
 );
 
+-- 4. Ticker Runs (per-ticker index of pipeline runs; drives the web UI)
+CREATE TABLE ticker_runs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    ticker VARCHAR(10) NOT NULL,
+    run_id UUID NOT NULL REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
+    company_name TEXT,
+    verdict VARCHAR(10),
+    run_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (ticker, run_id)  -- one index row per (ticker, run)
+);
+
 -- Indexes for fast lookup and vector similarity search
 CREATE INDEX idx_agent_outputs_ticker ON agent_outputs(ticker);
 CREATE INDEX idx_final_reports_ticker ON final_reports(ticker);
 CREATE INDEX idx_agent_outputs_embedding ON agent_outputs USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX idx_final_reports_embedding ON final_reports USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX idx_ticker_runs_ticker ON ticker_runs(ticker);
+CREATE INDEX idx_ticker_runs_date ON ticker_runs(run_date DESC);

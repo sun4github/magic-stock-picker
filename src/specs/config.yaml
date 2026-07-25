@@ -14,29 +14,36 @@ logging:
 agents:
   screener_agent:
     name: "Magic_Formula_Screener"
-    model: "gemini-2.5-flash"
     top_n_candidates: 30
     script_path: "magic_formulae_screener.py"
 
-  sec_agent:
-    name: "SEC_Filings_Data_Agent"
-    model: "gemini-flash-lite-latest"   # non-thinking lite tier (data gathering)
-    sec_user_agent: "YourName FinancialAnalysis/1.0 (contact@example.com)"
+  # NOTE: SEC 10-K and FMP metrics are gathered by DIRECT tool calls (no LLM) for
+  # 100% fidelity; there are no sec/metrics LLM agents. Phase B reasoning is a
+  # SequentialAgent of three roles: bear -> bull -> neutral analyst.
 
-  metrics_agent:
-    name: "Quantitative_Metrics_Agent"
-    model: "gemini-flash-lite-latest"   # non-thinking lite tier (data gathering)
-    fmp_api_key_env: "FMP_API_KEY"
-
-  bear_search_agent:
-    name: "Search_And_Bear_Case_Agent"
-    model: "gemini-flash-lite-latest"   # non-thinking lite tier (data gathering)
-    # Two complementary sources: FMP for hard factual news, Tavily for the
-    # qualitative open-web bear case (see agent_architecture.md Section 2C).
-    news_provider: "fmp"                      # ticker-tagged financial news
+  bear_agent:
+    name: "Bear_Agent"
+    model: "gemini-flash-latest"              # thinking model (genuine research)
+    instructions_file: "research-instructions.md"
+    # Two complementary search sources (see agent_architecture.md Section 2C):
+    news_provider: "fmp"                      # ticker-tagged factual news
     news_api_key_env: "FMP_API_KEY"
-    search_provider: "tavily"                 # Replaceable open-web search adapter
+    search_provider: "tavily"                 # qualitative open-web (bear framing)
     search_api_key_env: "TAVILY_API_KEY"
+
+  bull_agent:
+    name: "Bull_Agent"
+    model: "gemini-flash-latest"              # runs after bear; Section 4 refutes it
+    instructions_file: "bullish-research-instructions.md"
+    news_provider: "fmp"
+    news_api_key_env: "FMP_API_KEY"
+    search_provider: "tavily"                 # qualitative open-web (bull framing)
+    search_api_key_env: "TAVILY_API_KEY"
+
+  analyst_agent:
+    name: "Analyst_Agent"                     # neutral judge (no skeptical prompt)
+    model: "gemini-flash-latest"              # weighs bull vs bear -> Buy/Watch/Avoid
+    output_format: "markdown"
 
 tools:
   web_search:
@@ -44,12 +51,6 @@ tools:
     search_depth: "advanced"                  # 'basic' (1 credit) or 'advanced' (2 credits)
     time_range: "year"                        # recency window for results
     max_results: 5
-
-analysis_agent:
-    name: "Analysis_And_Composition_Agent"
-    model: "gemini-flash-latest" # Thinking model retained here for synthesis reasoning
-    instructions_file: "research-instructions.md"
-    output_format: "markdown"
 
 database:
   enabled: true

@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Magic Stock Picker — Report Viewer</title>
+  <style>
+    :root {
+      --bg: #f7f8fa; --panel: #ffffff; --border: #e2e5ea; --text: #1c2430;
+      --muted: #6b7280; --accent: #2563eb;
+      --buy: #16a34a; --watch: #d97706; --avoid: #dc2626;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f141a; --panel: #171d26; --border: #2a323d; --text: #e6eaf0;
+        --muted: #9aa4b2; --accent: #60a5fa;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg); color: var(--text); line-height: 1.5;
+    }
+    header {
+      background: var(--panel); border-bottom: 1px solid var(--border);
+      padding: 14px 20px; position: sticky; top: 0; z-index: 10;
+    }
+    header h1 { margin: 0; font-size: 1.15rem; font-weight: 650; }
+    header p { margin: 2px 0 0; color: var(--muted); font-size: 0.82rem; }
+    .wrap { max-width: 1000px; margin: 0 auto; padding: 20px; }
+    .controls {
+      display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end;
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 12px; padding: 16px; margin-bottom: 18px;
+    }
+    .field { display: flex; flex-direction: column; gap: 5px; flex: 1 1 220px; }
+    .field label { font-size: 0.75rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+    input, select {
+      font-size: 0.95rem; padding: 9px 11px; border: 1px solid var(--border);
+      border-radius: 8px; background: var(--bg); color: var(--text); width: 100%;
+    }
+    input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+    .badge {
+      display: inline-block; font-weight: 700; font-size: 0.8rem; letter-spacing: .04em;
+      padding: 4px 12px; border-radius: 999px; color: #fff; text-transform: uppercase;
+    }
+    .badge.buy { background: var(--buy); } .badge.watch { background: var(--watch); }
+    .badge.avoid { background: var(--avoid); } .badge.na { background: var(--muted); }
+    .verdict-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; min-height: 30px; }
+    .verdict-row .label { color: var(--muted); font-size: 0.85rem; }
+    .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 0; flex-wrap: wrap; }
+    .tab {
+      padding: 9px 16px; cursor: pointer; border: 1px solid transparent; border-bottom: none;
+      border-radius: 8px 8px 0 0; color: var(--muted); font-weight: 600; font-size: 0.9rem;
+      background: transparent;
+    }
+    .tab.active { color: var(--text); background: var(--panel); border-color: var(--border); }
+    .panel {
+      background: var(--panel); border: 1px solid var(--border); border-top: none;
+      border-radius: 0 0 12px 12px; padding: 22px; min-height: 200px;
+    }
+    .panel-actions { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px; font-size: 0.85rem; font-weight: 600;
+      padding: 7px 13px; border-radius: 8px; border: 1px solid var(--border);
+      background: var(--bg); color: var(--text); cursor: pointer; text-decoration: none;
+    }
+    .btn:hover { border-color: var(--accent); color: var(--accent); }
+    .muted { color: var(--muted); }
+    .hint { color: var(--muted); font-size: 0.85rem; padding: 40px 0; text-align: center; }
+    /* markdown content */
+    .md h1, .md h2, .md h3 { line-height: 1.25; margin: 1.3em 0 .5em; }
+    .md h1 { font-size: 1.5rem; } .md h2 { font-size: 1.25rem; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+    .md h3 { font-size: 1.08rem; }
+    .md p { margin: .6em 0; } .md ul, .md ol { margin: .6em 0; padding-left: 1.4em; }
+    .md li { margin: .25em 0; }
+    .md table { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: 0.9rem; display: block; overflow-x: auto; }
+    .md th, .md td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; }
+    .md th { background: var(--bg); font-weight: 650; }
+    .md code { background: var(--bg); padding: 1px 5px; border-radius: 4px; font-size: 0.88em; }
+    .md pre { background: var(--bg); padding: 12px; border-radius: 8px; overflow-x: auto; border: 1px solid var(--border); }
+    .md blockquote { border-left: 3px solid var(--border); margin: .8em 0; padding: .2em 1em; color: var(--muted); }
+    .md a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📈 Magic Stock Picker — Report Viewer</h1>
+    <p>Browse Bear / Bull / Final reports for any analyzed ticker.</p>
+  </header>
+
+  <div class="wrap">
+    <div class="controls">
+      <div class="field">
+        <label for="ticker">Ticker (type 3+ letters or pick)</label>
+        <input id="ticker" list="tickerlist" placeholder="e.g. BKNG" autocomplete="off">
+        <datalist id="tickerlist"></datalist>
+      </div>
+      <div class="field">
+        <label for="run">Pipeline run (newest first)</label>
+        <select id="run" disabled><option>Select a ticker first…</option></select>
+      </div>
+    </div>
+
+    <div id="viewer" style="display:none;">
+      <div class="verdict-row">
+        <span class="label">Recommendation:</span>
+        <span id="verdict" class="badge na">—</span>
+        <span id="runmeta" class="muted"></span>
+      </div>
+      <div class="tabs">
+        <button class="tab active" data-kind="final">Final Report</button>
+        <button class="tab" data-kind="bull">Bull Case</button>
+        <button class="tab" data-kind="bear">Bear Case</button>
+      </div>
+      <div class="panel">
+        <div class="panel-actions">
+          <a id="download" class="btn" href="#">⬇ Download .md</a>
+        </div>
+        <div id="content" class="md"></div>
+      </div>
+    </div>
+
+    <div id="empty" class="hint">Pick a ticker to view its analysis runs.</div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const state = { ticker: null, runId: null, kind: "final", data: null, tickers: new Set() };
+
+    async function loadTickers() {
+      const res = await fetch("/api/tickers");
+      const rows = await res.json();
+      const dl = $("tickerlist");
+      dl.innerHTML = "";
+      rows.forEach(r => {
+        state.tickers.add(r.ticker);
+        const o = document.createElement("option");
+        o.value = r.ticker;
+        o.label = r.company_name && r.company_name !== r.ticker ? r.company_name : "";
+        dl.appendChild(o);
+      });
+    }
+
+    function fmtDate(iso) {
+      if (!iso) return "";
+      const d = new Date(iso);
+      return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    }
+
+    async function loadRuns(ticker) {
+      const res = await fetch("/api/runs?ticker=" + encodeURIComponent(ticker));
+      const runs = await res.json();
+      const sel = $("run");
+      sel.innerHTML = "";
+      if (!runs.length) {
+        sel.innerHTML = "<option>No runs found</option>";
+        sel.disabled = true;
+        $("viewer").style.display = "none";
+        $("empty").style.display = "block";
+        $("empty").textContent = "No runs found for " + ticker + ".";
+        return;
+      }
+      runs.forEach(r => {
+        const o = document.createElement("option");
+        o.value = r.run_id;
+        o.dataset.date = r.run_date || "";
+        o.textContent = fmtDate(r.run_date) + "  —  " + (r.verdict || "—");
+        sel.appendChild(o);
+      });
+      sel.disabled = false;
+      loadReport(ticker, runs[0].run_id, runs[0].run_date);  // auto-load newest
+    }
+
+    async function loadReport(ticker, runId, runDate) {
+      state.ticker = ticker; state.runId = runId;
+      const res = await fetch("/api/report?ticker=" + encodeURIComponent(ticker) + "&run_id=" + encodeURIComponent(runId));
+      if (!res.ok) return;
+      state.data = await res.json();
+      const v = (state.data.verdict || "").toUpperCase();
+      const badge = $("verdict");
+      badge.textContent = v || "—";
+      badge.className = "badge " + (["BUY","WATCH","AVOID"].includes(v) ? v.toLowerCase() : "na");
+      $("runmeta").textContent = runDate ? "· run " + fmtDate(runDate) : "";
+      $("viewer").style.display = "block";
+      $("empty").style.display = "none";
+      renderTab();
+    }
+
+    function renderTab() {
+      if (!state.data) return;
+      const map = { final: "final_html", bull: "bull_html", bear: "bear_html" };
+      $("content").innerHTML = state.data[map[state.kind]] || "<p class='muted'>Not available.</p>";
+      $("download").href = "/download?ticker=" + encodeURIComponent(state.ticker) +
+        "&run_id=" + encodeURIComponent(state.runId) + "&kind=" + state.kind;
+    }
+
+    // events
+    $("ticker").addEventListener("change", (e) => {
+      const t = e.target.value.trim().toUpperCase();
+      e.target.value = t;
+      if (state.tickers.has(t)) loadRuns(t);
+    });
+    $("run").addEventListener("change", (e) => {
+      const opt = e.target.selectedOptions[0];
+      loadReport(state.ticker, e.target.value, opt ? opt.dataset.date : null);
+    });
+    document.querySelectorAll(".tab").forEach(tab => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+        tab.classList.add("active");
+        state.kind = tab.dataset.kind;
+        renderTab();
+      });
+    });
+
+    loadTickers();
+  </script>
+</body>
+</html>

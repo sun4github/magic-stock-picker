@@ -382,6 +382,34 @@ def initialize_database():
 
         cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_ticker ON agent_outputs(ticker)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_final_reports_ticker ON final_reports(ticker)")
+
+        # ticker_runs: a lean per-ticker index of every pipeline run, used to drive
+        # the web UI (ticker picker -> run list -> reports). The heavy report text
+        # stays in agent_outputs / final_reports; the UI joins on run_id.
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS ticker_runs (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                ticker VARCHAR(10) NOT NULL,
+                run_id UUID NOT NULL REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
+                company_name TEXT,
+                verdict VARCHAR(10),
+                run_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (ticker, run_id)
+            )
+        ''')
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ticker_runs_ticker ON ticker_runs(ticker)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ticker_runs_date ON ticker_runs(run_date DESC)")
+
+        # Backfill ticker_runs from any pre-existing final_reports so the UI shows
+        # historical runs. company_name is unknown for old rows (left NULL).
+        cur.execute('''
+            INSERT INTO ticker_runs (ticker, run_id, verdict, run_date)
+            SELECT fr.ticker, fr.run_id, fr.verdict, COALESCE(pr.started_at, fr.created_at)
+            FROM final_reports fr
+            JOIN pipeline_runs pr ON fr.run_id = pr.run_id
+            ON CONFLICT (ticker, run_id) DO NOTHING
+        ''')
+
         conn.commit()
         cur.close()
         conn.close()
@@ -541,6 +569,30 @@ def db_store_final_report(run_id: str, ticker: str, verdict: str, markdown_repor
     except Exception as e:
         logger.error(f"Error storing final report for {ticker}: {e}")
         return f"Error storing final report: {str(e)}"
+
+@mcp.tool()
+def db_store_ticker_run(run_id: str, ticker: str, company_name: str, verdict: str) -> str:
+    """
+    Records a per-ticker index row in ticker_runs (ticker -> run + verdict + date).
+    This drives the web UI's ticker picker and run list. Idempotent per (ticker, run_id).
+    """
+    try:
+        normalized = (verdict or "").strip().upper()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO ticker_runs (ticker, run_id, company_name, verdict)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (ticker, run_id)
+            DO UPDATE SET company_name = EXCLUDED.company_name, verdict = EXCLUDED.verdict
+        ''', (ticker, run_id, company_name, normalized))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return f"Recorded ticker_run for {ticker} ({normalized})"
+    except Exception as e:
+        logger.error(f"Error recording ticker_run for {ticker}: {e}")
+        return f"Error recording ticker_run: {str(e)}"
 
 @mcp.tool()
 def db_search_historical_reports(query_text: str, ticker: str = "", limit: int = 5) -> str:

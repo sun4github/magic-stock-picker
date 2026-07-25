@@ -55,7 +55,8 @@ The coding agent **must wrap underlying Python scripts into standard MCP (Model 
 
 ### C. Search Tools — FMP News vs. Tavily (when to use each)
 
-The Search & Bear Case Agent is given **two** tools with a clear division of labor:
+The research agents (Bear and Bull) are each given the same **two** search tools,
+with a clear division of labor (they query them with opposing framing — bear vs. bull):
 
 1. **`fmp_stock_news(ticker)`** — recent, ticker-tagged **factual** financial news
    from FMP (`/stable/news/stock`). Use for HARD developments: earnings, guidance
@@ -156,23 +157,29 @@ search_agent = Agent(
 
 ## 5. PostgreSQL Persistence & Vector MCP Tools
 
-The system must store all intermediate outputs and final reports in a PostgreSQL database using `pgvector`.
+The system stores all intermediate outputs and final reports in a PostgreSQL database using `pgvector`. The authoritative schema is [`sql-schema.sql`](../sql-schema.sql); `initialize_database()` mirrors it and applies idempotent migrations on startup.
 
-### A. Database MCP Tools to Build
-1. `db_store_agent_output`:
-   - **Inputs:** `run_id`, `ticker`, `agent_type`, `raw_content`, `metadata_json`.
-   - **Logic:** Generates a vector embedding using `text-embedding-004` on `raw_content`, then inserts the record into `agent_outputs`.
-2. `db_store_final_report`:
-   - **Inputs:** `run_id`, `ticker`, `verdict`, `markdown_report`.
-   - **Logic:** Generates a vector embedding on the report summary, then inserts the record into `final_reports`.
-3. `db_search_historical_reports`:
-   - **Inputs:** `query_text`, `ticker` (optional), `limit` (default 5).
-   - **Logic:** Converts `query_text` to an embedding and runs a cosine similarity vector search (`<=>`) against `final_reports` or `agent_outputs`.
+### A. Tables
+1. `pipeline_runs` — one row per run: status, tickers, and aggregated token/search usage + estimated cost.
+2. `agent_outputs` — raw per-step outputs, keyed by `(run_id, ticker, agent_type)`; `agent_type` ∈ `SEC_DATA`, `QUANT_METRICS`, `BEAR_CASE`, `BULL_CASE`. Optional `embedding vector(768)`.
+3. `final_reports` — the neutral analyst's combined report + `verdict` (`BUY`/`WATCH`/`AVOID`; legacy `HOLD`/`SELL` still valid) + embedding.
+4. `ticker_runs` — a lean per-ticker index of runs (`ticker`, `run_id`, `company_name`, `verdict`, `run_date`), **built to drive the web UI**. No report text is duplicated here; the UI joins back to `agent_outputs`/`final_reports` on `run_id`. `initialize_database()` backfills it from existing `final_reports`.
 
-### B. Sub-Agent Execution Flow
-- **After Sub-Agent Execution:** As each sub-agent (`SEC_Filings_Data_Agent`, `Quantitative_Metrics_Agent`, `Search_And_Bear_Case_Agent`) completes its task, the orchestrator calls `db_store_agent_output` to persist the result.
-- **In-Memory Pass:** The Orchestrator retains the full raw text in memory and passes all 3 text blocks directly to the `Analysis_And_Composition_Agent` to ensure **100% data fidelity**.
-- **After Report Synthesis:** Once the `Analysis_And_Composition_Agent` completes the report and assigns a `BUY/SELL/HOLD` verdict, call `db_store_final_report`.
+### B. Database MCP Tools
+1. `db_store_agent_output(run_id, ticker, agent_type, raw_content, metadata_json, embed=True)`:
+   - Inserts into `agent_outputs`. When `embed=True`, generates a `text-embedding-004` vector on `raw_content`. **SEC/metrics are stored with `embed=False`** (raw provenance, low search value); **bear/bull cases are embedded** for semantic search.
+2. `db_store_final_report(run_id, ticker, verdict, markdown_report)`:
+   - Normalizes the verdict to `BUY`/`WATCH`/`AVOID` (default `WATCH`), embeds the report, and inserts into `final_reports`.
+3. `db_store_ticker_run(run_id, ticker, company_name, verdict)`:
+   - Upserts the `ticker_runs` index row (idempotent per `(ticker, run_id)`).
+4. `db_search_historical_reports(query_text, ticker="", limit=5)`:
+   - Embeds `query_text` and runs a cosine similarity search (`<=>`) against embedded rows.
+5. Run lifecycle: `db_create_pipeline_run` (parent row, created first for FK integrity) and `db_finalize_pipeline_run` (terminal status + usage/cost).
+
+### C. Per-Ticker Persistence Flow (`analyze_ticker`)
+- SEC 10-K and FMP metrics are gathered by **direct tool calls** and stored via `db_store_agent_output(..., embed=False)` — 100% fidelity, no LLM in the loop.
+- The bear and bull agents' outputs are stored (embedded) as `BEAR_CASE` / `BULL_CASE`.
+- After the neutral analyst produces the report and a `Buy`/`Watch`/`Avoid` verdict, call `db_store_final_report`, then `db_store_ticker_run` to index it for the UI, and write the report file to `reports/{Ticker}_Final_Report_{Verdict}.md`.
 
 
 ## 6. API Rate Limiting & Throttling Rules
@@ -272,3 +279,35 @@ The parent `pipeline_runs` row MUST be created before any `agent_outputs` or
 `final_reports` inserts, because those tables carry a foreign key onto
 `pipeline_runs(run_id)`. The pipeline status is set to `COMPLETED` after the
 run finishes.
+
+
+## 9. WEB UI (Report Viewer)
+
+A separate, **read-only** web application (`webapp/`) lets a user browse stored
+reports. It is decoupled from the agent — it only reads the shared PostgreSQL
+database — and is designed to run on a Raspberry Pi.
+
+### A. Stack & Deployment
+- **Flask** (Python) — lightweight, reuses the `psycopg2` stack, no build step.
+  Markdown is rendered to HTML **server-side** (`python-markdown`), so the page
+  works offline with no external CDN/JS dependency.
+- Reads `DATABASE_URL` from its own `webapp/.env`; binds `0.0.0.0:$PORT`
+  (default 8000) so it is reachable across the LAN.
+- Runs as a permanent background job on the Pi via `systemd`
+  (see `webapp/README.md` and the root `README.md`).
+
+### B. Data Flow
+The UI is driven by the `ticker_runs` index table; report bodies are fetched
+on demand from `agent_outputs` (`BEAR_CASE` / `BULL_CASE`) and `final_reports`:
+
+- `GET /api/tickers` → distinct tickers (alphabetical; optional `?q=` substring).
+- `GET /api/runs?ticker=` → that ticker's runs, newest first, with `run_date` + `verdict`.
+- `GET /api/report?ticker=&run_id=` → server-rendered HTML for the bear, bull, and
+  final reports plus the verdict.
+- `GET /download?ticker=&run_id=&kind=bear|bull|final` → the raw markdown as a
+  `.md` attachment for the viewing device.
+
+### C. User Flow
+Pick a ticker (alphabetical dropdown / 3-letter type-ahead) → pick a run (sorted
+by date, date shown) → view Bear / Bull / Final reports as rendered markdown with
+the Buy/Watch/Avoid recommendation badge → optionally download any report.

@@ -27,7 +27,8 @@ from mcp_server import (
     db_update_pipeline_status,
     db_finalize_pipeline_run,
     db_store_agent_output,
-    db_store_final_report
+    db_store_final_report,
+    db_store_ticker_run
 )
 # The screener's CSV output path (default source for --from-csv mode).
 from magic_formula_starter_screener import OUTPUT_FILENAME
@@ -405,6 +406,8 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
 
     verdict = _extract_verdict(report_text)
     _check_db(db_store_final_report(run_id, ticker, verdict, report_text), f"{ticker} final report")
+    # Index this run under the ticker for the web UI.
+    _check_db(db_store_ticker_run(run_id, ticker, company_name or ticker, verdict), f"{ticker} ticker_run")
 
     report_path = os.path.join("reports", f"{ticker}_Final_Report_{verdict.title()}.md")
     with open(report_path, "w", encoding='utf-8') as f:

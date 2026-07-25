@@ -126,6 +126,74 @@ Each run creates a `pipeline_runs` row (token usage, search usage, and
 estimated cost), logs progress to `src/logs/`, and writes reports to
 `src/reports/`.
 
+## Web UI (report viewer)
+
+A separate, read-only Flask web app in [`webapp/`](webapp/) lets you browse the
+stored reports: pick a ticker, choose a run (by date), and view the Bear / Bull /
+Final reports with the Buy/Watch/Avoid recommendation and a markdown download.
+It's designed to run on a Raspberry Pi and connects to the same database via its
+own `.env`. See [`webapp/README.md`](webapp/README.md) for full details.
+
+### Quick start
+
+```bash
+cd webapp
+pip install -r requirements.txt
+cp .env.example .env      # set DATABASE_URL, and PORT if desired
+python app.py             # http://<host>:8000
+```
+
+### Choosing the port
+
+The app reads `PORT` from `webapp/.env` (default `8000`). Set it there:
+
+```env
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+PORT=8080
+```
+
+It binds `0.0.0.0`, so it's reachable from other devices at
+`http://<raspberry-pi-ip>:<PORT>`.
+
+### Run as a permanent background job on a Raspberry Pi (systemd)
+
+To keep the viewer running across reboots and crashes, install it as a `systemd`
+service. Create `/etc/systemd/system/report-viewer.service` (adjust the path,
+user, and port):
+
+```ini
+[Unit]
+Description=Magic Stock Picker Report Viewer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/magic-stock-picker/webapp
+Environment=PORT=8080
+ExecStart=/usr/bin/python3 app.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`Environment=PORT=8080` sets the port for the service (it overrides the `.env`
+default; keep them in sync or rely on just one). Then enable and start it:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now report-viewer      # start now + on every boot
+sudo systemctl status report-viewer            # check it's running
+journalctl -u report-viewer -f                 # follow logs
+```
+
+The viewer is now permanently available at `http://<raspberry-pi-ip>:8080`. It
+auto-restarts on failure and starts automatically after a reboot. (For heavier
+use, install `gunicorn` and set `ExecStart=/usr/bin/gunicorn -b 0.0.0.0:8080 app:app`.)
+
 ## Notes
 
 - FMP's legacy `v3`/`v4` endpoints were retired; this project uses the
