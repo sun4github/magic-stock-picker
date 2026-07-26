@@ -36,6 +36,14 @@ The application must execute a strict 4-stage sequential workflow managed by a p
         - **Balance:** skepticism lives in the Bear Agent, balanced by an equal Bull Agent; the judge itself is neutral. This removes the structural bear bias.
         - **Output:** written to `reports/{Ticker}_Skeptical_Analysis.md`; `bear_data`/`bull_data` are also persisted separately as `agent_outputs` (BEAR_CASE / BULL_CASE) for drill-down.
 
+3. **Phase C: Sale Advisory** (per ticker)
+   **Sale advisor - a agent that finds advserse business events:**
+   - **Agent: Sale Advisor agent**: - instruction = `sale-advisor-instructions.md`. Uses `fmp_stock_news` + `web_search_tool` (Tavily)
+
+4. **Sell-Condition Check** (on-demand, single stock — Phase C follow-up)
+   **Sell-condition evaluator - tests whether the prior sale conditions are now met:**
+   - **Agent: Sell Check agent** — no instruction file; carries a self-contained prompt. Loads a stored `SALE_CASE` via `db_get_sale_case(ticker, run_id)` (a **specific run's** conditions when a run is pinned, otherwise the **most recent**), gathers **current** FMP metrics (`fmp_metrics_extractor`, direct call) and live `fmp_stock_news` + `web_search_tool` research, then marks each sale condition **MET / NOT MET / UNCLEAR** with sourced evidence and emits a `## Sell Recommendation` (`SELL` if **any** condition is clearly met, else `HOLD`).
+   - Runs standalone for one ticker (not in the analysis graph). It is a lightweight flow: it reads the prior conditions and writes `reports/{Ticker}_Sell_Check.md`, but does **not** create a `pipeline_runs`/`ticker_runs` record, so it never appears in the web UI's run lists.
 ---
 
 ## 2. MCP Tools Setup Guide for Coding Agent
@@ -161,7 +169,7 @@ The system stores all intermediate outputs and final reports in a PostgreSQL dat
 
 ### A. Tables
 1. `pipeline_runs` — one row per run: status, tickers, and aggregated token/search usage + estimated cost.
-2. `agent_outputs` — raw per-step outputs, keyed by `(run_id, ticker, agent_type)`; `agent_type` ∈ `SEC_DATA`, `QUANT_METRICS`, `BEAR_CASE`, `BULL_CASE`. Optional `embedding vector(768)`.
+2. `agent_outputs` — raw per-step outputs, keyed by `(run_id, ticker, agent_type)`; `agent_type` ∈ `SEC_DATA`, `QUANT_METRICS`, `BEAR_CASE`, `BULL_CASE`, `SALE_CASE`. Optional `embedding vector(768)`.
 3. `final_reports` — the neutral analyst's combined report + `verdict` (`BUY`/`WATCH`/`AVOID`; legacy `HOLD`/`SELL` still valid) + embedding.
 4. `ticker_runs` — a lean per-ticker index of runs (`ticker`, `run_id`, `company_name`, `verdict`, `run_date`), **built to drive the web UI**. No report text is duplicated here; the UI joins back to `agent_outputs`/`final_reports` on `run_id`. `initialize_database()` backfills it from existing `final_reports`.
 
@@ -180,6 +188,8 @@ The system stores all intermediate outputs and final reports in a PostgreSQL dat
 - SEC 10-K and FMP metrics are gathered by **direct tool calls** and stored via `db_store_agent_output(..., embed=False)` — 100% fidelity, no LLM in the loop.
 - The bear and bull agents' outputs are stored (embedded) as `BEAR_CASE` / `BULL_CASE`.
 - After the neutral analyst produces the report and a `Buy`/`Watch`/`Avoid` verdict, call `db_store_final_report`, then `db_store_ticker_run` to index it for the UI, and write the report file to `reports/{Ticker}_Final_Report_{Verdict}.md`.
+- The Phase C sale advisor's output is stored (embedded) as `SALE_CASE` and written to `reports/{Ticker}_Sale_Advisory.md`.
+- The four analytical reports (`BEAR_CASE`, `BULL_CASE`, `SALE_CASE`, and the final report) are stamped with a **run_id banner** at the top before storage (a blockquote with the `run_id` + ticker). This makes the `run_id` visible in the web viewer so it can be recorded against a purchased lot (the value `--run` pins for the sell-condition check). SEC/metrics rows are left unstamped. The banner does not affect verdict parsing (it sits above the `## Final Verdict` section) and is negligible for the embeddings.
 
 
 ## 6. API Rate Limiting & Throttling Rules
@@ -236,7 +246,12 @@ Phase B distinguishes **data-relay** steps from **reasoning** steps:
   `company_name`, `sec_data`, `metrics_data`, and `screen_context` are seeded
   into session state before the graph runs.
 
-**Model tiers:** all three reasoning agents run on the thinking
+Phase C makes predictive analysis and uses **reasoning**:
+(`sale-advisor-instructions.md` + FMP news search + Web search) -> `SALE_CASE`; runs after Phase B is complete and `analyst_agent`
+produced its final analyst report. Uses the Investment thesis from final analyst report (in context with output key `final_report`). 
+Ignores the verdict, assumes that the stock is purchased and advises on sale conditions for that stock.
+
+**Model tiers:** all four reasoning agents run on the thinking
 `gemini-flash-latest` (they do genuine research/weighing). SEC/metrics are direct
 tool calls, so no lite/data-gathering agents remain.
 
@@ -248,30 +263,41 @@ modes call it, so persistence and verdict logic are identical across modes.
 ### A. Execution Modes
 
 1. **Full pipeline run** (`run_orchestrator`)
-   - Runs Phase A (screener → writes the rankings CSV), then Phase B over the Top N.
+   - Runs Phase A (screener → writes the rankings CSV), then Phase B, followed by Phase C over the Top N.
 2. **CSV run — skip Phase A** (`run_from_csv`)
    - Phase A (the full FMP universe scan) is slow. This mode **reuses the
-     rankings CSV from a previous run**, picks the Top N, and runs Phase B — no
+     rankings CSV from a previous run**, picks the Top N, and runs Phase B and Phase C — no
      screener re-run. Accepts an optional CSV path (defaults to the screener's
      `magic_formula_rankings_live.csv`).
 3. **On-demand single-ticker run** (`run_single_ticker`)
-   - Skips Phase A entirely for a single user-supplied ticker.
+   - Skips Phase A entirely for a single user-supplied ticker. Only runs Phase B and Phase C
 
-All three create a `pipeline_runs` row and produce records that are structurally
-identical and fully queryable by `run_id`.
+The three modes above create a `pipeline_runs` row and produce records that are
+structurally identical and fully queryable by `run_id`.
+
+4. **On-demand sell-condition check** (`run_sell_check`)
+   - A separate single-stock flow (Phase C follow-up). Loads a stored `SALE_CASE`
+     — a **specific run's** when `run_id` is passed (the run you bought under),
+     otherwise the ticker's most recent — and evaluates whether those conditions are
+     now met against current data, advising `SELL`/`HOLD`. It does **not** create a
+     `pipeline_runs`/`ticker_runs` row (nothing new appears in the web UI); it only
+     reads the prior conditions and writes `reports/{Ticker}_Sell_Check.md`.
 
 ### B. Invocation
 
 ```
-python main.py                    # full pipeline (Phase A screener + Phase B)
-python main.py --from-csv         # skip Phase A; Phase B on top N from the rankings CSV
-python main.py --from-csv PATH    # same, from a specific CSV file
-python main.py TICKER             # on-demand Phase B for one ticker
-python main.py TICKER "Company"   # on-demand with an explicit company name
+python main.py                       # full pipeline (Phase A screener + Phase B + Phase C)
+python main.py --from-csv            # skip Phase A; Phase B/C on top N from the rankings CSV
+python main.py --from-csv PATH       # same, from a specific CSV file
+python main.py TICKER                # on-demand Phase B/C for one ticker
+python main.py TICKER "Company"      # on-demand with an explicit company name
+python main.py --sell-check TICKER            # test if TICKER's latest sale conditions are now met (Sell/Hold)
+python main.py --sell-check TICKER --run RUN_ID  # ...against a SPECIFIC run's conditions (the run you bought under)
 ```
 
-`run_from_csv(path)` and `run_single_ticker(ticker, company_name)` are also
-directly importable for driving these modes from a service endpoint or notebook.
+`run_from_csv(path)`, `run_single_ticker(ticker, company_name)`, and
+`run_sell_check(ticker, company_name, run_id)` are also directly importable for
+driving these modes from a service endpoint or notebook.
 
 ### C. Ordering Constraint
 
@@ -279,6 +305,40 @@ The parent `pipeline_runs` row MUST be created before any `agent_outputs` or
 `final_reports` inserts, because those tables carry a foreign key onto
 `pipeline_runs(run_id)`. The pipeline status is set to `COMPLETED` after the
 run finishes.
+
+### D. Which `SALE_CASE` should the sell-condition check use?
+
+Sale conditions are **exit criteria for a specific entry thesis** — the concrete
+business events that would break *the reason you bought*. So the check should be
+anchored to the run **under which the position was actually purchased**, not
+whichever analysis is newest:
+
+- A later re-analysis (e.g. a single-ticker run that now says `Watch`/`Avoid`)
+  produces a **new** `SALE_CASE` derived from a **different** thesis you never
+  acted on. Evaluating against it silently moves the goalposts and mixes two
+  distinct theses.
+- The later verdict downgrade is itself meaningful — but it is a *separate*
+  signal ("a fresh analysis no longer likes it"), a reason to re-underwrite, not a
+  substitute for the exit criteria of the thesis you hold.
+
+**Behavior:** `run_sell_check` defaults to the ticker's *most recent* `SALE_CASE`
+(via `db_get_sale_case`), which is correct only when no re-analysis has happened
+since purchase. For a held position that has since been re-analyzed, **pin the
+purchase run** with `--run RUN_ID` so the check evaluates the exact conditions you
+committed to. The `run_id` is the identifier of the pipeline/on-demand run under
+which you bought (shown in the run logs and stored on every `SALE_CASE`). It is
+exactly `public.pipeline_runs.run_id`; a full pipeline run shares one `run_id`
+across all its tickers, and `SALE_CASE` is keyed by `(run_id, ticker)`, so a single
+stored `run_id` per position resolves that ticker's conditions.
+
+**Position tracking is external (decoupled).** The agent does not track holdings.
+An external positions store (e.g. a `lots` table in a separate `stock_tracker`
+schema in the same database) owns the mapping from a purchased lot to the analysis
+run it was bought under — store `public.pipeline_runs.run_id` on the lot (FK with
+`ON DELETE SET NULL` so purging analysis history never deletes a real purchase).
+That app then drives the sell-check by passing the stored `run_id` — either via the
+CLI (`--run RUN_ID`) or by importing `run_sell_check(ticker, company_name, run_id)`.
+The agent stays ignorant of the positions schema.
 
 
 ## 9. WEB UI (Report Viewer)
@@ -303,7 +363,7 @@ modes** over the same data (see `specs/webapp.feature`):
 ### B. Data Flow
 The UI is driven by the `ticker_runs` index table (which carries both the
 per-ticker and per-run views — no report text is duplicated there); report
-bodies are fetched on demand from `agent_outputs` (`BEAR_CASE` / `BULL_CASE`)
+bodies are fetched on demand from `agent_outputs` (`BEAR_CASE` / `BULL_CASE` / `SALE_CASE`)
 and `final_reports`:
 
 **By ticker**
@@ -321,14 +381,14 @@ and `final_reports`:
   `.csv` attachment (`Ticker,Company,Recommendation`).
 
 **Shared (report drill-down + download)**
-- `GET /api/report?ticker=&run_id=` → server-rendered HTML for the bear, bull, and
+- `GET /api/report?ticker=&run_id=` → server-rendered HTML for the bear, bull, sale and
   final reports plus the verdict.
-- `GET /download?ticker=&run_id=&kind=bear|bull|final` → the raw markdown as a
+- `GET /download?ticker=&run_id=&kind=bear|bull|sale|final` → the raw markdown as a
   `.md` attachment for the viewing device.
 
 ### C. User Flows
 - **By ticker:** pick a ticker (alphabetical dropdown / 3-letter type-ahead) →
-  pick a run (sorted by date, date shown) → view Bear / Bull / Final reports as
+  pick a run (sorted by date, date shown) → view Bear / Bull / Sale / Final reports as
   rendered markdown with the Buy/Watch/Avoid recommendation badge → optionally
   download any report.
 - **By pipeline run:** pick a run (sorted by date, newest first, ticker count

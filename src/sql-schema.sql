@@ -24,7 +24,7 @@ CREATE TABLE agent_outputs (
     output_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     run_id UUID REFERENCES pipeline_runs(run_id) ON DELETE CASCADE,
     ticker VARCHAR(10) NOT NULL,
-    agent_type VARCHAR(50) NOT NULL, -- 'SEC_DATA', 'QUANT_METRICS', 'BEAR_CASE', 'BULL_CASE'
+    agent_type VARCHAR(50) NOT NULL, -- 'SEC_DATA', 'QUANT_METRICS', 'BEAR_CASE', 'BULL_CASE', 'SALE_CASE'
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     raw_content TEXT NOT NULL,
     metadata JSONB, -- Stores structured JSON like customer concentration %, P/E, etc.

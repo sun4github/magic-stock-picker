@@ -28,7 +28,8 @@ from mcp_server import (
     db_finalize_pipeline_run,
     db_store_agent_output,
     db_store_final_report,
-    db_store_ticker_run
+    db_store_ticker_run,
+    db_get_sale_case
 )
 # The screener's CSV output path (default source for --from-csv mode).
 from magic_formula_starter_screener import OUTPUT_FILENAME
@@ -81,6 +82,12 @@ with open(instructions_path, "r") as f:
 bullish_path = os.path.join(os.path.dirname(__file__), "bullish-research-instructions.md")
 with open(bullish_path, "r") as f:
     bullish_instructions = f.read()
+
+# sale-advisor-instructions.md drives the Phase C SALE ADVISOR agent. It uses '['/']'
+# placeholders (not '{}'), so it is safe to embed in a state-templated instruction.
+sale_advisor_path = os.path.join(os.path.dirname(__file__), "sale-advisor-instructions.md")
+with open(sale_advisor_path, "r") as f:
+    sale_advisor_instructions = f.read()
 
 # --- 2. AGENT DEFINITIONS (Phase B) ---
 # Two kinds of steps:
@@ -168,11 +175,80 @@ analyst_agent = LlmAgent(
     output_key="final_report",
 )
 
-# The Phase-B reasoning graph: bear -> bull -> neutral analyst. (SEC and metrics are
-# gathered by direct tool calls in analyze_ticker, not by agents.)
+# --- Phase C: SALE ADVISOR (runs after the analyst; reads {final_report}) ---
+# Assumes the stock is ALREADY OWNED (ignores the verdict) and advises on the
+# specific, measurable business events that would break the original thesis and
+# justify selling. Uses fmp_stock_news + Tavily to ground the analysis in real
+# recent developments. Its output is persisted as SALE_CASE.
+sale_advisor_agent = LlmAgent(
+    name="sale_advisor_agent",
+    model="gemini-flash-latest",
+    instruction=(
+        sale_advisor_instructions
+        + "\n\n## How to run this analysis\n"
+        "You are the SALE ADVISOR for {company_name} ({ticker}). The neutral analyst's "
+        "FINAL_REPORT below contains the bull thesis, bear thesis, and a verdict. "
+        "IGNORE the verdict and ASSUME the investor already owns the stock. Use your "
+        "tools: call fmp_stock_news for recent factual developments and web_search_tool "
+        "for adverse business events and thesis-breaking signals. Then write a Markdown "
+        "report titled '## Sale Advisory' that names the THREE specific business events "
+        "(NOT price movements) that would signal the original investment case is broken "
+        "and justify selling. Where possible attach concrete, measurable thresholds "
+        "(e.g. gross margin dropping below X%, two consecutive quarters of negative user "
+        "growth, loss of a key distribution contract). Do not invent facts; cite "
+        "sources.\n\n"
+        "<FINAL_REPORT>\n{final_report}\n</FINAL_REPORT>\n"
+    ),
+    tools=[fmp_stock_news, web_search_tool],
+    output_key="sale_data",
+)
+
+# The reasoning graph: bear -> bull -> neutral analyst (Phase B) -> sale advisor
+# (Phase C). SEC and metrics are gathered by direct tool calls in analyze_ticker,
+# not by agents. The sale advisor runs last so it can read the analyst's
+# {final_report} (bull + bear thesis + verdict) from session state.
 skeptical_pipeline = SequentialAgent(
     name="skeptical_pipeline",
-    sub_agents=[bear_agent, bull_agent, analyst_agent],
+    sub_agents=[bear_agent, bull_agent, analyst_agent, sale_advisor_agent],
+)
+
+# --- Phase C follow-up: SELL-CONDITION CHECK (standalone, on-demand) ---
+# A separate single-stock flow. It loads the ticker's most recent SALE_CASE (the
+# measurable sell triggers the sale advisor defined) and tests, against CURRENT
+# data, whether any/all of them are now met — advising Sell vs. Hold for someone
+# who already owns the stock. It is NOT part of the analysis graph; it is run on
+# demand for one ticker via `run_sell_check`. Reads {sale_conditions} (from the DB)
+# and {metrics_data} (a fresh direct FMP call), plus live news/web research.
+sell_check_agent = LlmAgent(
+    name="sell_check_agent",
+    model="gemini-flash-latest",
+    instruction=(
+        "You are a SELL-CONDITION EVALUATOR for {company_name} ({ticker}). A previous "
+        "analysis produced a set of SALE CONDITIONS — specific, measurable business "
+        "events that would break the investment thesis and justify selling. Your job is "
+        "to determine, using CURRENT data, whether each condition is now MET.\n\n"
+        "Use your tools: call fmp_stock_news for the latest developments (earnings, "
+        "guidance changes, impairments, contract losses, downgrades) and web_search_tool "
+        "for anything not in the news feed. The latest FMP fundamentals are in "
+        "CURRENT_METRICS below. Compare the current figures/events against each "
+        "condition's threshold.\n\n"
+        "Write a Markdown report titled '## Sell-Condition Check'. For EACH sale "
+        "condition, output:\n"
+        "- **Condition** (restated briefly)\n"
+        "- **Status:** MET / NOT MET / UNCLEAR\n"
+        "- **Evidence:** the current figure or event vs. the threshold, with sources\n\n"
+        "Then write a '## Sell Recommendation' section that states:\n"
+        "- How many conditions are MET (e.g. '1 of 3 conditions met').\n"
+        "- Exactly one recommendation line: 'Recommendation: SELL' if ANY condition is "
+        "clearly MET (the original thesis is broken), otherwise 'Recommendation: HOLD'.\n"
+        "- A one-paragraph justification of how the met/unmet conditions net out. Do not "
+        "invent facts; if data is unavailable say UNCLEAR and do not treat it as met. "
+        "Cite sources.\n\n"
+        "<SALE_CONDITIONS>\n{sale_conditions}\n</SALE_CONDITIONS>\n\n"
+        "<CURRENT_METRICS>\n{metrics_data}\n</CURRENT_METRICS>\n"
+    ),
+    tools=[fmp_stock_news, web_search_tool],
+    output_key="sell_check",
 )
 
 # --- 2b. AGENT EXECUTION HELPER ---
@@ -335,6 +411,61 @@ def run_pipeline(run_id: str, ticker: str, company_name: str, sec_data: str,
             raise
 
 
+async def _run_sell_check_async(ticker: str, company_name: str,
+                                sale_conditions: str, metrics_data: str):
+    """Run the standalone sell_check_agent for one ticker. Returns (state, usage);
+    state['sell_check'] holds the evaluation report."""
+    session_service = InMemorySessionService()
+    runner = Runner(app_name=APP_NAME, agent=sell_check_agent, session_service=session_service)
+    session_id = f"sellcheck:{ticker}:{timestamp}"
+
+    await session_service.create_session(
+        app_name=APP_NAME,
+        user_id="orchestrator",
+        session_id=session_id,
+        state={
+            "ticker": ticker,
+            "company_name": company_name or ticker,
+            "sale_conditions": sale_conditions,
+            "metrics_data": metrics_data,
+        },
+    )
+
+    message = types.Content(
+        role="user",
+        parts=[types.Part(text=f"Check whether the prior sale conditions for {company_name} ({ticker}) are now met.")],
+    )
+
+    usage = _new_usage()
+    async for event in runner.run_async(
+        user_id="orchestrator", session_id=session_id, new_message=message
+    ):
+        _add_event_usage(usage, event)
+
+    final = await session_service.get_session(
+        app_name=APP_NAME, user_id="orchestrator", session_id=session_id
+    )
+    return (dict(final.state) if final else {}), usage
+
+
+def _run_sell_check(ticker: str, company_name: str, sale_conditions: str, metrics_data: str):
+    """Synchronous wrapper around the sell-condition check with 429 backoff."""
+    for attempt in range(MAX_AGENT_RETRIES):
+        try:
+            return asyncio.run(_run_sell_check_async(ticker, company_name, sale_conditions, metrics_data))
+        except Exception as e:
+            if _is_rate_limit_error(e) and attempt < MAX_AGENT_RETRIES - 1:
+                wait = BASE_BACKOFF_SECONDS * (2 ** attempt)
+                logger.warning(
+                    f"[{ticker}] Rate limited (429). Backing off {wait}s "
+                    f"(attempt {attempt + 1}/{MAX_AGENT_RETRIES})."
+                )
+                time.sleep(wait)
+                continue
+            logger.error(f"[{ticker}] Sell-condition check failed: {e}")
+            raise
+
+
 def _check_db(result: str, context: str) -> None:
     """DB MCP tools return a status string instead of raising. Previously these
     return values were ignored, so failed inserts were completely silent. Log
@@ -346,6 +477,18 @@ def _check_db(result: str, context: str) -> None:
 
 
 # --- 3. PHASE B: PER-TICKER ANALYSIS (shared by full + on-demand runs) ---
+def _with_run_header(md: str, run_id: str, ticker: str) -> str:
+    """Stamp the run_id onto a stored report so it is visible (and copyable) at the
+    top of the web viewer. When recording a purchase, this run_id is what you save
+    against the lot so the sell-condition check can pin the exact thesis you bought
+    under (`--run RUN_ID`; see specs/agent_architecture.md §8.D). Rendered as a
+    blockquote at the very top; it does not disturb '## ...' section parsing."""
+    if not md:
+        return md
+    banner = f"> **Run ID:** `{run_id}`  \n> **Ticker:** {ticker}\n\n"
+    return banner + md
+
+
 def _extract_verdict(report_text: str) -> str:
     """Extract BUY/WATCH/AVOID from the report's '## Final Verdict' section.
 
@@ -390,28 +533,44 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
 
     bear_data = state.get("bear_data", "") or ""
     bull_data = state.get("bull_data", "") or ""
+    sale_data = state.get("sale_data", "") or ""
     report_text = state.get("final_report", "") or ""
 
     # Persist each step's raw output (spec section 5B). SEC/metrics are raw
     # provenance (reproducible, low search value) -> stored without an embedding.
-    # Bear/bull are the analytical content -> embedded for semantic search.
+    # Bear/bull/sale are the analytical content -> embedded for semantic search.
     _check_db(db_store_agent_output(run_id, ticker, "SEC_DATA", sec_data, json.dumps({"ticker": ticker}), embed=False), f"{ticker} SEC output")
     _check_db(db_store_agent_output(run_id, ticker, "QUANT_METRICS", metrics_data, json.dumps({"ticker": ticker}), embed=False), f"{ticker} metrics output")
-    _check_db(db_store_agent_output(run_id, ticker, "BEAR_CASE", bear_data, json.dumps({"ticker": ticker})), f"{ticker} bear case")
-    _check_db(db_store_agent_output(run_id, ticker, "BULL_CASE", bull_data, json.dumps({"ticker": ticker})), f"{ticker} bull case")
+    # The analytical reports carry a run_id banner (bear/bull/sale/final) so the
+    # viewer shows the run_id you record against a lot on purchase. SEC/metrics are
+    # raw provenance and are stored as-is.
+    _check_db(db_store_agent_output(run_id, ticker, "BEAR_CASE", _with_run_header(bear_data, run_id, ticker), json.dumps({"ticker": ticker})), f"{ticker} bear case")
+    _check_db(db_store_agent_output(run_id, ticker, "BULL_CASE", _with_run_header(bull_data, run_id, ticker), json.dumps({"ticker": ticker})), f"{ticker} bull case")
+    # Phase C sale advisory (thesis-breaking events for an assumed owner).
+    if sale_data:
+        sale_stored = _with_run_header(sale_data, run_id, ticker)
+        _check_db(db_store_agent_output(run_id, ticker, "SALE_CASE", sale_stored, json.dumps({"ticker": ticker})), f"{ticker} sale case")
+        sale_path = os.path.join("reports", f"{ticker}_Sale_Advisory.md")
+        with open(sale_path, "w", encoding='utf-8') as f:
+            f.write(sale_stored)
+    else:
+        logger.warning(f"[{ticker}] Sale advisor produced no output; skipping SALE_CASE persistence.")
 
     if not report_text:
         logger.error(f"[{ticker}] No final report produced; skipping report persistence.")
         return usage
 
+    # Extract the verdict from the original text (banner at top doesn't affect the
+    # '## Final Verdict' split), then persist the banner'd report.
     verdict = _extract_verdict(report_text)
-    _check_db(db_store_final_report(run_id, ticker, verdict, report_text), f"{ticker} final report")
+    report_stored = _with_run_header(report_text, run_id, ticker)
+    _check_db(db_store_final_report(run_id, ticker, verdict, report_stored), f"{ticker} final report")
     # Index this run under the ticker for the web UI.
     _check_db(db_store_ticker_run(run_id, ticker, company_name or ticker, verdict), f"{ticker} ticker_run")
 
     report_path = os.path.join("reports", f"{ticker}_Final_Report_{verdict.title()}.md")
     with open(report_path, "w", encoding='utf-8') as f:
-        f.write(report_text)
+        f.write(report_stored)
 
     logger.info(f"[{ticker}] Completed Analysis ({verdict}) and saved to {report_path}")
     return usage
@@ -543,6 +702,68 @@ def run_single_ticker(ticker: str, company_name: str = None):
     _finalize_run(run_id, usage, "On-Demand Run")
 
 
+def _extract_recommendation(text: str) -> str:
+    """Pull SELL/HOLD from the sell-check report's 'Recommendation:' line."""
+    m = re.search(r"recommendation[^A-Za-z]{0,12}(sell|hold)", text, re.IGNORECASE)
+    return m.group(1).upper() if m else "UNKNOWN"
+
+
+def run_sell_check(ticker: str, company_name: str = None, run_id: str = None):
+    """On-demand sell-condition check for a single stock. Loads a stored SALE_CASE
+    (the sale advisor's measurable sell triggers) and tests, against CURRENT data,
+    whether any/all are now met — advising Sell vs. Hold for someone who already owns
+    the stock.
+
+    `run_id` pins the check to a SPECIFIC run's SALE_CASE — use the run you purchased
+    under, so a held position is evaluated against the exact thesis it was bought
+    under (sale conditions are exit criteria for a specific entry thesis; see
+    specs/agent_architecture.md §8.D). When omitted, the most recent SALE_CASE is used.
+
+    This is a lightweight flow: it reads the prior sale conditions from the DB and
+    writes a local report file, but does NOT create a pipeline_runs / ticker_runs
+    record (so it never appears in the web UI's run lists)."""
+    ticker = ticker.strip().upper()
+    company_name = company_name or ticker
+    pin = f" (pinned to run {run_id})" if run_id else ""
+    logger.info(f"Starting Sell-Condition Check for {ticker} ({company_name}){pin}")
+
+    # 1. Load the sale-advisory conditions (a specific run's, or the most recent).
+    data = json.loads(db_get_sale_case(ticker, run_id or ""))
+    if data.get("error"):
+        logger.error(f"[{ticker}] {data['error']}")
+        return
+    sale_conditions = data.get("sale_conditions", "") or ""
+    logger.info(
+        f"[{ticker}] Loaded sale conditions from run {data.get('run_id')} "
+        f"(dated {data.get('created_at')})."
+    )
+
+    # 2. Gather CURRENT fundamentals (direct tool call — 100% fidelity, 0 tokens).
+    logger.info(f"[{ticker}] Fetching current FMP metrics...")
+    metrics_data = fmp_metrics_extractor(ticker)
+
+    # 3. Evaluate the conditions against current data + live news/web research.
+    logger.info(f"[{ticker}] Evaluating sale conditions against current data...")
+    try:
+        state, usage = _run_sell_check(ticker, company_name, sale_conditions, metrics_data)
+    except Exception as e:
+        logger.error(f"[{ticker}] Sell-condition check aborted: {e}")
+        return
+
+    _log_usage(f"{ticker} sell-check", usage)
+    result = state.get("sell_check", "") or ""
+    if not result:
+        logger.error(f"[{ticker}] Sell-condition check produced no output.")
+        return
+
+    out_path = os.path.join("reports", f"{ticker}_Sell_Check.md")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(result)
+
+    recommendation = _extract_recommendation(result)
+    logger.info(f"[{ticker}] Sell-condition check complete — Recommendation: {recommendation}. Saved to {out_path}")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -550,22 +771,39 @@ if __name__ == "__main__":
         description="Magic Formula Skeptical Decomposer",
         epilog=(
             "Modes:\n"
-            "  python main.py                  full pipeline (Phase A screener + Phase B)\n"
-            "  python main.py --from-csv       skip Phase A; run Phase B on top N from the rankings CSV\n"
-            "  python main.py --from-csv PATH  same, from a specific CSV file\n"
-            "  python main.py TICKER [Company] on-demand Phase B for one ticker"
+            "  python main.py                     full pipeline (Phase A screener + Phase B + Phase C)\n"
+            "  python main.py --from-csv          skip Phase A; run Phase B/C on top N from the rankings CSV\n"
+            "  python main.py --from-csv PATH     same, from a specific CSV file\n"
+            "  python main.py TICKER [Company]    on-demand Phase B/C for one ticker\n"
+            "  python main.py --sell-check TICKER [Company]            test if TICKER's latest sale conditions are now met (Sell/Hold)\n"
+            "  python main.py --sell-check TICKER --run RUN_ID         same, but against a SPECIFIC run's conditions (the run you bought under)"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("ticker", nargs="?", help="On-demand Phase B for a single ticker (skips Phase A)")
+    parser.add_argument("ticker", nargs="?", help="On-demand analysis for a single ticker (skips Phase A)")
     parser.add_argument("company", nargs="?", help="Optional company name for the single-ticker run")
     parser.add_argument(
         "--from-csv", nargs="?", const=OUTPUT_FILENAME, metavar="PATH", default=None,
-        help=f"Skip Phase A; read candidates from the screener CSV (default: {OUTPUT_FILENAME}) and run Phase B on the top N",
+        help=f"Skip Phase A; read candidates from the screener CSV (default: {OUTPUT_FILENAME}) and run Phase B/C on the top N",
+    )
+    parser.add_argument(
+        "--sell-check", action="store_true",
+        help="Test whether TICKER's sale conditions are now met, and advise Sell/Hold (no full analysis)",
+    )
+    parser.add_argument(
+        "--run", metavar="RUN_ID", default=None,
+        help="With --sell-check: evaluate against a SPECIFIC run's SALE_CASE (the run you purchased under) instead of the latest",
     )
     args = parser.parse_args()
 
-    if args.from_csv:
+    if args.run and not args.sell_check:
+        parser.error("--run is only valid together with --sell-check")
+
+    if args.sell_check:
+        if not args.ticker:
+            parser.error("--sell-check requires a TICKER (e.g. python main.py --sell-check CROX)")
+        run_sell_check(args.ticker, args.company, args.run)
+    elif args.from_csv:
         run_from_csv(args.from_csv)
     elif args.ticker:
         run_single_ticker(args.ticker, args.company)

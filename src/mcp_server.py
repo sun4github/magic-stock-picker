@@ -641,5 +641,53 @@ def db_search_historical_reports(query_text: str, ticker: str = "", limit: int =
     except Exception as e:
         return f"Error searching historical reports: {str(e)}"
 
+
+@mcp.tool()
+def db_get_sale_case(ticker: str, run_id: str = "") -> str:
+    """
+    Fetch a SALE_CASE (Phase C sale-advisory conditions) for a ticker. When `run_id`
+    is given, returns that specific run's SALE_CASE (so a held position is evaluated
+    against the exact thesis it was bought under); otherwise returns the most recent
+    one. Returns JSON with run_id, created_at, and the raw sale conditions (the
+    specific, measurable sell triggers). Returns an error JSON if no matching sale
+    advisory is on record.
+    """
+    try:
+        ticker = ticker.strip().upper()
+        run_id = (run_id or "").strip()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        if run_id:
+            cur.execute('''
+                SELECT run_id::text, created_at, raw_content
+                FROM agent_outputs
+                WHERE ticker = %s AND agent_type = 'SALE_CASE' AND run_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+            ''', (ticker, run_id))
+        else:
+            cur.execute('''
+                SELECT run_id::text, created_at, raw_content
+                FROM agent_outputs
+                WHERE ticker = %s AND agent_type = 'SALE_CASE'
+                ORDER BY created_at DESC
+                LIMIT 1
+            ''', (ticker,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            where = f"in run {run_id}" if run_id else "on record"
+            return json.dumps({"error": f"No SALE_CASE found for {ticker} {where}. Run the analysis pipeline first."})
+        return json.dumps({
+            "ticker": ticker,
+            "run_id": row[0],
+            "created_at": row[1].isoformat() if row[1] else None,
+            "sale_conditions": row[2],
+        })
+    except Exception as e:
+        return json.dumps({"error": f"Error fetching sale case for {ticker}: {str(e)}"})
+
+
 if __name__ == "__main__":
     mcp.run()

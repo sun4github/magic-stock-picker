@@ -4,7 +4,8 @@ A multi-agent stock research pipeline built on the Google Agent Development Kit 
 It combines Joel Greenblatt's **Magic Formula** (a quantitative value + quality
 screen) with an LLM research pipeline that argues **both sides** of the investment
 case — a Bear Agent and a Bull Agent — before a neutral Analyst Agent weighs them
-and issues a verdict.
+and issues a verdict, followed by a Sale Advisor that (assuming you own the stock)
+names the specific business events that would break the thesis.
 
 ## What it does
 
@@ -34,11 +35,19 @@ on-demand ticker):
 the stock: **Buy** (worth initiating), **Watch** (not compelling now / watchlist),
 or **Avoid** (actively unattractive).
 
+**Phase C — Sale Advisory.** After the analyst report is produced, a **Sale
+Advisor Agent** (`src/sale-advisor-instructions.md`) runs per ticker. It *ignores*
+the verdict and *assumes the stock is already owned*, then — using the analyst's
+bull/bear thesis plus fresh FMP news + Tavily research — names the **three specific,
+measurable business events** (not price movements) that would signal the original
+investment case is broken and justify selling.
+
 **Persistence.** Every run writes to PostgreSQL (with `pgvector` embeddings for
 semantic search): the pipeline run's token/search usage and estimated cost, each
-agent's raw output (SEC/metrics stored without embeddings; bear/bull case and the
-final report embedded for search), and the final verdict. Reports are also saved
-locally to `src/reports/<TICKER>_Final_Report_<Buy|Watch|Avoid>.md`.
+agent's raw output (SEC/metrics stored without embeddings; bear/bull/sale case and
+the final report embedded for search), and the final verdict. Reports are also
+saved locally to `src/reports/<TICKER>_Final_Report_<Buy|Watch|Avoid>.md` and
+`src/reports/<TICKER>_Sale_Advisory.md`.
 
 See [`src/specs/agent_architecture.md`](src/specs/agent_architecture.md) and
 [`src/specs/workflow.feature`](src/specs/workflow.feature) for the full design spec.
@@ -126,11 +135,34 @@ Each run creates a `pipeline_runs` row (token usage, search usage, and
 estimated cost), logs progress to `src/logs/`, and writes reports to
 `src/reports/`.
 
+**Sell-condition check** — for a stock you already own, test whether the
+thesis-breaking sale conditions from a prior analysis are now met. It loads a
+stored `SALE_CASE`, pulls current FMP fundamentals + live news/web research, marks
+each condition **MET / NOT MET / UNCLEAR** with evidence, and advises **SELL** (if
+any condition is clearly met) or **HOLD**.
+```bash
+python main.py --sell-check CROX                    # against CROX's LATEST sale conditions
+python main.py --sell-check CROX "Crocs Inc"        # optional explicit company name
+python main.py --sell-check CROX --run <RUN_ID>     # against a SPECIFIC run's conditions
+```
+This is a lightweight flow: it reads the prior conditions and writes
+`src/reports/<TICKER>_Sell_Check.md`, but does **not** create a new pipeline run
+(so it never appears in the web UI's run lists). It requires a prior run to have
+produced a `SALE_CASE` for the ticker.
+
+> **Which conditions get checked?** Sale conditions are exit criteria tied to a
+> *specific* investment thesis. By default the check uses the ticker's *latest*
+> stored `SALE_CASE`, which is only correct if you haven't re-analyzed since buying.
+> **If you bought under an earlier run, pin it with `--run <RUN_ID>`** — the run you
+> purchased under — so you evaluate the conditions you actually committed to rather
+> than a fresh `SALE_CASE` anchored to a thesis you never acted on. The `RUN_ID` is
+> shown in the run logs. See [`src/specs/agent_architecture.md`](src/specs/agent_architecture.md) §8.D.
+
 ## Web UI (report viewer)
 
 A separate, read-only Flask web app in [`webapp/`](webapp/) lets you browse the
 stored reports: pick a ticker, choose a run (by date), and view the Bear / Bull /
-Final reports with the Buy/Watch/Avoid recommendation and a markdown download.
+Sale Advisory / Final reports with the Buy/Watch/Avoid recommendation and a markdown download.
 It's designed to run on a Raspberry Pi and connects to the same database via its
 own `.env`. See [`webapp/README.md`](webapp/README.md) for full details.
 

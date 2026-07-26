@@ -13,8 +13,9 @@ It offers **two ways to browse the same reports**, switchable at the top of the 
 1. Pick a **ticker** — an alphabetical dropdown / type-ahead text box (any ticker
    that has at least one analysis run).
 2. Pick a **pipeline run** — sorted newest-first, with the run date shown.
-3. View the **Bear Case**, **Bull Case**, and **Final Report** for that run,
-   rendered as markdown, with the **recommendation** (Buy / Watch / Avoid) badge.
+3. View the **Bear Case**, **Bull Case**, **Sale Advisory**, and **Final Report**
+   for that run, rendered as markdown, with the **recommendation** (Buy / Watch /
+   Avoid) badge.
 4. **Download** any report as a `.md` file to the viewing device.
 
 ### Browse by pipeline run
@@ -24,8 +25,8 @@ It offers **two ways to browse the same reports**, switchable at the top of the 
    single-ticker on-demand one-offs are excluded — browse those under "by ticker".
 2. See **every ticker analyzed in that run**, listed A–Z, each with its
    **Buy / Watch / Avoid** recommendation badge and a summary tally.
-3. Click **View reports** on any ticker to open its Bear / Bull / Final reports
-   for that specific run (a "Back to run" link returns to the list).
+3. Click **View reports** on any ticker to open its Bear / Bull / Sale Advisory /
+   Final reports for that specific run (a "Back to run" link returns to the list).
 4. **Download CSV** — all tickers and their recommendations for the run
    (`Ticker,Company,Recommendation`) to the viewing device.
 

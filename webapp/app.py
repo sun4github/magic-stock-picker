@@ -188,12 +188,13 @@ def download_run():
 
 
 def _fetch_reports(run_id: str, ticker: str):
-    """Return (bear_md, bull_md, final_md, verdict) for one run/ticker."""
+    """Return (bear_md, bull_md, sale_md, final_md, verdict) for one run/ticker."""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
         """SELECT agent_type, raw_content FROM agent_outputs
-           WHERE run_id = %s AND ticker = %s AND agent_type IN ('BEAR_CASE', 'BULL_CASE')""",
+           WHERE run_id = %s AND ticker = %s
+             AND agent_type IN ('BEAR_CASE', 'BULL_CASE', 'SALE_CASE')""",
         (run_id, ticker),
     )
     parts = {t: c for t, c in cur.fetchall()}
@@ -206,7 +207,13 @@ def _fetch_reports(run_id: str, ticker: str):
     conn.close()
     final_md = fr[0] if fr else ""
     verdict = fr[1] if fr else ""
-    return parts.get("BEAR_CASE", ""), parts.get("BULL_CASE", ""), final_md, verdict
+    return (
+        parts.get("BEAR_CASE", ""),
+        parts.get("BULL_CASE", ""),
+        parts.get("SALE_CASE", ""),
+        final_md,
+        verdict,
+    )
 
 
 @app.route("/api/report")
@@ -215,16 +222,18 @@ def api_report():
     ticker = (request.args.get("ticker") or "").strip().upper()
     if not run_id or not ticker:
         abort(400)
-    bear, bull, final, verdict = _fetch_reports(run_id, ticker)
+    bear, bull, sale, final, verdict = _fetch_reports(run_id, ticker)
     return jsonify(
         {
             "ticker": ticker,
             "verdict": verdict,
             "bear_html": render_md(bear),
             "bull_html": render_md(bull),
+            "sale_html": render_md(sale),
             "final_html": render_md(final),
             "has_bear": bool(bear),
             "has_bull": bool(bull),
+            "has_sale": bool(sale),
             "has_final": bool(final),
         }
     )
@@ -235,16 +244,17 @@ def download():
     """Download a report's raw markdown to the viewing device."""
     run_id = request.args.get("run_id")
     ticker = (request.args.get("ticker") or "").strip().upper()
-    kind = (request.args.get("kind") or "final").lower()
+    kind = (request.args.get("kind") or "final").lower()  # bear|bull|sale|final
     if not run_id or not ticker:
         abort(400)
-    bear, bull, final, verdict = _fetch_reports(run_id, ticker)
-    text = {"bear": bear, "bull": bull, "final": final}.get(kind, final)
+    bear, bull, sale, final, verdict = _fetch_reports(run_id, ticker)
+    text = {"bear": bear, "bull": bull, "sale": sale, "final": final}.get(kind, final)
     if not text:
         abort(404)
     label = {
         "bear": "Bear_Case",
         "bull": "Bull_Case",
+        "sale": "Sale_Advisory",
         "final": f"Final_Report_{(verdict or 'NA').title()}",
     }.get(kind, "Report")
     fname = f"{ticker}_{label}.md"

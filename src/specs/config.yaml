@@ -45,6 +45,26 @@ agents:
     model: "gemini-flash-latest"              # weighs bull vs bear -> Buy/Watch/Avoid
     output_format: "markdown"
 
+  sale_advisor_agent:
+    name: "Sale_Advisor_Agent"
+    model: "gemini-flash-latest"              # Phase C: defines the thesis-breaking sell triggers
+    instructions_file: "sale-advisor-instructions.md"
+    news_provider: "fmp"
+    news_api_key_env: "FMP_API_KEY"
+    search_provider: "tavily"                 # qualitative open-web (adverse events)
+    search_api_key_env: "TAVILY_API_KEY"
+
+  # On-demand sell-condition check (Phase C follow-up). A standalone single-stock
+  # flow: loads the ticker's latest SALE_CASE and tests whether its conditions are
+  # now met against CURRENT data, advising Sell/Hold. Not part of the analysis graph.
+  sell_check_agent:
+    name: "Sell_Check_Agent"
+    model: "gemini-flash-latest"
+    news_provider: "fmp"                      # current developments (impairments, contract loss)
+    news_api_key_env: "FMP_API_KEY"
+    search_provider: "tavily"                 # anything not in the news feed
+    search_api_key_env: "TAVILY_API_KEY"
+
 tools:
   web_search:
     default_engine: "tavily"

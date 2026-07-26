@@ -89,6 +89,5 @@ heavily on the Expectations Check below and on industry conditions.
 Given all the facts gathered above, answer the following questions: 
 1. what are the three biggest specific risks over the next three to five years? 
 2. For each risk indicate whether it is company-specific, industry-wide, or macro, and whether it would likely play out gradually or suddenly. Avoid generic risks unless you explain exactly how they apply to this specific company.
-3. Assume you are presenting the bear case to an investment committee determined to avoid mistakes. What are the strongest reasons to reject this company as an investment today? Focus
-on valuation, competition, management execution, industry disruption, and ways my thesis could be wrong. Challenge assumptions rather than repeating them.
+3. Assume you are presenting the bear case to an investment committee determined to avoid mistakes. What are the strongest reasons to reject this company as an investment today? Focus on valuation, competition, management execution, industry disruption, and ways my thesis could be wrong. Challenge assumptions rather than repeating them.
 

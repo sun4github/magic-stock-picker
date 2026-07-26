@@ -13,7 +13,7 @@ Background:
     When a user selects a ticker (alphabetical dropdown or 3-letter type-ahead search)
     Then the app lists that ticker's pipeline runs from "ticker_runs", sorted by date (date shown)
     And when the user selects a run
-    Then the app displays the Bear Case, Bull Case, and Final Report as rendered markdown
+    Then the app displays the Bear Case, Bull Case, Sale Advisory, and Final Report as rendered markdown
     And it shows the Buy/Watch/Avoid recommendation for that run
     And it offers a download of each report as a markdown (.md) file to the viewing device
 	

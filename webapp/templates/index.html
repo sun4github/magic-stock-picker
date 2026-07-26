@@ -166,6 +166,7 @@
         <button class="tab active" data-kind="final">Final Report</button>
         <button class="tab" data-kind="bull">Bull Case</button>
         <button class="tab" data-kind="bear">Bear Case</button>
+        <button class="tab" data-kind="sale">Sale Advisory</button>
       </div>
       <div class="panel">
         <div class="panel-actions">
@@ -259,7 +260,7 @@
 
     function renderTab() {
       if (!state.data) return;
-      const map = { final: "final_html", bull: "bull_html", bear: "bear_html" };
+      const map = { final: "final_html", bull: "bull_html", bear: "bear_html", sale: "sale_html" };
       $("content").innerHTML = state.data[map[state.kind]] || "<p class='muted'>Not available.</p>";
       $("download").href = "/download?ticker=" + encodeURIComponent(state.ticker) +
         "&run_id=" + encodeURIComponent(state.runId) + "&kind=" + state.kind;
