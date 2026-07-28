@@ -21,6 +21,7 @@ from mcp_server import (
     compute_ticker_magic_metrics,
     fetch_sec_10k_data,
     fmp_metrics_extractor,
+    fmp_quarterly_trends,
     fmp_stock_news,
     web_search_tool,
     db_create_pipeline_run,
@@ -31,8 +32,9 @@ from mcp_server import (
     db_store_ticker_run,
     db_get_sale_case
 )
-# The screener's CSV output path (default source for --from-csv mode).
-from magic_formula_starter_screener import OUTPUT_FILENAME
+# The screener's CSV output path (default source for --from-csv mode) and the
+# shared dollar formatter, so amounts read identically in reports and logs.
+from magic_formula_starter_screener import OUTPUT_FILENAME, format_money
 
 load_dotenv()
 
@@ -103,6 +105,45 @@ with open(sale_advisor_path, "r") as f:
 # the graph runs; each agent templates the keys it references.
 APP_NAME = "skeptical_decomposer"
 
+# Shared prompt fragment: the same recency mandate is given to bear, bull, and
+# analyst so no role can build a case on annual data alone. Added after a review
+# found every agent arguing from FY2023-FY2025 trends while the two most recent
+# quarters were contracting -- the annual feed simply could not show it.
+RECENCY_MANDATE = (
+    "## Recency requirement (mandatory)\n"
+    "QUARTERLY_DATA below contains the last 8 quarters and an explicit "
+    "year-over-year comparison of each recent quarter against the same quarter a "
+    "year earlier. METRICS_DATA is ANNUAL and cannot show recent deterioration.\n"
+    "- You MUST examine the most recent quarter before writing any conclusion.\n"
+    "- You MUST state plainly whether the most recent quarter CONFIRMS or "
+    "CONTRADICTS the multi-year annual trend, and quote the specific year-over-year "
+    "percentage changes in revenue, operating income, and operating cash flow.\n"
+    "- A deteriorating recent quarter is present-tense evidence. Do not discount it "
+    "as noise, and do not let a healthier annual trend paper over it.\n"
+    "- If quarterly data is unavailable, say so explicitly and treat it as a gap in "
+    "the evidence -- never as confirmation that recent quarters were fine.\n\n"
+)
+
+# Shared prompt fragment: figures the pipeline computed deterministically from the
+# filings. Agents may not contradict these. Added after a review found a bear case
+# asserting $36.9B of debt for a company carrying $29.3B -- the wrong figure then
+# propagated into the bull refutation, the final verdict, and a sell trigger that
+# was calibrated against a number that never existed.
+VERIFIED_FIGURES_MANDATE = (
+    "## Verified figures (authoritative)\n"
+    "VERIFIED_FIGURES below were computed directly from the company's filings by "
+    "this pipeline, not by a language model. They override any conflicting number "
+    "you find in news, web search, or your own recollection.\n"
+    "- You MUST NOT state a total debt, cash, market capitalisation, enterprise "
+    "value, or shares-outstanding figure that contradicts VERIFIED_FIGURES.\n"
+    "- If a source you cite disagrees with a verified figure, use the verified "
+    "figure and note the discrepancy rather than silently preferring the source.\n"
+    "- Do not confuse market capitalisation with total debt: they are different "
+    "line items and a plausible-looking coincidence between them is a sign you have "
+    "mixed them up.\n\n"
+)
+
+
 # --- Advocate 1: BEAR (skeptical research) ---
 bear_agent = LlmAgent(
     name="bear_agent",
@@ -115,7 +156,15 @@ bear_agent = LlmAgent(
         "risks, short-seller theses, and competitive/regulatory threats. Answer the "
         "questions above skeptically, using the gathered research plus the financial "
         "data below. Do not invent facts; cite sources.\n\n"
-        "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
+        + RECENCY_MANDATE
+        + "Open your '## 3. Key Numbers' section with a MOST RECENT QUARTER table "
+        "drawn from QUARTERLY_DATA (revenue, operating income, net income, operating "
+        "cash flow, capital expenditure, total debt -- each against the same quarter a "
+        "year earlier) BEFORE presenting the three-year annual summary.\n\n"
+        + VERIFIED_FIGURES_MANDATE
+        + "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
+        "<VERIFIED_FIGURES>\n{verified_figures}\n</VERIFIED_FIGURES>\n\n"
+        "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
         "<SEC_DATA>\n{sec_data}\n</SEC_DATA>\n\n"
         "<METRICS_DATA>\n{metrics_data}\n</METRICS_DATA>\n"
     ),
@@ -137,7 +186,22 @@ bull_agent = LlmAgent(
         "evidence (moat/pricing power, growth catalysts, historical resilience). Answer "
         "every bullish question above; for Section 4, directly refute the specific "
         "points raised in BEAR_CASE. Do not invent facts; cite sources.\n\n"
+        + RECENCY_MANDATE
+        + "A refutation that ignores a deteriorating recent quarter is not a "
+        "refutation. Where the bear case cites recent-quarter weakness, either "
+        "explain concretely why it is temporary (naming the specific mechanism and "
+        "when it reverses) or concede it.\n\n"
+        + VERIFIED_FIGURES_MANDATE
+        + "If the BEAR_CASE states a figure that contradicts VERIFIED_FIGURES, correct "
+        "it explicitly in your Section 4 rather than arguing against the wrong number.\n\n"
+        "## Distinguish confirmed from speculative\n"
+        "When your case rests on a catalyst, label it: CONFIRMED (already reported, "
+        "contracted, or filed) or SPECULATIVE (rumoured transaction, press report of "
+        "talks, management target for a future year, analyst projection). State each "
+        "catalyst's label inline. A rumoured deal is optionality, not a plan.\n\n"
         "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
+        "<VERIFIED_FIGURES>\n{verified_figures}\n</VERIFIED_FIGURES>\n\n"
+        "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
         "<SEC_DATA>\n{sec_data}\n</SEC_DATA>\n\n"
         "<METRICS_DATA>\n{metrics_data}\n</METRICS_DATA>\n\n"
         "<BEAR_CASE>\n{bear_data}\n</BEAR_CASE>\n"
@@ -156,18 +220,98 @@ analyst_agent = LlmAgent(
         "case for {company_name} ({ticker}), plus the Magic Formula value/quality "
         "context. Weigh them fairly and write a Markdown report with EXACTLY these "
         "sections:\n"
+        "## Recent Quarter Check\n"
         "## Bull Case (summary)\n"
         "## Bear Case (summary)\n"
         "## Final Verdict\n"
-        "In the Final Verdict, explicitly weigh the bull case against the bear case, then "
-        "state exactly one verdict for an investor who does NOT currently own the stock:\n"
-        "- 'Verdict: Buy'   = attractive enough to initiate a position.\n"
+        "## What Would Make This Wrong\n\n"
+        "## Writing style\n"
+        "Your reader is a college-educated adult with NO accounting or finance "
+        "background — not a professional investor. Write every section in plain, "
+        "everyday English: explain what is happening and why it matters to an "
+        "ordinary investor's money, not just what the numbers say. When a "
+        "technical/financial term genuinely earns its place (e.g. 'gross margin', "
+        "'free cash flow', 'return on capital'), you may use it, but immediately "
+        "follow it with a short plain-English explanation in brackets, e.g. 'gross "
+        "margin (the share of each sales dollar left after making the product)'. "
+        "Keep the bracketed term for readers who want it, but never leave a reader "
+        "guessing what it means. Avoid jargon, acronyms, and hedge-speak where a "
+        "plain sentence would do.\n\n"
+        "## Recent Quarter Check (write this section FIRST)\n"
+        "Before weighing either case, read QUARTERLY_DATA and report what the most "
+        "recent quarter actually did versus the same quarter a year earlier: revenue, "
+        "operating income, net income, operating cash flow, capital expenditure. Quote "
+        "the year-over-year percentages. Then state in one sentence whether the recent "
+        "quarter CONFIRMS or CONTRADICTS the longer-term annual picture the two cases "
+        "argue over. If it contradicts, that finding carries into the verdict — you may "
+        "not reach the Final Verdict without addressing it.\n\n"
+        + VERIFIED_FIGURES_MANDATE
+        + "Where BEAR_CASE and BULL_CASE disagree on a figure covered by "
+        "VERIFIED_FIGURES, the verified figure wins and you should say so plainly.\n\n"
+        "## How to weigh evidence\n"
+        "Apply the same standard to both cases:\n"
+        "- Realised results outrank projections. Something that has already happened "
+        "(a reported decline, a completed refinancing, a signed contract) carries more "
+        "weight than something expected to happen.\n"
+        "- Label the bull case's catalysts CONFIRMED or SPECULATIVE. A rumoured "
+        "transaction, a press report of talks, a management target for a future year, "
+        "and an analyst price target are all SPECULATIVE.\n"
+        "- A 'Buy' may not rest on a SPECULATIVE catalyst. If removing every "
+        "speculative catalyst collapses the bull case, the verdict is at best 'Watch'. "
+        "Speculative catalysts are upside on top of a case that already stands up, "
+        "never the foundation of one.\n"
+        "- 'Priced in' is a claim, not an argument. If you conclude a risk is already "
+        "reflected in the valuation, say what specifically tells you that, or drop the "
+        "claim.\n"
+        "- Return on Capital from the Magic Formula screen excludes goodwill and "
+        "acquired intangibles. For a company built by acquisition this makes the "
+        "headline figure very large while saying nothing about the return earned on the "
+        "purchase price. Where VERIFIED_FIGURES reports a goodwill-inclusive ROIC "
+        "alongside it, cite BOTH, and do not describe the business as exceptionally "
+        "capital-efficient on the strength of the screen figure alone.\n\n"
+        "## Verdict stance\n"
+        "Assume your reader is a middle-class, mid-career professional investing "
+        "their own hard-earned savings — not a millionaire, billionaire, or "
+        "institution that can shrug off a loss. Be fair and honest about risk, but "
+        "do not default to over-caution: someone mid-career with years left to ride "
+        "out volatility can reasonably accept moderate, well-reasoned risk in "
+        "exchange for growth, so weigh the bull case on its merits rather than "
+        "treating every uncertainty as disqualifying. Equally, do not let an "
+        "attractive story pull an unproven case up to 'Buy' — the two failure "
+        "directions are symmetric and you should guard against both. In the Final "
+        "Verdict, explicitly weigh the bull case against the bear case, then state "
+        "exactly one verdict for an investor who does NOT currently own the stock:\n"
+        "- 'Verdict: Buy'   = passes the screen on its own merits; a reasonable "
+        "candidate to include in a DIVERSIFIED Magic Formula basket.\n"
         "- 'Verdict: Watch' = not compelling enough to buy now; watchlist.\n"
         "- 'Verdict: Avoid' = actively unattractive; do not buy.\n"
-        "Follow the verdict with a one-paragraph justification of how the two cases net "
-        "out. Do NOT default to the middle — choose 'Watch' only if genuinely balanced. "
-        "Do not invent facts beyond the two cases provided.\n\n"
+        "Write the verdict line in exactly this form, including the qualifier:\n"
+        "  **Verdict: Buy** — screen pass; candidate for a diversified basket, not a "
+        "single-stock recommendation.\n"
+        "Follow the verdict with a one-paragraph justification, in the plain-language "
+        "style above, of how the two cases net out. Do NOT default to the middle — "
+        "choose 'Watch' only if genuinely balanced, and do not let excess caution pull "
+        "a fair 'Buy' down to 'Watch'. Do not invent facts beyond the two cases "
+        "provided.\n\n"
+        "## Basket framing (mandatory, applies to every verdict)\n"
+        "The Magic Formula is a BASKET strategy. Greenblatt's own method buys 20–30 "
+        "screened companies and holds them about a year; it works because the winners "
+        "outweigh the individual names that turn out to be value traps. A verdict here "
+        "is a judgement about ONE name and cannot be de-risked by diversification the "
+        "reader has not actually done. In the Final Verdict you MUST include one plain "
+        "sentence telling the reader that this is a single screened candidate rather "
+        "than a standalone recommendation, and that the strategy's historical results "
+        "depend on holding many such names, not one.\n\n"
+        "## What Would Make This Wrong (mandatory final section)\n"
+        "Regardless of the verdict, close with the single most likely way it turns out "
+        "to be wrong. Name ONE specific, observable development — not 'macro "
+        "conditions' or 'execution risk' — and say what a reader would see in a future "
+        "earnings report if it were happening. For a 'Buy', this is the thing most "
+        "likely to break the case; for 'Watch' or 'Avoid', the thing most likely to "
+        "prove you too cautious. Do not use the word 'Verdict' in this section.\n\n"
         "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
+        "<VERIFIED_FIGURES>\n{verified_figures}\n</VERIFIED_FIGURES>\n\n"
+        "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
         "<BEAR_CASE>\n{bear_data}\n</BEAR_CASE>\n\n"
         "<BULL_CASE>\n{bull_data}\n</BULL_CASE>\n"
     ),
@@ -197,6 +341,17 @@ sale_advisor_agent = LlmAgent(
         "(e.g. gross margin dropping below X%, two consecutive quarters of negative user "
         "growth, loss of a key distribution contract). Do not invent facts; cite "
         "sources.\n\n"
+        + VERIFIED_FIGURES_MANDATE
+        + "Your sell triggers are only as good as the baseline they are measured from. "
+        "Every numeric threshold you set MUST be anchored to a figure in "
+        "VERIFIED_FIGURES or QUARTERLY_DATA, and you MUST state the current actual "
+        "value next to each threshold so the investor can see how much headroom is "
+        "left (e.g. 'total debt above $32B — currently $29.3B'). A threshold that the "
+        "current figures already satisfy, or that sits so far from them it could never "
+        "realistically fire, is worse than useless: check each one against the actual "
+        "value before you write it.\n\n"
+        "<VERIFIED_FIGURES>\n{verified_figures}\n</VERIFIED_FIGURES>\n\n"
+        "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
         "<FINAL_REPORT>\n{final_report}\n</FINAL_REPORT>\n"
     ),
     tools=[fmp_stock_news, web_search_tool],
@@ -232,6 +387,11 @@ sell_check_agent = LlmAgent(
         "for anything not in the news feed. The latest FMP fundamentals are in "
         "CURRENT_METRICS below. Compare the current figures/events against each "
         "condition's threshold.\n\n"
+        "CURRENT_METRICS is ANNUAL. Sale conditions are frequently written in "
+        "quarterly terms ('two consecutive quarters of...'), which annual data cannot "
+        "answer — use QUARTERLY_DATA below, which holds the last 8 quarters with "
+        "year-over-year comparisons, to evaluate any condition expressed in quarters. "
+        "Quote the specific quarter and figure as your evidence.\n\n"
         "Write a Markdown report titled '## Sell-Condition Check'. For EACH sale "
         "condition, output:\n"
         "- **Condition** (restated briefly)\n"
@@ -245,6 +405,7 @@ sell_check_agent = LlmAgent(
         "invent facts; if data is unavailable say UNCLEAR and do not treat it as met. "
         "Cite sources.\n\n"
         "<SALE_CONDITIONS>\n{sale_conditions}\n</SALE_CONDITIONS>\n\n"
+        "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
         "<CURRENT_METRICS>\n{metrics_data}\n</CURRENT_METRICS>\n"
     ),
     tools=[fmp_stock_news, web_search_tool],
@@ -342,7 +503,8 @@ def _finalize_run(run_id: str, usage: dict, run_label: str) -> None:
 
 
 async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
-                              sec_data: str, metrics_data: str, screen_context: str):
+                              sec_data: str, metrics_data: str, screen_context: str,
+                              quarterly_data: str = "", verified_figures: str = ""):
     """Run the search->analysis graph for one ticker. Returns (state, usage) where
     state holds search_data/final_report (plus the seeded sec_data/metrics_data)
     and usage holds the aggregated token counts for this ticker's model calls."""
@@ -350,9 +512,11 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
     runner = Runner(app_name=APP_NAME, agent=skeptical_pipeline, session_service=session_service)
     session_id = f"{run_id}:{ticker}"
 
-    # Seed per-ticker context. sec_data/metrics_data come from direct tool calls
-    # (100% fidelity); screen_context carries the Magic Formula bull signal. All are
-    # read by the analysis agent via {sec_data}/{metrics_data}/{screen_context}.
+    # Seed per-ticker context. sec_data/metrics_data/quarterly_data come from direct
+    # tool calls (100% fidelity); screen_context carries the Magic Formula bull
+    # signal; verified_figures carries the deterministic balance-sheet ground truth
+    # every agent is forbidden to contradict. All are read by the agents via
+    # {sec_data}/{metrics_data}/{quarterly_data}/{screen_context}/{verified_figures}.
     await session_service.create_session(
         app_name=APP_NAME,
         user_id="orchestrator",
@@ -362,6 +526,8 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
             "company_name": company_name or ticker,
             "sec_data": sec_data,
             "metrics_data": metrics_data,
+            "quarterly_data": quarterly_data,
+            "verified_figures": verified_figures,
             "screen_context": screen_context,
         },
     )
@@ -385,7 +551,8 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
 
 
 def run_pipeline(run_id: str, ticker: str, company_name: str, sec_data: str,
-                 metrics_data: str, screen_context: str):
+                 metrics_data: str, screen_context: str,
+                 quarterly_data: str = "", verified_figures: str = ""):
     """Synchronous wrapper around the Phase-B graph with 429 exponential backoff.
     Returns (state, usage). Note: tokens from a failed attempt before a 429 are
     not counted (the retry re-runs the whole ticker); this is a minor undercount.
@@ -395,7 +562,10 @@ def run_pipeline(run_id: str, ticker: str, company_name: str, sec_data: str,
     """
     for attempt in range(MAX_AGENT_RETRIES):
         try:
-            state, usage = asyncio.run(_run_pipeline_async(run_id, ticker, company_name, sec_data, metrics_data, screen_context))
+            state, usage = asyncio.run(_run_pipeline_async(
+                run_id, ticker, company_name, sec_data, metrics_data, screen_context,
+                quarterly_data, verified_figures,
+            ))
             time.sleep(INTER_CALL_DELAY_SECONDS)  # gentle throttle between tickers
             return state, usage
         except Exception as e:
@@ -412,7 +582,8 @@ def run_pipeline(run_id: str, ticker: str, company_name: str, sec_data: str,
 
 
 async def _run_sell_check_async(ticker: str, company_name: str,
-                                sale_conditions: str, metrics_data: str):
+                                sale_conditions: str, metrics_data: str,
+                                quarterly_data: str = ""):
     """Run the standalone sell_check_agent for one ticker. Returns (state, usage);
     state['sell_check'] holds the evaluation report."""
     session_service = InMemorySessionService()
@@ -428,6 +599,7 @@ async def _run_sell_check_async(ticker: str, company_name: str,
             "company_name": company_name or ticker,
             "sale_conditions": sale_conditions,
             "metrics_data": metrics_data,
+            "quarterly_data": quarterly_data,
         },
     )
 
@@ -448,11 +620,14 @@ async def _run_sell_check_async(ticker: str, company_name: str,
     return (dict(final.state) if final else {}), usage
 
 
-def _run_sell_check(ticker: str, company_name: str, sale_conditions: str, metrics_data: str):
+def _run_sell_check(ticker: str, company_name: str, sale_conditions: str,
+                    metrics_data: str, quarterly_data: str = ""):
     """Synchronous wrapper around the sell-condition check with 429 backoff."""
     for attempt in range(MAX_AGENT_RETRIES):
         try:
-            return asyncio.run(_run_sell_check_async(ticker, company_name, sale_conditions, metrics_data))
+            return asyncio.run(_run_sell_check_async(
+                ticker, company_name, sale_conditions, metrics_data, quarterly_data,
+            ))
         except Exception as e:
             if _is_rate_limit_error(e) and attempt < MAX_AGENT_RETRIES - 1:
                 wait = BASE_BACKOFF_SECONDS * (2 ** attempt)
@@ -505,7 +680,7 @@ def _extract_verdict(report_text: str) -> str:
     return min(positions, key=positions.get).upper() if positions else "WATCH"
 
 
-def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: str = "") -> dict:
+def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: str = "", candidate: dict = None) -> dict:
     """Run the Phase-B SequentialAgent graph for one ticker and persist its
     outputs and final report. Returns the ticker's token-usage dict (zero usage
     if the pipeline failed).
@@ -514,17 +689,44 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     yield) so the verdict can weigh it against the bear case. Empty for tickers
     that did not come through the screen (on-demand runs).
 
+    `candidate` is the raw screener/on-demand metrics dict (EY_Pct, ROC_Pct,
+    EBIT_Basis, Final_Rank, ...) used to deterministically render the '## Magic
+    Formula Metrics' section of the final report -- kept separate from the LLM
+    prompt so those figures are always present and correct even if the analyst
+    agent's own writeup omits or misstates them.
+
     Assumes the parent pipeline_runs row for `run_id` already exists (the
     agent_outputs/final_reports tables have a FK onto it).
     """
-    logger.info(f"[{ticker}] Gathering SEC + metrics (direct tool calls)...")
+    logger.info(f"[{ticker}] Gathering SEC + metrics + quarterly trends (direct tool calls)...")
     # Pure data relays: call the deterministic tools directly (100% fidelity, 0 tokens).
     sec_data = fetch_sec_10k_data(ticker)
     metrics_data = fmp_metrics_extractor(ticker)
+    # Quarterly trends are a SEPARATE feed from metrics_data, which is annual-only.
+    # Without this the agents cannot see recent-quarter deterioration at all.
+    quarterly_data = fmp_quarterly_trends(ticker)
+    verified_figures = _format_verified_figures(candidate)
+
+    # The reconciliation gate can only check figures it has ground truth for. A
+    # rankings CSV written before those columns existed yields a candidate with no
+    # debt/cash/EV, which would quietly disable the gate for that ticker. Say so
+    # loudly: a guardrail that switches itself off without comment is the same
+    # class of problem it was added to fix. Re-run the screener to refresh the CSV.
+    missing = [k for k in ("TotalDebt", "Cash", "EnterpriseValue")
+               if k not in _verified_figures(candidate)]
+    if missing:
+        logger.warning(
+            f"[{ticker}] Incomplete verified figures (missing {', '.join(missing)}). "
+            f"The reconciliation gate cannot check those figures for this ticker — "
+            f"re-run the screener to regenerate {OUTPUT_FILENAME} with the full columns."
+        )
 
     logger.info(f"[{ticker}] Running bear -> bull -> analyst graph...")
     try:
-        state, usage = run_pipeline(run_id, ticker, company_name, sec_data, metrics_data, screen_context)
+        state, usage = run_pipeline(
+            run_id, ticker, company_name, sec_data, metrics_data, screen_context,
+            quarterly_data, verified_figures,
+        )
     except Exception as e:
         logger.error(f"[{ticker}] Skipping after pipeline failure: {e}")
         return _new_usage()
@@ -560,10 +762,43 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
         logger.error(f"[{ticker}] No final report produced; skipping report persistence.")
         return usage
 
-    # Extract the verdict from the original text (banner at top doesn't affect the
-    # '## Final Verdict' split), then persist the banner'd report.
+    # Reconciliation gate. Check the model-written sections against the figures the
+    # pipeline read from the filings itself. This runs AFTER generation rather than
+    # constraining it, because the failure being guarded against (a fabricated
+    # headline figure propagating bear -> bull -> verdict -> sell triggers) is only
+    # visible once the prose exists.
+    recon_findings = []
+    for label, body in (
+        ("Bear case", bear_data),
+        ("Bull case", bull_data),
+        ("Final report", report_text),
+        ("Sale advisory", sale_data),
+    ):
+        recon_findings.extend(_reconcile_agent_figures(body, candidate, label))
+    if recon_findings:
+        for f in recon_findings:
+            logger.warning(
+                f"[{ticker}] RECONCILIATION: {f['source']} states {f['field']} of "
+                f"{format_money(f['stated'])}, but the filings show "
+                f"{format_money(f['verified'])} (off by {f['deviation_pct']}%). "
+                f"Context: \"{f['context']}\""
+            )
+        logger.warning(
+            f"[{ticker}] {len(recon_findings)} figure(s) in this report contradict the "
+            f"filings; a warning table has been added to the report."
+        )
+    else:
+        logger.info(f"[{ticker}] Reconciliation gate passed (no contradicted figures).")
+
+    # Extract the verdict from the original text (banner/metrics section prepended
+    # below don't affect the '## Final Verdict' split), then persist the report
+    # with the deterministic Magic Formula Metrics section + run header prepended.
     verdict = _extract_verdict(report_text)
-    report_stored = _with_run_header(report_text, run_id, ticker)
+    report_with_metrics = (
+        f"{_format_magic_formula_section(candidate)}\n{report_text}"
+        f"{_format_reconciliation_section(recon_findings)}"
+    )
+    report_stored = _with_run_header(report_with_metrics, run_id, ticker)
     _check_db(db_store_final_report(run_id, ticker, verdict, report_stored), f"{ticker} final report")
     # Index this run under the ticker for the web UI.
     _check_db(db_store_ticker_run(run_id, ticker, company_name or ticker, verdict), f"{ticker} ticker_run")
@@ -607,6 +842,501 @@ def _format_screen_context(candidate: dict) -> str:
     return ctx
 
 
+def _verified_figures(candidate: dict) -> dict:
+    """The subset of screener output that is deterministic ground truth: figures
+    read straight off the filings rather than written by a model. Used twice --
+    injected into every agent prompt as VERIFIED_FIGURES, and used as the baseline
+    the reconciliation gate checks agent prose against."""
+    candidate = candidate or {}
+    out = {}
+    for key in (
+        "TotalDebt", "Cash", "TotalEquity", "TotalAssets", "GoodwillAndIntangibles",
+        "InvestedCapital", "EnterpriseValue", "LiveMarketCap", "EBIT", "CapitalEmployed",
+    ):
+        val = candidate.get(key)
+        if isinstance(val, (int, float)) and not pd.isna(val):
+            out[key] = float(val)
+    return out
+
+
+def _format_verified_figures(candidate: dict) -> str:
+    """Human-and-model readable VERIFIED_FIGURES block for the agent prompts.
+
+    Every number here came from the same balance sheet / income statement the
+    Magic Formula ratios were computed from, so an agent contradicting this block
+    is contradicting the pipeline's own basis for screening the company."""
+    candidate = candidate or {}
+    figs = _verified_figures(candidate)
+    if not figs:
+        return (
+            "No independently verified figures are available for this ticker (the "
+            "Magic Formula metrics could not be computed). Treat every financial "
+            "figure you cite as unverified and attribute it to its source."
+        )
+
+    def _m(key):
+        return format_money(figs[key]) if key in figs else "Not available"
+
+    lines = [
+        "Computed directly from the company's most recent filings by this pipeline. "
+        "These override any conflicting figure from news, search, or recollection.",
+        "",
+        f"- Total debt: {_m('TotalDebt')}",
+        f"- Cash and short-term investments: {_m('Cash')}",
+        f"- Market capitalisation: {_m('LiveMarketCap')}",
+        f"- Enterprise value: {_m('EnterpriseValue')}",
+        f"- Total shareholders' equity: {_m('TotalEquity')}",
+        f"- Total assets: {_m('TotalAssets')}",
+        f"- Goodwill and acquired intangibles: {_m('GoodwillAndIntangibles')}",
+        f"- Operating profit (EBIT, {candidate.get('EBIT_Basis') or 'basis not stated'}): {_m('EBIT')}",
+        f"- Balance sheet as of: {candidate.get('BalanceSheetDate') or 'Not available'}",
+    ]
+
+    # The two return figures side by side. Reported together because quoting the
+    # Greenblatt ROC alone for an acquisition-built company reliably produces the
+    # claim that it is an elite-efficiency business, which the goodwill-inclusive
+    # figure usually contradicts by an order of magnitude.
+    roc_pct = candidate.get("ROC_Pct")
+    roic_pct = candidate.get("ROIC_InclGoodwill_Pct")
+    intang_pct = candidate.get("IntangiblesShareOfAssets_Pct")
+    lines += [
+        "",
+        "Two different return-on-capital measures — cite BOTH, never the first alone:",
+        f"- Magic Formula ROC (EXCLUDES goodwill/intangibles): {roc_pct or 'Not available'}",
+        f"- ROIC including goodwill (return on capital actually spent, "
+        f"EBIT / (equity + debt - cash)): {roic_pct or 'Not available'}",
+        f"- Goodwill and intangibles as a share of total assets: {intang_pct or 'Not available'}",
+    ]
+    if intang_pct:
+        lines.append(
+            "  A high share here means the company was largely assembled by "
+            "acquisition, so the Magic Formula ROC is a screening artifact of "
+            "excluding the purchase price — not evidence of operating efficiency."
+        )
+    return "\n".join(lines)
+
+
+# Heading of the reader-facing warning table. Defined once: the gate strips
+# everything from this point on before scanning, so it never re-reads its own
+# output when an already-stored report is checked again.
+_RECONCILIATION_HEADING = "## Data Reconciliation Warnings"
+
+# Figures an agent must not contradict, mapped to the phrases that introduce them
+# in prose. Used by the reconciliation gate below.
+_RECONCILED_FIELDS = {
+    "TotalDebt": (r"total debt|debt (?:load|stack|burden|pile)|gross debt", "total debt"),
+    "LiveMarketCap": (r"market cap(?:italisation|italization)?", "market capitalisation"),
+    "EnterpriseValue": (r"enterprise value", "enterprise value"),
+}
+
+# Written amounts: $36.9 billion / $36.9B / $36,908 million / $36908M.
+_MONEY_RE = re.compile(
+    r"\$\s?([\d,]+(?:\.\d+)?)\s*(billion|bn|b|million|mm|m|trillion|t)\b",
+    re.IGNORECASE,
+)
+_MULTIPLIER = {
+    "t": 1e12, "trillion": 1e12,
+    "b": 1e9, "bn": 1e9, "billion": 1e9,
+    "m": 1e6, "mm": 1e6, "million": 1e6,
+}
+
+# How far an agent-written figure may drift from the verified one before it is
+# flagged. Loose enough to tolerate rounding and a slightly different period end,
+# tight enough to catch a genuinely different number.
+#
+# Per-field, because these are not the same kind of number. Total debt is an
+# accounting figure read off a filing and should barely move between the sources
+# an agent might cite. Market capitalisation is a LIVE price that legitimately
+# drifts between when a cited article was written and when the pipeline ran, and
+# enterprise value inherits that drift. Holding a market price to a 10% accounting
+# tolerance just manufactures warnings about ordinary price movement.
+RECONCILE_TOLERANCE = 0.10
+_FIELD_TOLERANCE = {
+    "TotalDebt": 0.10,
+    "EnterpriseValue": 0.20,
+    "LiveMarketCap": 0.25,
+}
+
+# The gate adjudicates claims about the CURRENT level only. Two kinds of figure
+# are legitimately different from today's balance sheet and must not be flagged,
+# or the warnings that matter get lost in noise:
+#
+#   1. A change rather than a level -- "debt rose BY $11 billion". Detected by
+#      delta language in the ~30 characters immediately before the number.
+#   2. A figure pinned to another period -- "debt was $24.4B in 2023", "reaches
+#      $32B by FY2027". Detected by a year or quarter marker close to the number.
+#   3. A THRESHOLD rather than a level -- "Re-leveraging above $6.00B Total Debt".
+#      The sale advisory is written almost entirely in this form: every sell
+#      trigger names a level the company has NOT reached, sitting deliberately
+#      clear of the current figure. Flagging those reports a correct advisory as
+#      contradicting the filings, which is how this class was found.
+#
+# Known limitation: a figure written only inside a markdown table whose unit lives
+# in the column header ("| Total Debt ($M) | 36,908 |") carries no unit next to the
+# number and is not checked. Matching bare table numbers would flag every legitimate
+# multi-year history table, so prose assertions are the deliberate scope here.
+_HEDGE = r"(?:over|under|about|nearly|roughly|approximately|more\s+than|less\s+than)"
+# Change language: the amount is a movement, not a level.
+_DELTA_PREFIX_RE = re.compile(
+    rf"\b(?:by|added|increase[ds]?|rose|grew|surged?|jumped|climbed|reduced?|repaid|"
+    rf"paid\s+down|cut|declined?|fell|dropped)\s*{_HEDGE}?\s*$",
+    re.IGNORECASE,
+)
+# Threshold language: the amount is a level the company has NOT reached. Scanned
+# only in the text PRECEDING the number -- "above $6.00B", "rises above $9.50B".
+# Scanning forward as well would let a trigger in the NEXT sentence suppress a
+# wrong baseline in this one: "Current total debt of $8.92B. Sell if debt rises
+# above $9.50B." must still flag the $8.92B.
+_THRESHOLD_RE = re.compile(
+    r"\b(?:above|below|under|over|beyond|exceed(?:s|ing|ed)?|surpass(?:es|ing|ed)?|"
+    r"breach(?:es|ing|ed)?|rises?\s+(?:above|to)|climbs?\s+(?:above|to)|"
+    r"falls?\s+(?:below|under)|drops?\s+below|at\s+least|greater\s+than|"
+    r"more\s+than|less\s+than|no\s+more\s+than|re-?lever\w*|threshold)\b",
+    re.IGNORECASE,
+)
+_THRESHOLD_PROXIMITY = 45  # chars either side scanned for threshold language
+_OTHER_PERIOD_RE = re.compile(r"\b(?:FY\s?)?20\d{2}\b|\bQ[1-4]\b", re.IGNORECASE)
+_DELTA_LOOKBEHIND = 30    # chars before the number scanned for delta language
+_PERIOD_PROXIMITY = 40    # chars either side scanned for a year/quarter marker
+_CONCEPT_LOOKBEHIND = 25  # chars before the concept word scanned for the amount
+
+# Associating a label with the amount it describes.
+#
+# The naive rule -- "nearest dollar figure to the label" -- is wrong, and wrong in
+# a way that fires constantly on correct reports. Real examples that defeated it:
+#
+#   "TTM EBIT of $88.35M on a verified Enterprise Value of $8.91B"
+#   "Cash & Short-Term Investments of $453.58M vs. Total Debt of $7.61M"
+#
+# In both, an unrelated amount sits just BEFORE the label and the correct one just
+# after, so "nearest" picks the wrong one and reports a 99% discrepancy against a
+# perfectly accurate sentence. English almost always writes "<label> of $X", so:
+#
+#   1. An amount immediately BEFORE the label wins first -- no intervening words,
+#      as in "$36.9 billion debt burden" or "($8.91B Enterprise Value)". Direct
+#      adjacency is the strongest signal there is.
+#   2. Otherwise take the first amount AFTER the label, but only when it is joined
+#      to it by a short connector ("of", "was", ": ", a table pipe). A comma or a
+#      long gap means a new clause has started and the amount belongs to something
+#      else -- "...$7.61M total debt, giving it roughly $446 million in net cash"
+#      must not report $446M as the debt.
+#   3. Never associate across a line break, and cross at most one table-cell
+#      boundary, so a label can reach its own cell but not a peer's column or a
+#      figure on the row above.
+# An amount belongs to a label only when the text BETWEEN them is pure connective
+# tissue. Measuring that gap in characters proved far too blunt -- "$29.31 billion
+# in total debt** against **$829 million in cash" has a short gap on both sides,
+# and the character rule attributed the cash figure to the debt label. So the gap
+# must match a whitelist instead: whitespace, markdown emphasis, table pipes, a
+# parenthetical gloss, and a small set of linking verbs.
+#
+# Threshold words (above, below, exceeds, ...) are deliberately EXCLUDED. "total
+# debt above $32B" is a sell-trigger condition, not a claim about today's level,
+# and the sale advisory is written almost entirely in that form.
+_NOISE = r"[\s\*_:|~\-–—]"
+_PAREN = r"\([^)]{0,120}\)"
+_FORWARD_CONNECTOR_RE = re.compile(
+    rf"^(?:{_NOISE}|{_PAREN})*"
+    rf"(?:(?:of|is|are|was|were|at|totals?|totall?ing|totall?ed|reached?|remains?|"
+    rf"stands?|sits?|carries|carrying|holds?|comes?)\b(?:{_NOISE}|{_PAREN})*)*"
+    rf"(?:(?:approximately|roughly|about|nearly|around|circa|some)\b(?:{_NOISE}|{_PAREN})*)?"
+    rf"$",
+    re.IGNORECASE,
+)
+# Preceding form: "$36.9 billion debt burden", "$29.31 billion in total debt".
+_BACKWARD_CONNECTOR_RE = re.compile(rf"^(?:{_NOISE})*(?:(?:in|of)\b(?:{_NOISE})*)?$", re.IGNORECASE)
+
+_FORWARD_SCAN = 140        # chars after the label searched for its amount
+_BACKWARD_GAP_MAX = 12     # backstop on the preceding-amount gap
+_CONNECTOR_GAP_MAX = 60    # backstop on the following-amount gap
+
+# A line carrying three or more amounts is a comparison table -- either a
+# multi-year history ("| Total Debt | $1.31B | $1.27B | $1.37B |") or a peer
+# column set ("| Market Cap | $9.36B | $6.75B | $6.78B |"). The gate cannot tell
+# which column is the current period or which company owns it, and a sweep of the
+# stored corpus showed the column order is not even consistent between reports
+# (some run oldest-first, some newest-first). Attributing any one cell to "the
+# current figure" is therefore a guess, so these rows are skipped outright.
+_COMPARISON_ROW_MIN_AMOUNTS = 3
+
+# Peer discussion: "Akebia Therapeutics, Inc. (AKBA) ... ($327M market cap)" or
+# "**CRVS** ($1.10B market cap) commands a far higher multiple". The amount belongs
+# to the named peer, not the subject. Detected by a ticker earlier on the same line
+# -- parenthesised or bold-emphasised -- that is not the subject's own symbol.
+_PEER_TICKER_RE = re.compile(r"\(([A-Z]{2,5})\)|\*\*([A-Z]{2,5})\*\*")
+
+
+def _line_bounds(text: str, pos: int) -> tuple:
+    """Start and end offsets of the line containing `pos`."""
+    start = text.rfind("\n", 0, pos) + 1
+    end = text.find("\n", pos)
+    return start, (len(text) if end == -1 else end)
+
+
+def _amount_for_label(text: str, m: re.Match):
+    """Locate the amount a label refers to. Returns (abs_start, abs_end, match) for
+    the associated amount, or None when no amount can be attributed to this label.
+
+    `m` is the label match. See the commentary above for the association rules."""
+    # --- Backward: the amount butts directly against the label ---
+    back_start = max(0, m.start() - _CONCEPT_LOOKBEHIND)
+    back = text[back_start: m.start()]
+    boundary = max(back.rfind("\n"), back.rfind("|"))
+    if boundary != -1:
+        back_start += boundary + 1
+        back = text[back_start: m.start()]
+    preceding = list(_MONEY_RE.finditer(back))
+    if preceding:
+        last = preceding[-1]
+        gap = back[last.end():]
+        if len(gap) <= _BACKWARD_GAP_MAX and _BACKWARD_CONNECTOR_RE.match(gap):
+            return back_start + last.start(), back_start + last.end(), last
+
+    # --- Forward: the dominant construction, "<label> of $X" ---
+    region = text[m.end(): m.end() + _FORWARD_SCAN]
+    line_end = region.find("\n")
+    if line_end != -1:
+        region = region[:line_end]
+    # Allow reaching into the next table cell (label and value are usually adjacent
+    # cells) but stop at the one after it, so peer columns are never picked up.
+    cells = [c.start() for c in re.finditer(r"\|", region)]
+    if len(cells) >= 2:
+        region = region[:cells[1]]
+    money = _MONEY_RE.search(region)
+    if money:
+        connector = region[:money.start()]
+        if len(connector) <= _CONNECTOR_GAP_MAX and _FORWARD_CONNECTOR_RE.match(connector):
+            return m.end() + money.start(), m.end() + money.end(), money
+    return None
+
+
+def _reconcile_agent_figures(text: str, candidate: dict, source: str) -> list:
+    """Scan agent-written prose for dollar figures presented as total debt, market
+    cap, or enterprise value, and flag any that deviate from the pipeline's own
+    verified figures by more than RECONCILE_TOLERANCE.
+
+    Deliberately narrow: it only checks the three figures the pipeline computes
+    deterministically, and only when the sentence names one of them. It is a
+    tripwire for the specific failure of a fabricated headline number propagating
+    through the report chain, not a general-purpose fact checker -- so a clean
+    result means 'no contradiction of our own basis', never 'everything is true'.
+    """
+    findings = []
+    if not text:
+        return findings
+    verified = _verified_figures(candidate)
+    if not verified:
+        return findings
+
+    # Never scan a previous run's warning table. In the live pipeline the gate sees
+    # the analyst's raw output, which has no such section -- but re-checking an
+    # already-stored report would otherwise read the table's own "stated vs
+    # verified" columns as fresh claims and re-flag every one of them.
+    text = text.split(_RECONCILIATION_HEADING)[0]
+    subject = (candidate or {}).get("Symbol") or ""
+
+    for field, (pattern, label) in _RECONCILED_FIELDS.items():
+        truth = verified.get(field)
+        if not truth:
+            continue
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            line_start, line_end = _line_bounds(text, m.start())
+            line = text[line_start:line_end]
+
+            # Comparison table row -- cannot attribute a column. See above.
+            if len(_MONEY_RE.findall(line)) >= _COMPARISON_ROW_MIN_AMOUNTS:
+                continue
+
+            # A peer named earlier on this line owns the figure, not the subject.
+            peers = [a or b for a, b in _PEER_TICKER_RE.findall(text[line_start: m.start()])]
+            if peers and peers[-1] != subject:
+                continue
+
+            located = _amount_for_label(text, m)
+            if not located:
+                continue
+            money_start, money_end, money = located
+            try:
+                amount = float(money.group(1).replace(",", "")) * _MULTIPLIER[money.group(2).lower()]
+            except (ValueError, KeyError):
+                continue
+
+            # Skip figures that are not claims about the current level (see above).
+            if _DELTA_PREFIX_RE.search(text[max(0, money_start - _DELTA_LOOKBEHIND): money_start]):
+                continue
+            near = text[max(0, money_start - _PERIOD_PROXIMITY): money_end + _PERIOD_PROXIMITY]
+            if _OTHER_PERIOD_RE.search(near):
+                continue
+            if _THRESHOLD_RE.search(text[max(0, money_start - _THRESHOLD_PROXIMITY): money_start]):
+                continue
+
+            deviation = abs(amount - truth) / truth
+            if deviation > _FIELD_TOLERANCE.get(field, RECONCILE_TOLERANCE):
+                findings.append({
+                    "source": source,
+                    "field": label,
+                    "stated": amount,
+                    "verified": truth,
+                    "deviation_pct": round(deviation * 100, 1),
+                    "context": " ".join(text[m.start(): money_end + 40].split()),
+                })
+
+    # One agent can repeat the same wrong number many times; report each distinct
+    # (field, stated amount) pair once so the log stays readable.
+    unique, seen = [], set()
+    for f in findings:
+        key = (f["field"], round(f["stated"]))
+        if key not in seen:
+            seen.add(key)
+            unique.append(f)
+    return unique
+
+
+def _format_reconciliation_section(findings: list) -> str:
+    """Reader-facing note appended to the final report when the gate fired.
+
+    Surfaced in the report rather than only logged: a reader has no other way to
+    know that a figure in the bull or bear case above contradicts the filings."""
+    if not findings:
+        return ""
+    lines = [
+        "",
+        _RECONCILIATION_HEADING,
+        "",
+        "Some figures written by the analysis agents above disagree with the figures "
+        "this pipeline read directly from the company's filings. The verified figure "
+        "is the one to trust. Treat any argument resting on a flagged number as "
+        "unreliable.",
+        "",
+        "| Section | Figure | Stated in report | Verified from filings | Off by |",
+        "| :--- | :--- | ---: | ---: | ---: |",
+    ]
+    for f in findings:
+        lines.append(
+            f"| {f['source']} | {f['field']} | {format_money(f['stated'])} | "
+            f"{format_money(f['verified'])} | {f['deviation_pct']}% |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def _format_magic_formula_section(candidate: dict) -> str:
+    """Deterministic '## Magic Formula Metrics' section, injected into every
+    final report regardless of what the LLM chooses to restate. Built directly
+    from the screener/on-demand candidate data (not the LLM), so Earnings
+    Yield, ROC, their basis (TTM vs Annual fallback), and the underlying
+    formula/components are always present and accurate. Every field is always
+    present -- falling back to 'Not available' rather than being omitted -- and
+    when the ratios could not be computed the section states the plain-English
+    reason (e.g. the company is loss-making) instead of leaving the reader
+    guessing whether it was a data glitch or a fact about the business."""
+    candidate = candidate or {}
+    rank = candidate.get("Final_Rank")
+    rank_str = f"#{rank}" if rank not in (None, "") else "Not available (single-ticker run)"
+
+    ebit_raw = candidate.get("EBIT")
+    ebit = format_money(ebit_raw)
+    capital_employed = format_money(candidate.get("CapitalEmployed"))
+    enterprise_value = format_money(candidate.get("EnterpriseValue"))
+    market_cap = format_money(candidate.get("LiveMarketCap"))
+    basis = candidate.get("EBIT_Basis") or "Not available"
+
+    ey_pct = candidate.get("EY_Pct")
+    roc_pct = candidate.get("ROC_Pct")
+
+    lines = [
+        "## Magic Formula Metrics",
+        "",
+        "These are the two numbers Joel Greenblatt's Magic Formula ranks companies on: "
+        "one asks whether the business is cheap, the other whether it is any good. "
+        "The workings are shown so you can check them yourself.",
+        "",
+        f"- **Earnings Yield (is it cheap?):** {ey_pct or 'Not available'}",
+        f"  - How it is worked out: operating profit ({ebit}) divided by enterprise "
+        f"value ({enterprise_value}).",
+        "  - In plain English: what the company earns from its actual business, compared "
+        "with what it would really cost to buy the whole company outright. A higher "
+        "percentage means you pay less for each dollar of profit.",
+        f"- **Return on Capital (is it a good business?):** {roc_pct or 'Not available'}",
+        f"  - How it is worked out: operating profit ({ebit}) divided by capital employed "
+        f"({capital_employed}).",
+        "  - In plain English: how much profit the business squeezes out of the money "
+        "tied up in running it. A higher percentage means the company turns its "
+        "resources into profit more efficiently than rivals.",
+        "  - Important limit: this figure deliberately leaves out what the company PAID "
+        "to buy other businesses. That is the right choice for ranking companies against "
+        "each other, but it can make a company built by takeovers look extraordinarily "
+        "efficient. The companion figure below shows the return on the money actually "
+        "spent.",
+        "",
+    ]
+    # Companion ROIC. Shown whenever it could be computed, because the gap between
+    # the two figures is the single most misread number in these reports: a very
+    # large Magic Formula ROC next to a modest goodwill-inclusive ROIC means the
+    # company bought its earnings rather than generating them from a small asset base.
+    roic_pct = candidate.get("ROIC_InclGoodwill_Pct")
+    intangibles_pct = candidate.get("IntangiblesShareOfAssets_Pct")
+    invested_capital = format_money(candidate.get("InvestedCapital"))
+    if roic_pct:
+        lines += [
+            f"- **Return on capital actually spent (including takeover costs):** {roic_pct}",
+            f"  - How it is worked out: operating profit ({ebit}) divided by all the money "
+            f"invested in the company ({invested_capital} — shareholders' money plus "
+            f"borrowings, less spare cash).",
+            "  - In plain English: what the business earns on every dollar ever put into "
+            "it, including the price paid for acquisitions. This is the more conservative "
+            "of the two, and for a company assembled by takeover it is the more honest "
+            "guide to how good the business really is.",
+        ]
+        if intangibles_pct:
+            lines.append(
+                f"  - Goodwill and acquired intangibles are {intangibles_pct} of this "
+                f"company's total assets. The higher that share, the wider the gap "
+                f"between the two figures above, and the more weight the second deserves."
+            )
+        lines.append("")
+    lines += [
+        "### The numbers behind the ratios",
+        f"- Operating profit (EBIT — earnings before interest and taxes; profit from the "
+        f"core business before loan interest and tax): {ebit}",
+        f"- Enterprise value (the company's market price plus its debts, minus its spare "
+        f"cash — the true cost of buying it outright): {enterprise_value}",
+        f"- Capital employed (the money tied up running the business: equipment and "
+        f"buildings, plus day-to-day working funds): {capital_employed}",
+        f"- Market value of all shares (market capitalisation): {market_cap}",
+        # Debt and cash are printed here as the reader-facing counterpart to the
+        # VERIFIED_FIGURES block the agents were given, so a figure quoted in the
+        # bull or bear case can be checked against the filings without leaving the page.
+        f"- Total debt owed (read directly from the filings): "
+        f"{format_money(candidate.get('TotalDebt'))}",
+        f"- Cash and short-term investments: {format_money(candidate.get('Cash'))}",
+        f"- Balance sheet date these figures come from: "
+        f"{candidate.get('BalanceSheetDate') or 'Not available'}",
+        f"- Reporting period used (basis): {basis} "
+        f"(TTM = the last four quarters combined; Annual = the most recent full-year "
+        f"report, used only when quarterly figures are unavailable)",
+        f"- Magic Formula rank: {rank_str}",
+    ]
+
+    # When the ratios are missing, say why — this is usually a meaningful fact
+    # about the company (loss-making, no capital employed), not a data outage.
+    message = candidate.get("message")
+    if not (ey_pct and roc_pct):
+        lines += [
+            "",
+            "### Why these figures are unavailable",
+            message or (
+                "The Magic Formula ratios could not be calculated for this company from "
+                "the available financial data."
+            ),
+            "",
+            "This does not by itself make the company a bad investment — it means this "
+            "particular value-and-quality screen cannot score it, so weigh the bull and "
+            "bear cases below on their own merits.",
+        ]
+
+    return "\n".join(lines) + "\n"
+
+
 def _run_phase_b(top_candidates: list, source_label: str):
     """Create a pipeline run and analyze each candidate through Phase B.
     Shared by the full-pipeline and CSV modes."""
@@ -624,7 +1354,7 @@ def _run_phase_b(top_candidates: list, source_label: str):
         company_name = candidate.get("CompanyName")
         logger.info(f"--- Processing {idx+1}/{len(top_candidates)}: {ticker} ({company_name}) ---")
         screen_context = _format_screen_context(candidate)
-        _merge_usage(run_usage, analyze_ticker(run_id, ticker, company_name, screen_context))
+        _merge_usage(run_usage, analyze_ticker(run_id, ticker, company_name, screen_context, candidate))
 
     _finalize_run(run_id, run_usage, "Workflow Run")
 
@@ -687,17 +1417,23 @@ def run_single_ticker(ticker: str, company_name: str = None):
     except Exception as e:
         candidate = {"error": str(e)}
     if candidate.get("error") or "ROC_Pct" not in candidate:
-        logger.warning(f"[{ticker}] Could not compute ROC/EY ({candidate.get('error', 'unknown')}); proceeding without the bull signal.")
+        reason = candidate.get("reason") or "unknown"
+        logger.warning(f"[{ticker}] Could not compute ROC/EY (reason={reason}); proceeding without the bull signal.")
+        # The reason is usually a substantive fact about the business (e.g. it is
+        # loss-making), not a data outage — pass it to the agents so the bear/bull
+        # cases can weigh it instead of silently ignoring a missing signal.
         screen_context = (
             "This ticker was analyzed on demand and its Magic Formula ROC/Earnings Yield "
-            "could not be computed, so no value/quality (bull) signal is available. Base "
+            "could NOT be computed, so no value/quality (bull) signal is available. "
+            f"Reason: {candidate.get('message') or 'not determinable from the available financial data.'}\n"
+            "Treat this as a material fact about the company, not a data glitch, and base "
             "the bull case on the fundamentals and research below."
         )
     else:
         candidate.setdefault("CompanyName", company_name)
         screen_context = _format_screen_context(candidate)
 
-    usage = analyze_ticker(run_id, ticker, company_name, screen_context)
+    usage = analyze_ticker(run_id, ticker, company_name, screen_context, candidate)
 
     _finalize_run(run_id, usage, "On-Demand Run")
 
@@ -739,13 +1475,19 @@ def run_sell_check(ticker: str, company_name: str = None, run_id: str = None):
     )
 
     # 2. Gather CURRENT fundamentals (direct tool call — 100% fidelity, 0 tokens).
-    logger.info(f"[{ticker}] Fetching current FMP metrics...")
+    # Quarterly trends alongside the annual metrics: sale conditions are usually
+    # written in quarterly terms ("two consecutive quarters of..."), which annual
+    # figures cannot answer either way.
+    logger.info(f"[{ticker}] Fetching current FMP metrics + quarterly trends...")
     metrics_data = fmp_metrics_extractor(ticker)
+    quarterly_data = fmp_quarterly_trends(ticker)
 
     # 3. Evaluate the conditions against current data + live news/web research.
     logger.info(f"[{ticker}] Evaluating sale conditions against current data...")
     try:
-        state, usage = _run_sell_check(ticker, company_name, sale_conditions, metrics_data)
+        state, usage = _run_sell_check(
+            ticker, company_name, sale_conditions, metrics_data, quarterly_data,
+        )
     except Exception as e:
         logger.error(f"[{ticker}] Sell-condition check aborted: {e}")
         return

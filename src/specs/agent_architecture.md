@@ -23,32 +23,47 @@ The application must execute a strict 4-stage sequential workflow managed by a p
 
    **Data gathering — direct tool calls (no LLM):**
    - **SEC 10-K** (`fetch_sec_10k_data`, `edgar-tools`): Item 1 business/segment data and **>10% customer concentration notes**.
-   - **FMP metrics** (`fmp_metrics_extractor`): 3-year trailing metrics, 5-year P/E average, competitor metrics, analyst consensus targets.
+   - **FMP metrics** (`fmp_metrics_extractor`): 3-year trailing metrics, 5-year P/E average, competitor metrics, analyst consensus targets. **These are ANNUAL periods** and describe multi-year trend only — they cannot show recent deterioration.
+   - **FMP quarterly trends** (`fmp_quarterly_trends`): the last **8 quarters** of income statement, cash flow, and balance sheet, plus an explicit **year-over-year comparison of each recent quarter against the same quarter one year earlier** (Q vs Q−4, so seasonality is already aligned). See §2.D for why this is a separate, mandatory feed.
    - **Magic Formula value/quality signal** (`screen_context`): ROC + Earnings Yield + rank. For on-demand single tickers (where the screener didn't run), `compute_ticker_magic_metrics` computes ROC/EY on the fly.
+   - **Verified figures** (`verified_figures`): the deterministic balance-sheet ground truth — total debt, cash, market cap, enterprise value, equity, total assets, goodwill/intangibles, EBIT — plus the goodwill-inclusive ROIC companion to ROC. See §2.E.
 
-   These are gathered once and seeded into session state (`sec_data`, `metrics_data`, `screen_context`) for the three reasoning agents below.
+   These are gathered once and seeded into session state (`sec_data`, `metrics_data`, `quarterly_data`, `verified_figures`, `screen_context`) for the three reasoning agents below.
 
    **Reasoning — a `SequentialAgent` of two advocates and a neutral judge:**
    - **Agent 1: Bear Agent** — instruction = `research-instructions.md` (skeptical). Uses `fmp_stock_news` + `web_search_tool` (Tavily, bear queries) plus the SEC/metrics data to build the **bear case** → `state['bear_data']`.
    - **Agent 2: Bull Agent** — instruction = `bullish-research-instructions.md`. Runs **after** the bear agent (its Section 4 directly refutes the bear case). Uses `fmp_stock_news` + `web_search_tool` (Tavily, bull queries) plus SEC/metrics/`screen_context` to build the **bull case** → `state['bull_data']`.
-   - **Agent 3: Analyst Agent (Neutral Judge)** — carries **no** skeptical prompt. Weighs `bear_data` vs `bull_data` (plus `screen_context`) and emits a combined Markdown report with `## Bull Case`, `## Bear Case`, and `## Final Verdict` sections.
-        - **Verdict:** exactly one of `Buy` / `Watch` / `Avoid`, written for an investor who does **not** currently own the stock (Buy = worth initiating; Watch = not compelling now / watchlist; Avoid = actively unattractive), with a one-paragraph justification of how the two cases net out.
-        - **Balance:** skepticism lives in the Bear Agent, balanced by an equal Bull Agent; the judge itself is neutral. This removes the structural bear bias.
+   - **Agent 3: Analyst Agent (Neutral Judge)** — carries **no** skeptical prompt. Weighs `bear_data` vs `bull_data` (plus `screen_context`, `quarterly_data`, `verified_figures`) and emits a combined Markdown report with `## Recent Quarter Check`, `## Bull Case`, `## Bear Case`, `## Final Verdict`, and `## What Would Make This Wrong` sections.
+        - **Recent Quarter Check (written first):** reports what the most recent quarter did year-over-year and states whether it **confirms or contradicts** the longer-term picture the two cases argue over. The verdict may not be reached without addressing a contradiction.
+        - **Verdict:** exactly one of `Buy` / `Watch` / `Avoid`, written for an investor who does **not** currently own the stock (Buy = passes the screen on its own merits; Watch = not compelling now / watchlist; Avoid = actively unattractive), with a one-paragraph justification of how the two cases net out.
+        - **Verdict is a basket judgement, not a stock tip.** See §2.G — the verdict line must carry the screen-pass qualifier and the report must tell the reader the strategy depends on holding many such names.
+        - **Evidence weighting:** realised results outrank projections; bull catalysts must be labelled CONFIRMED or SPECULATIVE; **a `Buy` may not rest on a SPECULATIVE catalyst** (if removing every speculative catalyst collapses the bull case, the verdict is at best `Watch`); "priced in" must be substantiated or dropped.
+        - **What Would Make This Wrong:** every report, whatever the verdict, names the single most likely way it is wrong as a specific observable development, and what a reader would see in a future earnings report if it were happening.
+        - **Balance:** skepticism lives in the Bear Agent, balanced by an equal Bull Agent; the judge itself is neutral. This removes the structural bear bias. The anti-over-caution guidance in the verdict stance is paired with an equal anti-optimism constraint — the two failure directions are symmetric and both are guarded.
         - **Output:** written to `reports/{Ticker}_Skeptical_Analysis.md`; `bear_data`/`bull_data` are also persisted separately as `agent_outputs` (BEAR_CASE / BULL_CASE) for drill-down.
+
+   **Post-generation — reconciliation gate (no LLM):** after the graph completes, every agent-written section is checked against `verified_figures`; contradictions are logged and surfaced in the report. See §2.E.
 
 3. **Phase C: Sale Advisory** (per ticker)
    **Sale advisor - a agent that finds advserse business events:**
    - **Agent: Sale Advisor agent**: - instruction = `sale-advisor-instructions.md`. Uses `fmp_stock_news` + `web_search_tool` (Tavily)
+   - **Thresholds must be anchored.** Every numeric sell trigger has to be derived from `verified_figures` or `quarterly_data`, and the report must print the **current actual value beside each threshold** ("total debt above $32B — currently $29.3B"). A trigger calibrated off a wrong baseline is worse than no trigger: it silently cannot fire. This is not hypothetical — see §2.E.
 
 4. **Sell-Condition Check** (on-demand, single stock — Phase C follow-up)
    **Sell-condition evaluator - tests whether the prior sale conditions are now met:**
-   - **Agent: Sell Check agent** — no instruction file; carries a self-contained prompt. Loads a stored `SALE_CASE` via `db_get_sale_case(ticker, run_id)` (a **specific run's** conditions when a run is pinned, otherwise the **most recent**), gathers **current** FMP metrics (`fmp_metrics_extractor`, direct call) and live `fmp_stock_news` + `web_search_tool` research, then marks each sale condition **MET / NOT MET / UNCLEAR** with sourced evidence and emits a `## Sell Recommendation` (`SELL` if **any** condition is clearly met, else `HOLD`).
+   - **Agent: Sell Check agent** — no instruction file; carries a self-contained prompt. Loads a stored `SALE_CASE` via `db_get_sale_case(ticker, run_id)` (a **specific run's** conditions when a run is pinned, otherwise the **most recent**), gathers **current** FMP metrics (`fmp_metrics_extractor`) **and quarterly trends (`fmp_quarterly_trends`)** by direct call, plus live `fmp_stock_news` + `web_search_tool` research, then marks each sale condition **MET / NOT MET / UNCLEAR** with sourced evidence and emits a `## Sell Recommendation` (`SELL` if **any** condition is clearly met, else `HOLD`).
+   - Sale conditions are routinely written in quarterly terms ("two consecutive quarters of negative growth"), which annual metrics cannot answer either way — hence the quarterly feed here as well as in Phase B.
    - Runs standalone for one ticker (not in the analysis graph). It is a lightweight flow: it reads the prior conditions and writes `reports/{Ticker}_Sell_Check.md`, but does **not** create a `pipeline_runs`/`ticker_runs` record, so it never appears in the web UI's run lists.
 ---
 
-## 2. MCP Tools Setup Guide for Coding Agent
+## 2. MCP Tools & Analytical Guardrails
 
 The coding agent **must wrap underlying Python scripts into standard MCP (Model Context Protocol) tool wrappers** so Google ADK agents can invoke them natively.
+
+Subsections A–C cover the data tools. Subsections **D–G cover the guardrails**:
+the feeds and deterministic checks that constrain what the reasoning agents are
+able to claim. Each one exists because of a specific observed failure, recorded
+inline so the constraint is not later removed as redundant.
 
 ### A. Screener MCP Tool (`magic_formulae_screener.py`)
 - Create an MCP server/tool wrapper `run_magic_formula_screener` around `magic_formula_starter_screener.py`.
@@ -84,6 +99,181 @@ Rule of thumb: **FMP answers "what happened to this company?"; Tavily answers
 - Design the `web_search_tool` interface to allow swapping backend adapters (e.g.,
   Google Custom Search, Serper, Exa) without modifying agent instruction code.
   Brave Search was the original adapter and has been removed in favor of Tavily.
+
+### D. Quarterly Trends MCP Tool (`fmp_quarterly_trends`) — the recency feed
+
+`fmp_metrics_extractor` returns **annual** periods. A company whose last full
+fiscal year looked healthy can be contracting sharply in its two most recent
+quarters, and nothing in the annual feed can reveal that. The agents were
+therefore structurally incapable of noticing recent deterioration — not
+reluctant to, unable to.
+
+`fmp_quarterly_trends(ticker)` closes that gap:
+
+- Pulls **8 quarters** of income statement, cash flow, and balance sheet.
+- Joins the three statements **by period end date**, so a missing or out-of-order
+  statement can never misalign one quarter against another.
+- Emits `yoy_comparison`: each of the last 4 quarters against the **same quarter
+  one year earlier** (Q vs Q−4). Comparing to the immediately preceding quarter
+  would confuse seasonality with deterioration.
+- Normalises capex to a positive spend figure (FMP reports it negative), so
+  "capex rose" reads the same direction as the source filings.
+
+**Prompt contract (`RECENCY_MANDATE`, shared by bear, bull, analyst, sell-check):**
+every agent must examine the most recent quarter before writing any conclusion,
+must state whether it **confirms or contradicts** the multi-year annual trend, and
+must quote the year-over-year percentage changes in revenue, operating income, and
+operating cash flow. Missing quarterly data is a **gap in the evidence**, never
+confirmation that recent quarters were fine.
+
+### E. Verified figures & the reconciliation gate
+
+**The failure this prevents.** In FISV run `f37d47ef` the bear agent asserted
+**$36.9B** of total debt for a company carrying **$29.3B** — it had duplicated the
+market-cap figure it quoted two tables earlier. Nothing checked it. The wrong
+number propagated into the bull case's refutation, into the final verdict's
+reasoning, and into a sale-advisory sell trigger of "total debt above $32.0B" —
+a threshold set *above* the actual level, which therefore could never fire. Three
+downstream documents were built on a number that never existed.
+
+**Two mechanisms, both deterministic (no LLM):**
+
+1. **`VERIFIED_FIGURES` (before generation).** `_format_verified_figures(candidate)`
+   builds an authoritative block from the same balance sheet and income statement
+   the Magic Formula ratios were computed from, and injects it into **every** agent
+   prompt (bear, bull, analyst, sale advisor). The `VERIFIED_FIGURES_MANDATE`
+   fragment forbids agents from stating a conflicting total debt, cash, market cap,
+   enterprise value, or share count; instructs them to prefer the verified figure
+   over any source that disagrees and note the discrepancy; and explicitly warns
+   against confusing market capitalisation with total debt.
+
+2. **Reconciliation gate (after generation).** `_reconcile_agent_figures()` scans
+   each agent's prose for dollar amounts presented as **current** total debt,
+   market cap, or enterprise value and flags any deviating more than
+   `RECONCILE_TOLERANCE` (10%) from the verified figure. Findings are logged as
+   warnings and appended to the report as a **`## Data Reconciliation Warnings`**
+   table, so a reader can see that a figure above contradicts the filings. This
+   runs *after* generation rather than constraining it because the failure being
+   guarded against is only visible once the prose exists.
+
+**Associating a label with its amount.** The naive rule — *nearest dollar figure to
+the label* — is wrong, and wrong in a way that fires constantly on **correct**
+reports. It produced three warnings on a VICR run whose figures were all accurate:
+
+| Sentence | Naive rule reported |
+| :--- | :--- |
+| "TTM EBIT of **$88.35M** on a verified Enterprise Value of $8.91B" | EV off by 99% |
+| "Cash of **$453.58M** vs. Total Debt of $7.61M" | debt off by 5,862% |
+| a peer table whose row *above* EV ended `… \| $6.78B \|` | EV off by 23.9% |
+
+The rules that replace it:
+
+1. An amount **immediately before** the label wins first — no intervening words
+   ("$36.9 billion debt burden", "($8.91B Enterprise Value)"). Direct adjacency is
+   the strongest available signal.
+2. Otherwise the first amount **after** the label, but only when joined to it by
+   pure connective tissue — whitespace, markdown emphasis, a table pipe, a
+   parenthetical gloss, or a linking verb (`of`, `is`, `stands at`, …). A comma or
+   any other word means a new clause began and the amount belongs to something
+   else: *"…$7.61M total debt, giving it roughly $446 million in net cash"*.
+3. Never across a line break; at most one table-cell boundary, so a label reaches
+   its own cell but never a peer column or the row above.
+4. **Threshold words are excluded from the connector list** (`above`, `below`,
+   `exceeds`). "Total debt above $32B" is a sell trigger, not a claim about today —
+   and the sale advisory is written almost entirely in that form.
+
+**Deliberate scope limits** — a gate that cries wolf gets ignored, so it stays
+silent on:
+   - **Changes, not levels:** "debt rose *by* $11 billion".
+   - **Other periods:** "debt was $24.4B *in 2023*", "reaches $32B *by FY2027*".
+   - **Thresholds, not levels:** "Re-leveraging *above* $6.00B Total Debt". Every
+     sell trigger in a Phase C advisory names a level the company has **not**
+     reached — that is what a trigger is. Threshold words are scanned only in the
+     text *preceding* the amount, so a trigger in the next sentence cannot
+     suppress a wrong baseline in this one ("Current total debt of $8.92B. Sell if
+     debt rises above $9.50B." must still flag the $8.92B).
+   - **Comparison rows (3+ amounts on one line):** a multi-year history or peer
+     column set. A corpus sweep found the column order is not even consistent
+     between reports — some run oldest-first, some newest-first — so attributing
+     any one cell to "the current figure" is a guess.
+   - **Named peers:** a ticker earlier on the line, parenthesised or bolded, that
+     is not the subject's own symbol — *"**AKBA** … ($327M market cap)"*.
+   - **Unit-in-header tables** (`| Total Debt ($M) | 36,908 |`): no unit beside the
+     number, not checked.
+
+**Per-field tolerance** (`_FIELD_TOLERANCE`): total debt 10%, enterprise value 20%,
+market capitalisation 25%. These are different kinds of number — debt is an
+accounting figure read off a filing and should barely move, while market cap is a
+live price that legitimately drifts between a cited article and the run. Holding a
+market price to an accounting tolerance just manufactures warnings.
+
+A clean result means **"nothing contradicts our own basis"** — never "everything in
+this report is true." Regression tests: `src/test_reconciliation.py` (offline, no
+API keys required) — 38 cases, built from the real FISV, VICR, and SOLV runs.
+
+**Gate findings are not evidence of agent error.** Three separate false-positive
+classes were found *after* the gate shipped, each on a report whose figures were
+entirely correct. When a warning appears, read the flagged sentence before acting
+on it: the failure mode of a text-matching checker is misreading a correct
+sentence, not inventing a wrong one. `VERIFIED_FIGURES` (§2.E mechanism 1) is what
+actually prevents bad numbers; the gate is a backstop with known blind spots.
+
+### F. Two return-on-capital figures, always reported together
+
+Greenblatt's ROC divides EBIT by **net working capital + net fixed assets**,
+deliberately excluding goodwill and acquired intangibles. That is the correct
+question for *ranking a basket* — it measures the economics of the next dollar
+invested — but for a company assembled by acquisition it produces a headline
+number that says nothing about the return earned on the purchase price.
+
+FISV is the worked example: **ROC 136.73%** against **ROIC including goodwill of
+9.4%**, with goodwill and intangibles making up **59.1% of total assets**. A 14×
+gap. The old bull case read the first figure as "elite capital efficiency… top
+tier of capital-efficient technology companies," and the verdict cited it as part
+of the margin of safety.
+
+So `compute_company_metrics_detailed` now also returns `ROIC_InclGoodwill`
+(EBIT ÷ (equity + debt − cash)) and `IntangiblesShareOfAssets`, and:
+
+- Both figures appear in `VERIFIED_FIGURES`, with an instruction to **cite both,
+  never the first alone**, and never to call the business exceptionally
+  capital-efficient on the strength of the screen figure.
+- Both appear in the deterministic `## Magic Formula Metrics` report section, in
+  plain English, with the intangibles share explaining why the gap exists.
+- The ranking itself is **unchanged** — Greenblatt's ROC remains the sort key.
+  This is a disclosure fix, not a methodology change.
+
+### G. Verdict semantics — a screen pass, not a stock tip
+
+The Magic Formula is a **basket** strategy. Greenblatt's method buys 20–30 screened
+companies and holds them roughly a year; it works *because* the winners outweigh
+the names that turn out to be value traps. Individual value traps are an expected
+cost of the method, not a malfunction of it.
+
+This pipeline takes one name out of that basket and renders a verdict on it, for a
+reader the prompt itself describes as "investing their own hard-earned savings."
+The statistical validity of the screen does not survive that transformation, and
+an unqualified "**Verdict: Buy**" reads to a non-finance reader as an instruction
+to act. That framing — not any individual ticker — is the main risk this system
+carries.
+
+Requirements:
+
+- The verdict line is written with the qualifier attached:
+  `**Verdict: Buy** — screen pass; candidate for a diversified basket, not a
+  single-stock recommendation.`
+- The Final Verdict must contain one plain sentence stating that this is a single
+  screened candidate and that the strategy's historical results depend on holding
+  many such names.
+- Every report ends with **`## What Would Make This Wrong`**, naming one specific
+  observable development and what a reader would see in a future earnings report
+  if it were happening. For a `Buy` this is the most likely thesis-breaker; for
+  `Watch`/`Avoid`, the most likely proof of excess caution.
+
+**Stored vocabulary is unchanged.** The DB `CHECK (verdict IN ('BUY','WATCH',
+'AVOID','HOLD','SELL'))` constraint, `_extract_verdict()`, the report filenames,
+and the web UI's counts all continue to use the bare tokens. The reframing is in
+the **rendered prose**, so no stored verdict or historical run is invalidated.
 
 ---
 
@@ -185,9 +375,11 @@ The system stores all intermediate outputs and final reports in a PostgreSQL dat
 5. Run lifecycle: `db_create_pipeline_run` (parent row, created first for FK integrity) and `db_finalize_pipeline_run` (terminal status + usage/cost).
 
 ### C. Per-Ticker Persistence Flow (`analyze_ticker`)
-- SEC 10-K and FMP metrics are gathered by **direct tool calls** and stored via `db_store_agent_output(..., embed=False)` — 100% fidelity, no LLM in the loop.
+- SEC 10-K, FMP annual metrics, and FMP quarterly trends are gathered by **direct tool calls** and stored via `db_store_agent_output(..., embed=False)` — 100% fidelity, no LLM in the loop.
 - The bear and bull agents' outputs are stored (embedded) as `BEAR_CASE` / `BULL_CASE`.
+- **The reconciliation gate runs before persistence** (§2.E): every agent-written section is checked against `verified_figures`. Findings are logged as `RECONCILIATION` warnings and a `## Data Reconciliation Warnings` table is appended to the stored report. A clean pass is logged too, so the check's absence is distinguishable from its success.
 - After the neutral analyst produces the report and a `Buy`/`Watch`/`Avoid` verdict, call `db_store_final_report`, then `db_store_ticker_run` to index it for the UI, and write the report file to `reports/{Ticker}_Final_Report_{Verdict}.md`.
+- Report section order as stored: `## Magic Formula Metrics` (deterministic) → the analyst's `## Recent Quarter Check` / `## Bull Case` / `## Bear Case` / `## Final Verdict` / `## What Would Make This Wrong` → `## Data Reconciliation Warnings` (only when the gate fired).
 - The Phase C sale advisor's output is stored (embedded) as `SALE_CASE` and written to `reports/{Ticker}_Sale_Advisory.md`.
 - The four analytical reports (`BEAR_CASE`, `BULL_CASE`, `SALE_CASE`, and the final report) are stamped with a **run_id banner** at the top before storage (a blockquote with the `run_id` + ticker). This makes the `run_id` visible in the web viewer so it can be recorded against a purchased lot (the value `--run` pins for the sell-condition check). SEC/metrics rows are left unstamped. The banner does not affect verdict parsing (it sits above the `## Final Verdict` section) and is negligible for the embeddings.
 
@@ -256,9 +448,23 @@ Ignores the verdict, assumes that the stock is purchased and advises on sale con
 tool calls, so no lite/data-gathering agents remain.
 
 The per-ticker logic is factored into `analyze_ticker(run_id, ticker,
-company_name, screen_context)`, which does the direct tool calls, runs the graph,
-and persists SEC/metrics/bear/bull outputs plus the final report. All execution
-modes call it, so persistence and verdict logic are identical across modes.
+company_name, screen_context, candidate)`, which does the direct tool calls, runs
+the graph, and persists SEC/metrics/bear/bull outputs plus the final report. All
+execution modes call it, so persistence and verdict logic are identical across
+modes. `candidate` (the raw EY_Pct/ROC_Pct/EBIT_Basis/Final_Rank dict) is used to
+deterministically prepend a '## Magic Formula Metrics' section to every final
+report — independent of the LLM — so those figures, their basis (TTM vs Annual
+fallback), and the components they are derived from (EBIT / enterprise value /
+capital employed) are always present, falling back to "Not available" per-field
+rather than omitting the field.
+
+`compute_company_metrics_detailed` (in `magic_formula_starter_screener.py`) is
+the source of those figures. It returns a structured `{"ok": False, "reason":
+..., "message": ...}` when a company cannot be ranked, so the report can state
+the plain-English cause — most often that the company is loss-making, since both
+ratios divide by operating profit and Greenblatt's screen excludes unprofitable
+companies. `calculate_company_metrics` remains a thin None-on-failure wrapper for
+the screener's universe loop, which only needs success/failure.
 
 ### A. Execution Modes
 

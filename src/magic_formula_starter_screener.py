@@ -148,8 +148,47 @@ def _is_stale(statement, max_age_days=MAX_STATEMENT_AGE_DAYS):
     return (datetime.now(timezone.utc) - d).days > max_age_days
 
 
-def calculate_company_metrics(symbol, live_market_cap, api_key):
-    """Computes Greenblatt Magic Formula ROC and Earnings Yield for one company.
+def format_money(value):
+    """Abbreviate a raw dollar figure (e.g. 1234567890 -> '$1.23B') for display.
+    Returns 'Not available' for missing/unparseable values. Shared by the
+    screener's skip messages and the final report's metrics section so dollar
+    amounts read identically everywhere."""
+    if value is None or value == "":
+        return "Not available"
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "Not available"
+    sign = "-" if value < 0 else ""
+    v = abs(value)
+    if v >= 1e9:
+        s = f"{v / 1e9:.2f}B"
+    elif v >= 1e6:
+        s = f"{v / 1e6:.2f}M"
+    elif v >= 1e3:
+        s = f"{v / 1e3:.2f}K"
+    else:
+        s = f"{v:.2f}"
+    return f"{sign}${s}"
+
+
+def _skip(reason, message, **extra):
+    """Structured 'this company cannot be ranked' result. `reason` is a stable
+    machine slug; `message` is the plain-English explanation shown to readers of
+    the final report."""
+    return {"ok": False, "reason": reason, "message": message, **extra}
+
+
+def compute_company_metrics_detailed(symbol, live_market_cap, api_key):
+    """Computes Greenblatt Magic Formula ROC and Earnings Yield for one company,
+    returning a STRUCTURED result that explains why a company was skipped.
+
+    Returns {"ok": True, ...metrics} on success, or {"ok": False, "reason": slug,
+    "message": plain-English why} when the company cannot be ranked. The bare
+    `calculate_company_metrics` wrapper below preserves the None-on-failure
+    contract for the screener's hot loop; the single-ticker path uses this
+    version so the final report can say WHY a metric is missing rather than an
+    unexplained 'Not available'.
 
     Period handling (matches magicformulainvesting.com):
       - EBIT: trailing twelve months (TTM) = sum of the last 4 quarters. Falls back
@@ -171,7 +210,13 @@ def calculate_company_metrics(symbol, live_market_cap, api_key):
             inc_latest = inc_q[0]
             ttm_parts = [q.get("operatingIncome") for q in inc_q[:4]]
             if any(v is None for v in ttm_parts):
-                return None  # incomplete quarter → don't fabricate a TTM
+                # incomplete quarter → don't fabricate a TTM
+                return _skip(
+                    "incomplete_quarters",
+                    "The data provider returned an incomplete set of quarterly results, "
+                    "so a full twelve months of operating profit could not be assembled "
+                    "without guessing at the missing quarter.",
+                )
             ebit = sum(ttm_parts)
             ebit_basis = "TTM"
         else:
@@ -179,17 +224,44 @@ def calculate_company_metrics(symbol, live_market_cap, api_key):
                 "symbol": symbol, "limit": 1, "apikey": api_key
             }, context=f"{symbol} income (annual)")
             if not isinstance(inc_a, list) or not inc_a:
-                return None
+                return _skip(
+                    "no_income_data",
+                    "No income statement was available from the data provider for this "
+                    "company, so its profit could not be measured.",
+                )
             inc_latest = inc_a[0]
             ebit = inc_latest.get("operatingIncome")
             ebit_basis = "Annual"
 
-        if ebit is None or ebit <= 0:
-            return None
+        if ebit is None:
+            return _skip(
+                "no_ebit",
+                "The data provider did not report an operating profit figure for this "
+                "company, so the Magic Formula ratios could not be calculated.",
+            )
+
+        if ebit <= 0:
+            return _skip(
+                "negative_ebit",
+                f"This company is currently losing money at the operating level: its "
+                f"operating profit ({ebit_basis} basis) was {format_money(ebit)}. Both "
+                f"Magic Formula ratios divide by this profit figure, so with no profit "
+                f"to divide there is nothing meaningful to measure — a negative result "
+                f"would look like a bargain when it is the opposite. Greenblatt's "
+                f"strategy deliberately screens out unprofitable companies for this "
+                f"reason.",
+                EBIT=ebit,
+                EBIT_Basis=ebit_basis,
+            )
 
         # Reject stale earnings so we never rank on dead data.
         if _is_stale(inc_latest):
-            return None
+            return _skip(
+                "stale_income",
+                "The most recent earnings report available for this company is too old "
+                "to rely on, so its figures were rejected rather than used to justify a "
+                "decision on out-of-date data.",
+            )
 
         # --- Balance sheet: latest quarter snapshot, annual fallback ---
         bal_q = fmp_get(bal_url, params={
@@ -202,11 +274,25 @@ def calculate_company_metrics(symbol, live_market_cap, api_key):
                 "symbol": symbol, "limit": 1, "apikey": api_key
             }, context=f"{symbol} balance (annual)")
             if not isinstance(bal_a, list) or not bal_a:
-                return None
+                return _skip(
+                    "no_balance_sheet",
+                    "No balance sheet was available from the data provider for this "
+                    "company, so the money tied up in running the business could not "
+                    "be measured.",
+                    EBIT=ebit,
+                    EBIT_Basis=ebit_basis,
+                )
             bal = bal_a[0]
 
         if _is_stale(bal):
-            return None
+            return _skip(
+                "stale_balance_sheet",
+                "The most recent balance sheet available for this company is too old to "
+                "rely on, so its figures were rejected rather than used to justify a "
+                "decision on out-of-date data.",
+                EBIT=ebit,
+                EBIT_Basis=ebit_basis,
+            )
 
         # --- Balance sheet items ---
         current_assets = bal.get("totalCurrentAssets", 0) or 0
@@ -216,6 +302,9 @@ def calculate_company_metrics(symbol, live_market_cap, api_key):
         total_debt = bal.get("totalDebt", 0) or 0
         preferred = bal.get("preferredStock", 0) or 0
         minority = bal.get("minorityInterest", 0) or 0
+        total_equity = bal.get("totalStockholdersEquity", 0) or 0
+        total_assets = bal.get("totalAssets", 0) or 0
+        goodwill_intangibles = bal.get("goodwillAndIntangibleAssets", 0) or 0
 
         # Capital Employed = Net Working Capital + Net Fixed Assets.
         # Greenblatt excludes *excess* cash from NWC — cash beyond what the business
@@ -235,17 +324,47 @@ def calculate_company_metrics(symbol, live_market_cap, api_key):
         nwc = max(0, (current_assets - excess_cash) - current_liabilities)
         capital_employed = nwc + nfa
         if capital_employed <= 0:
-            return None
+            return _skip(
+                "no_capital_employed",
+                "This company reports effectively no money tied up in running the "
+                "business (no net working capital and no physical assets), so the "
+                "return-on-capital calculation would divide by zero.",
+                EBIT=ebit,
+                EBIT_Basis=ebit_basis,
+            )
 
         # Enterprise Value = Market Cap + Debt + Preferred + Minority Interest - Cash.
         enterprise_value = live_market_cap + total_debt + preferred + minority - cash
         if enterprise_value <= 0:
-            return None
+            return _skip(
+                "negative_enterprise_value",
+                "This company holds more cash than its market value plus debt combined, "
+                "giving it a negative takeover price. That makes the earnings yield "
+                "calculation meaningless, so it was excluded.",
+                EBIT=ebit,
+                EBIT_Basis=ebit_basis,
+                CapitalEmployed=capital_employed,
+            )
 
         roc = ebit / capital_employed
         earnings_yield = ebit / enterprise_value
 
+        # --- Sanity companion to ROC: return on the capital ACTUALLY spent ---
+        # Greenblatt's capital employed (NWC + net fixed assets) deliberately
+        # excludes goodwill and intangibles, because he is measuring the economics
+        # of putting the NEXT dollar into the business. That is the right question
+        # for ranking a basket, but for a company assembled by acquisition it makes
+        # the headline ROC enormous while saying nothing about the return earned on
+        # the purchase price. Invested capital below includes that purchase price
+        # (equity + debt - cash), so the two figures bracket the truth. Reported
+        # alongside ROC so neither an agent nor a reader can mistake a definitional
+        # artifact for elite operating efficiency (see specs/agent_architecture.md §3.C).
+        invested_capital = total_equity + total_debt + minority - cash
+        roic_incl_goodwill = ebit / invested_capital if invested_capital > 0 else None
+        intangibles_share = (goodwill_intangibles / total_assets) if total_assets > 0 else None
+
         return {
+            "ok": True,
             "Symbol": symbol,
             "CompanyName": inc_latest.get("companyName", symbol),
             "LiveMarketCap": live_market_cap,
@@ -254,17 +373,48 @@ def calculate_company_metrics(symbol, live_market_cap, api_key):
             "CapitalEmployed": capital_employed,
             "EnterpriseValue": enterprise_value,
             "ROC": roc,
-            "EarningsYield": earnings_yield
+            "EarningsYield": earnings_yield,
+            # Balance-sheet provenance. These are the figures the reconciliation
+            # gate in main.py checks agent-written prose against, so they must be
+            # the same numbers that fed EV above — not a second lookup.
+            "TotalDebt": total_debt,
+            "Cash": cash,
+            "TotalEquity": total_equity,
+            "TotalAssets": total_assets,
+            "GoodwillAndIntangibles": goodwill_intangibles,
+            "InvestedCapital": invested_capital if invested_capital > 0 else None,
+            "ROIC_InclGoodwill": roic_incl_goodwill,
+            "IntangiblesShareOfAssets": intangibles_share,
+            "BalanceSheetDate": bal.get("date"),
+            "IncomeStatementDate": inc_latest.get("date"),
         }
 
     except FMPError:
         # Persistent fetch failure for this symbol (already retried inside fmp_get).
         # Propagate so the run loop can count and report it rather than hide it.
         raise
-    except Exception:
+    except Exception as e:
         # Any other unexpected issue with one company's data must not abort the
         # whole run — skip it. (Fetch problems are handled above and surfaced.)
+        return _skip(
+            "unexpected_error",
+            "An unexpected problem occurred while processing this company's financial "
+            "data, so its Magic Formula ratios could not be calculated.",
+            detail=str(e),
+        )
+
+
+def calculate_company_metrics(symbol, live_market_cap, api_key):
+    """Back-compat wrapper over `compute_company_metrics_detailed`: returns the
+    plain metrics dict on success, or None when the company cannot be ranked.
+    The screener's universe loop only needs success/failure; the single-ticker
+    path calls the detailed version so it can explain the failure."""
+    result = compute_company_metrics_detailed(symbol, live_market_cap, api_key)
+    if not result.get("ok"):
         return None
+    # Strip the marker so the screener's DataFrame doesn't gain an 'ok' column.
+    return {k: v for k, v in result.items() if k != "ok"}
+
 
 def main():
     if API_KEY == "YOUR_FMP_API_KEY_HERE":
@@ -362,7 +512,16 @@ def main():
     output_df = df[[
         "Final_Rank", "Symbol", "CompanyName", "Live_Price",
         "LiveMarketCap", "ROC_Pct", "EY_Pct", "EBIT_Basis", "MagicFormula_Score",
-        "ROC_Rank", "EY_Rank"
+        "ROC_Rank", "EY_Rank",
+        # Raw component dollar figures, kept alongside the Pct columns so the
+        # final report can show the actual EY/ROC formula, not just the result.
+        "EBIT", "CapitalEmployed", "EnterpriseValue",
+        # Balance-sheet provenance + the goodwill-inclusive ROIC companion. Carried
+        # through to the CSV so a --from-csv run gets the same authoritative figures
+        # (and the same reconciliation gate) as an on-demand single-ticker run.
+        "TotalDebt", "Cash", "TotalEquity", "TotalAssets", "GoodwillAndIntangibles",
+        "InvestedCapital", "ROIC_InclGoodwill", "IntangiblesShareOfAssets",
+        "BalanceSheetDate",
     ]]
 
     # Write a timestamped archive of this run, plus overwrite the stable "latest"

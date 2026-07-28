@@ -30,7 +30,7 @@ logger = logging.getLogger("mcp_server")
 from magic_formula_starter_screener import (
     main as run_screener_main,
     OUTPUT_FILENAME,
-    calculate_company_metrics,
+    compute_company_metrics_detailed,
     fmp_get,
     FMPError,
 )
@@ -78,16 +78,47 @@ def compute_ticker_magic_metrics(ticker: str) -> str:
             context=f"{ticker} market-cap",
         )
         live_cap = mc[0].get("marketCap", 0) if isinstance(mc, list) and mc else 0
-        metrics = calculate_company_metrics(ticker, live_cap, api_key)
-        if not metrics:
-            return json.dumps({"error": f"Could not compute ROC/Earnings Yield for {ticker}"})
+        metrics = compute_company_metrics_detailed(ticker, live_cap, api_key)
+        if not metrics.get("ok"):
+            # Not a failure to look up — usually a real, reportable fact about the
+            # company (e.g. it is losing money, so the ratios are undefined). Pass
+            # the plain-English reason through so the final report can explain the
+            # gap instead of showing a bare 'Not available'.
+            return json.dumps({
+                "error": f"Could not compute ROC/Earnings Yield for {ticker}",
+                "reason": metrics.get("reason"),
+                "message": metrics.get("message"),
+                "EBIT": metrics.get("EBIT"),
+                "EBIT_Basis": metrics.get("EBIT_Basis"),
+                "CapitalEmployed": metrics.get("CapitalEmployed"),
+                "LiveMarketCap": live_cap,
+            })
+        roic = metrics.get("ROIC_InclGoodwill")
+        intang_share = metrics.get("IntangiblesShareOfAssets")
         return json.dumps({
             "Symbol": ticker,
             "CompanyName": metrics.get("CompanyName", ticker),
             "ROC_Pct": f"{round(metrics['ROC'] * 100, 2)}%",
             "EY_Pct": f"{round(metrics['EarningsYield'] * 100, 2)}%",
+            "EBIT_Basis": metrics.get("EBIT_Basis"),
+            "EBIT": metrics.get("EBIT"),
+            "CapitalEmployed": metrics.get("CapitalEmployed"),
+            "EnterpriseValue": metrics.get("EnterpriseValue"),
+            "LiveMarketCap": live_cap,
             "Final_Rank": None,
             "MagicFormula_Score": None,
+            # Authoritative balance-sheet figures + goodwill-inclusive ROIC. These
+            # are what the reconciliation gate checks agent prose against, and what
+            # keeps a rollup's headline ROC from being read as operating efficiency.
+            "TotalDebt": metrics.get("TotalDebt"),
+            "Cash": metrics.get("Cash"),
+            "TotalEquity": metrics.get("TotalEquity"),
+            "TotalAssets": metrics.get("TotalAssets"),
+            "GoodwillAndIntangibles": metrics.get("GoodwillAndIntangibles"),
+            "InvestedCapital": metrics.get("InvestedCapital"),
+            "ROIC_InclGoodwill_Pct": f"{round(roic * 100, 2)}%" if roic is not None else None,
+            "IntangiblesShareOfAssets_Pct": f"{round(intang_share * 100, 1)}%" if intang_share is not None else None,
+            "BalanceSheetDate": metrics.get("BalanceSheetDate"),
         })
     except Exception as e:
         return json.dumps({"error": str(e)})
@@ -196,6 +227,11 @@ def fmp_metrics_extractor(ticker: str) -> str:
         pe_5y_average = round(sum(pe_values) / len(pe_values), 2) if pe_values else None
 
         result = {
+            # NOTE: key_metrics and ratios below are ANNUAL periods. They describe
+            # multi-year trend and valuation history only — they say nothing about
+            # the most recent quarter. Recent-quarter deterioration is covered by
+            # fmp_quarterly_trends, which is a separate, mandatory input.
+            "period_basis": "ANNUAL (fiscal years) — see quarterly_data for recent quarters",
             "key_metrics_3y": key_metrics_3y,
             "ratios_5y": ratios_5y,
             "pe_5y_average": pe_5y_average,
@@ -207,6 +243,138 @@ def fmp_metrics_extractor(ticker: str) -> str:
         return json.dumps(result, indent=2)
     except Exception as e:
         return f"Error fetching FMP metrics for {ticker}: {str(e)}"
+
+
+# ==========================================
+# TOOL 3b: FMP Quarterly Trends (recency check)
+# ==========================================
+def _pick(row: dict, *keys):
+    """First non-None value among `keys` — FMP renames fields between endpoints."""
+    for k in keys:
+        v = row.get(k)
+        if v is not None:
+            return v
+    return None
+
+
+def _yoy_pct(current, prior):
+    """Year-over-year % change, guarding division by zero and sign flips.
+    Returns None when a comparison would be meaningless (missing or zero base)."""
+    if current is None or prior is None or not prior:
+        return None
+    return round(100.0 * (current - prior) / abs(prior), 1)
+
+
+@mcp.tool()
+def fmp_quarterly_trends(ticker: str) -> str:
+    """
+    Fetches the last 8 QUARTERS of income statement, cash flow, and balance sheet
+    for a company, and builds an explicit year-over-year comparison of each of the
+    last 4 quarters against the same quarter a year earlier (Q vs Q-4).
+
+    This exists because the annual metrics in fmp_metrics_extractor cannot show
+    recent deterioration: a company whose last full fiscal year looked fine can be
+    contracting sharply in its two most recent quarters. Use this to check whether
+    the most recent quarter CONFIRMS or CONTRADICTS the multi-year trend.
+
+    Returns JSON with `quarters` (raw per-quarter figures, newest first) and
+    `yoy_comparison` (same-quarter-last-year deltas for revenue, operating income,
+    net income, operating cash flow, capex, free cash flow, cash, and total debt).
+    """
+    api_key = os.getenv("FMP_API_KEY")
+    if not api_key:
+        return "FMP_API_KEY not configured."
+
+    base = "https://financialmodelingprep.com/stable"
+
+    def _get(path):
+        time.sleep(0.20)  # 300 calls/min Starter rate limit
+        try:
+            resp = requests.get(
+                f"{base}/{path}",
+                params={"symbol": ticker, "period": "quarter", "limit": 8, "apikey": api_key},
+                timeout=20,
+            )
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"[{ticker}] quarterly fetch failed for {path}: {e}")
+            return []
+
+    inc = _get("income-statement")
+    cfs = _get("cash-flow-statement")
+    bal = _get("balance-sheet-statement")
+
+    if not inc:
+        return json.dumps({
+            "error": f"No quarterly income statement available for {ticker}.",
+            "note": "Treat the absence of quarterly data as a gap in the evidence, "
+                    "not as confirmation that recent quarters were fine.",
+        })
+
+    # Index the cash-flow and balance-sheet rows by period end date so a missing or
+    # out-of-order statement never silently misaligns a quarter against another.
+    cfs_by_date = {r.get("date"): r for r in cfs if r.get("date")}
+    bal_by_date = {r.get("date"): r for r in bal if r.get("date")}
+
+    quarters = []
+    for row in inc[:8]:
+        date = row.get("date")
+        c = cfs_by_date.get(date, {})
+        b = bal_by_date.get(date, {})
+        capex = _pick(c, "capitalExpenditure")
+        quarters.append({
+            "date": date,
+            "period": row.get("period"),
+            "fiscalYear": row.get("fiscalYear"),
+            "revenue": row.get("revenue"),
+            "grossProfit": row.get("grossProfit"),
+            "operatingIncome": row.get("operatingIncome"),
+            "netIncome": row.get("netIncome"),
+            "interestExpense": row.get("interestExpense"),
+            "operatingCashFlow": _pick(c, "operatingCashFlow", "netCashProvidedByOperatingActivities"),
+            # FMP reports capex as a negative number; normalise to a positive spend
+            # figure so "capex rose" reads the same direction as the source filings.
+            "capitalExpenditure": abs(capex) if isinstance(capex, (int, float)) else None,
+            "freeCashFlow": _pick(c, "freeCashFlow"),
+            "cashAndShortTermInvestments": b.get("cashAndShortTermInvestments"),
+            "totalDebt": b.get("totalDebt"),
+            "totalStockholdersEquity": b.get("totalStockholdersEquity"),
+        })
+
+    # Same-quarter-last-year comparison. Comparing Q1-26 to Q4-25 would confuse
+    # seasonality with deterioration, so every delta is Q vs the quarter 4 back.
+    metrics = [
+        "revenue", "grossProfit", "operatingIncome", "netIncome",
+        "operatingCashFlow", "capitalExpenditure", "freeCashFlow",
+        "cashAndShortTermInvestments", "totalDebt",
+    ]
+    yoy = []
+    for i in range(min(4, max(0, len(quarters) - 4))):
+        cur, prior = quarters[i], quarters[i + 4]
+        entry = {"quarter": cur["date"], "vs_year_ago_quarter": prior["date"]}
+        for m in metrics:
+            entry[m] = {
+                "current": cur.get(m),
+                "year_ago": prior.get(m),
+                "yoy_pct_change": _yoy_pct(cur.get(m), prior.get(m)),
+            }
+        yoy.append(entry)
+
+    return json.dumps({
+        "ticker": ticker,
+        "basis": "QUARTERLY — most recent quarter first",
+        "latest_quarter_end": quarters[0]["date"] if quarters else None,
+        "reading_guide": (
+            "yoy_pct_change compares each quarter with the SAME quarter one year "
+            "earlier, so it is already seasonally aligned. A negative figure on "
+            "revenue, operatingIncome, or operatingCashFlow in the most recent "
+            "quarter is recent deterioration and must be reported even when the "
+            "multi-year annual trend looks healthy."
+        ),
+        "yoy_comparison": yoy,
+        "quarters": quarters,
+    }, indent=2)
 
 # ==========================================
 # TOOL 4a: FMP Stock News (recent factual, ticker-tagged financial news)
