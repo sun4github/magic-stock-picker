@@ -467,6 +467,7 @@ before any of this: **$0.497/ticker**.
 | Prune duplicated payload | `quarterly_data` 9,404 → 2,132 chars (−77%); `metrics_data` 23,413 → 11,689 (−50%) | ✅ |
 | Per-agent 429 retry | a mid-sequence rate limit no longer re-runs and re-pays for completed roles | ✅ |
 | Pin the model version | prevents a repeat of the silent 3.5x cost rise | ✅ |
+| Stop replaying the session transcript | input 183,202 → 129,617 tokens; LLM $0.3881 → $0.2869 (−26%) | ✅ |
 | Explicit context caching | **cost went UP**, 32% → 6% cached | ❌ reverted |
 
 **Payload pruning.** `quarterly_data` was written as nested JSON that repeated every
@@ -485,6 +486,25 @@ run as separate runners over one shared session, retrying only the role that
 failed. Handoff is unchanged: each agent's `output_key` writes into the shared
 session exactly as `SequentialAgent` did internally. Tokens burned on a failed
 attempt are now counted rather than dropped.
+
+**Transcript replay (`include_contents='none'`).** The shared session that makes the
+`output_key` handoff work also accumulates every earlier role's events, and ADK's
+default `include_contents='default'` sends that whole transcript to each agent —
+rewritten as user-role context, one entry per tool call carrying the full Tavily/FMP
+payload. Nothing here reads it: every input the agents use is templated from session
+state. So each downstream role was paying to receive, in raw form, what its
+instruction already carried in distilled form. All four roles are now set to
+`include_contents='none'` (current turn only — the user message plus that agent's own
+tool calls, which is what a tool loop needs). The saving scales with position in the
+pipeline, which is the signature of the replay: bull −24%, analyst −62%, sale advisor
+−78% on input tokens; bear is flat per call, having no history to replay. Verdict on
+the control ticker was unchanged (WATCH). Note the reuse fingerprint in
+`_prompt_version()` hashes instructions only, so this change does not invalidate
+reports cached under the old behaviour.
+
+Per-role token/cost lines are now logged (`[TICKER agent_name] Tokens: ...`), which
+is what made the above measurable — a ticker-level total cannot say which of the four
+roles moved.
 
 ### Explicit context caching — tried, measured, reverted
 

@@ -207,6 +207,40 @@ VERIFIED_FIGURES_MANDATE = (
 )
 
 
+# The four roles share ONE session so that `output_key` handoffs work, which means
+# the session's event log accumulates every earlier role's turns. Under ADK's default
+# `include_contents='default'` each agent is then sent the WHOLE prior transcript,
+# rewritten as user-role context ("For context: [bear_agent] said: ...", and one entry
+# per tool call carrying the full Tavily/FMP payload). That is pure waste here: no
+# agent reads the transcript. Every input they use is templated from session state --
+# {bear_data}, {bull_data}, {final_report}, {verified_figures}, {quarterly_data} --
+# so the replay only duplicated, in raw form, what the instruction already carried in
+# distilled form, and it landed hardest on the LAST agents (the sale advisor was
+# receiving bear + bull + analyst in full).
+#
+# 'none' sends the current turn only: the user message plus this agent's own tool
+# calls and responses, which is exactly what a tool loop needs to function.
+#
+# Measured on FISV, same verdict (WATCH) both times: 183,202 -> 129,617 input tokens,
+# LLM spend $0.3881 -> $0.2869 (-26%), run total $0.4201 -> $0.3349. The saving scales
+# with position in the pipeline, which is the signature of history replay:
+#   bear    37,303 -> 56,289  (unaffected -- it runs first, so there is no history to
+#                              replay; the rise is one extra tool round trip, and the
+#                              per-call prompt is flat at 18.6k -> 18.8k)
+#   bull    66,687 -> 50,986  (-24%)
+#   analyst 29,599 -> 11,355  (-62%)
+#   sale    49,613 -> 10,987  (-78%)
+# Caveat: live web search makes runs non-identical (2 vs 3 Tavily calls here), so
+# treat the per-agent figures as indicative and the direction as established.
+#
+# Note this does NOT silence the "Event from an unknown agent" warnings from
+# runners.py -- those come from `_find_agent_to_run` scanning the shared session's
+# event authors, which happens regardless of what ends up in `contents`. The warning
+# is benign: each per-agent Runner has no sub-agents, so the scan finds nothing it
+# recognises and correctly falls through to its own root agent.
+PIPELINE_INCLUDE_CONTENTS = "none"
+
+
 # --- Advocate 1: BEAR (skeptical research) ---
 bear_agent = LlmAgent(
     name="bear_agent",
@@ -230,6 +264,7 @@ bear_agent = LlmAgent(
     ),
     tools=[fmp_stock_news, web_search_tool],
     output_key="bear_data",
+    include_contents=PIPELINE_INCLUDE_CONTENTS,
 )
 
 # --- Advocate 2: BULL (runs after bear; §4 refutes the bear case) ---
@@ -265,6 +300,7 @@ bull_agent = LlmAgent(
     ),
     tools=[fmp_stock_news, web_search_tool],
     output_key="bull_data",
+    include_contents=PIPELINE_INCLUDE_CONTENTS,
 )
 
 # --- Judge: NEUTRAL analyst (no skeptical prompt) weighs bull vs bear ---
@@ -372,6 +408,7 @@ analyst_agent = LlmAgent(
     ),
     tools=[],
     output_key="final_report",
+    include_contents=PIPELINE_INCLUDE_CONTENTS,
 )
 
 # --- Phase C: SALE ADVISOR (runs after the analyst; reads {final_report}) ---
@@ -411,6 +448,7 @@ sale_advisor_agent = LlmAgent(
     ),
     tools=[fmp_stock_news, web_search_tool],
     output_key="sale_data",
+    include_contents=PIPELINE_INCLUDE_CONTENTS,
 )
 
 # The reasoning graph: bear -> bull -> neutral analyst (Phase B) -> sale advisor
@@ -697,11 +735,19 @@ def _collect_embedding_usage(usage: dict) -> None:
 
 
 def _merge_usage(acc: dict, other: dict) -> None:
+    """Fold `other`'s usage into `acc`.
+
+    `cached_input` MUST be merged along with the rest: `_model_cost` reads it from
+    the per-model bucket to bill the cheaper cached-prefix rate, so dropping it here
+    silently re-priced every cached token at the full rate once per-ticker usage was
+    rolled up into the run total. The per-ticker log lines were right and the RUN
+    TOTAL (and the pipeline_runs row, and the budget guard that reads it back) was
+    too high by the whole cached discount."""
     for k in acc:
         if k == "by_model":
             for model, b in other.get("by_model", {}).items():
                 target = _model_bucket(acc, model)
-                for field in ("input", "output", "total", "requests"):
+                for field in ("input", "cached_input", "output", "total", "requests"):
                     target[field] += b.get(field, 0)
         else:
             acc[k] += other.get(k, 0)
@@ -866,6 +912,11 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
 
     usage = _new_usage()
     for agent in PIPELINE_AGENTS:
+        # Tokens are attributed per ROLE as well as per ticker. Without this split a
+        # regression in one agent's prompt is invisible: the ticker total moves and
+        # there is nothing to say which of the four roles moved it. It also makes the
+        # cost of history replay legible, since that lands on the LATER agents only.
+        agent_usage = _new_usage()
         # Per-agent retry. Tokens spent on a failed attempt ARE counted: they were
         # billed, and hiding them is how the previous accounting understated the
         # true cost of a rate-limited run.
@@ -875,7 +926,7 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
                 async for event in runner.run_async(
                     user_id="orchestrator", session_id=session_id, new_message=message
                 ):
-                    _add_event_usage(usage, event)
+                    _add_event_usage(agent_usage, event)
                 break
             except Exception as e:
                 if _is_rate_limit_error(e) and attempt < MAX_AGENT_RETRIES - 1:
@@ -887,8 +938,15 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
                     )
                     await asyncio.sleep(wait)
                     continue
+                # No _merge_usage here on purpose: `analyze_ticker` discards this
+                # accumulator on a pipeline failure and returns zero usage, so
+                # anything merged in would be thrown away regardless. A ticker that
+                # dies mid-pipeline therefore reports $0 even though earlier roles
+                # were billed. Known and accepted — the path has never fired.
                 logger.error(f"[{ticker}] {agent.name} failed: {e}")
                 raise
+        _log_usage(f"{ticker} {agent.name}", agent_usage)
+        _merge_usage(usage, agent_usage)
         # Gentle throttle between agents, replacing the old per-ticker sleep.
         await asyncio.sleep(INTER_AGENT_DELAY_SECONDS)
 
