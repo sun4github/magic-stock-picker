@@ -113,9 +113,12 @@
   </header>
 
   <div class="wrap">
-    <div class="modes">
-      <button class="mode active" data-mode="ticker">By ticker</button>
-      <button class="mode" data-mode="run">By pipeline run</button>
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:18px;">
+      <div class="modes" style="margin-bottom:0;">
+        <button class="mode active" data-mode="ticker">By ticker</button>
+        <button class="mode" data-mode="run">By pipeline run</button>
+      </div>
+      <button id="refreshBtn" class="btn" type="button">⟳ Refresh</button>
     </div>
 
     <!-- Mode: by ticker -->
@@ -211,7 +214,7 @@
       return id ? String(id).slice(0, 8) : "";
     }
 
-    async function loadRuns(ticker) {
+    async function loadRuns(ticker, preserveRunId) {
       const res = await fetch("/api/runs?ticker=" + encodeURIComponent(ticker));
       const runs = await res.json();
       const sel = $("run");
@@ -232,7 +235,10 @@
         sel.appendChild(o);
       });
       sel.disabled = false;
-      loadReport(ticker, runs[0].run_id, runs[0].run_date);  // auto-load newest
+      // keep the previously selected run in view on refresh; otherwise default to newest
+      const target = runs.find(r => r.run_id === preserveRunId) || runs[0];
+      sel.value = target.run_id;
+      loadReport(ticker, target.run_id, target.run_date);
     }
 
     function verdictClass(v) {
@@ -271,7 +277,7 @@
     }
 
     // ---- Browse by pipeline run ----
-    async function loadPipelineRuns() {
+    async function loadPipelineRuns(preserveRunId) {
       const res = await fetch("/api/pipeline-runs");
       const runs = await res.json();
       const sel = $("pipelineRun");
@@ -291,7 +297,10 @@
       });
       sel.disabled = false;
       state.pipelineRunsLoaded = true;
-      loadRunDecisions(runs[0].run_id);  // auto-load newest
+      // keep the previously selected run in view on refresh; otherwise default to newest
+      const target = runs.find(r => r.run_id === preserveRunId) || runs[0];
+      sel.value = target.run_id;
+      loadRunDecisions(target.run_id);
     }
 
     async function loadRunDecisions(runId) {
@@ -337,10 +346,28 @@
       if (mode === "run" && !state.pipelineRunsLoaded) loadPipelineRuns();
     }
 
+    async function refreshAll() {
+      const btn = $("refreshBtn");
+      btn.disabled = true;
+      btn.textContent = "⟳ Refreshing…";
+      try {
+        await loadTickers();
+        if (state.mode === "ticker") {
+          if (state.ticker) await loadRuns(state.ticker, state.runId);
+        } else {
+          await loadPipelineRuns(state.runId);
+        }
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "⟳ Refresh";
+      }
+    }
+
     // events
     document.querySelectorAll(".mode").forEach(btn => {
       btn.addEventListener("click", () => setMode(btn.dataset.mode));
     });
+    $("refreshBtn").addEventListener("click", refreshAll);
     $("pipelineRun").addEventListener("change", (e) => loadRunDecisions(e.target.value));
     $("backToRun").addEventListener("click", () => {
       $("viewer").style.display = "none";
