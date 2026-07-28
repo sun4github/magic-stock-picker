@@ -12,6 +12,17 @@ logging:
   filename_pattern: "run_{timestamp}.log"
 
 agents:
+  # PINNED model for every reasoning agent — read by main.py as AGENT_MODEL.
+  #
+  # Deliberately NOT the `gemini-flash-latest` alias. Google repoints that alias at
+  # each new Flash release; it moved to gemini-3.6-flash on its own and per-run cost
+  # rose ~3.5x silently (input $0.30 -> $1.50/1M, output $2.50 -> $7.50/1M) with no
+  # code change. Pinning makes a model upgrade a deliberate step: change this line,
+  # add the new model's rates under llm_pricing.models, confirm them against the
+  # Cloud Billing SKUs, then re-run. The per-model cost breakdown in the run log
+  # will flag it immediately if the billed model ever differs from this pin.
+  model: "gemini-3.6-flash"
+
   screener_agent:
     name: "Magic_Formula_Screener"
     top_n_candidates: 30
@@ -23,7 +34,8 @@ agents:
 
   bear_agent:
     name: "Bear_Agent"
-    model: "gemini-flash-latest"              # thinking model (genuine research)
+    # model: inherited from agents.model (pinned). Kept out of the per-agent
+    # blocks so there is exactly one place to change the model.
     instructions_file: "research-instructions.md"
     # Two complementary search sources (see agent_architecture.md Section 2C):
     news_provider: "fmp"                      # ticker-tagged factual news
@@ -33,7 +45,7 @@ agents:
 
   bull_agent:
     name: "Bull_Agent"
-    model: "gemini-flash-latest"              # runs after bear; Section 4 refutes it
+    # model: inherited from agents.model (pinned)
     instructions_file: "bullish-research-instructions.md"
     news_provider: "fmp"
     news_api_key_env: "FMP_API_KEY"
@@ -42,12 +54,12 @@ agents:
 
   analyst_agent:
     name: "Analyst_Agent"                     # neutral judge (no skeptical prompt)
-    model: "gemini-flash-latest"              # weighs bull vs bear -> Buy/Watch/Avoid
+    # model: inherited from agents.model (pinned)
     output_format: "markdown"
 
   sale_advisor_agent:
     name: "Sale_Advisor_Agent"
-    model: "gemini-flash-latest"              # Phase C: defines the thesis-breaking sell triggers
+    # model: inherited from agents.model (pinned)
     instructions_file: "sale-advisor-instructions.md"
     news_provider: "fmp"
     news_api_key_env: "FMP_API_KEY"
@@ -59,11 +71,57 @@ agents:
   # now met against CURRENT data, advising Sell/Hold. Not part of the analysis graph.
   sell_check_agent:
     name: "Sell_Check_Agent"
-    model: "gemini-flash-latest"
+    # model: inherited from agents.model (pinned)
     news_provider: "fmp"                      # current developments (impairments, contract loss)
     news_api_key_env: "FMP_API_KEY"
     search_provider: "tavily"                 # anything not in the news feed
     search_api_key_env: "TAVILY_API_KEY"
+
+# EXPLICIT context caching (Gemini). Disabled on measured evidence — see the long
+# comment above CONTEXT_CACHE in main.py.
+#
+# Short version: an explicit cache cannot be created from a system instruction
+# alone (the API returns "contents are required"), and all our data sits in the
+# agent instruction, so every ADK attempt failed silently. Moving the data into the
+# first conversation message to fix that was tried and measured on FISV: cached
+# share fell 32% -> 6% and cost ROSE $0.32 -> $0.43, because the stable system
+# instruction was what IMPLICIT caching had been matching on all along.
+#
+# Implicit caching needs no configuration and currently covers ~32% of prompt
+# tokens. Re-enable this only if ADK/the API gains support for caching a system
+# instruction directly, and re-measure before trusting it.
+context_cache:
+  enabled: false
+  ttl_seconds: 900        # just long enough for one ticker; storage bills per token-hour
+  min_tokens: 4096        # below this, cache storage costs more than it saves
+  cache_intervals: 10     # invocations reusing one cache before it is refreshed
+
+# Spend ceilings. A 30-ticker screen is ~$11 at current rates, so a runaway loop or
+# a retry storm gets expensive quickly. Checked before each ticker starts, using the
+# run's accumulated cost plus what the DB shows was already spent in the window.
+#
+# on_exceed:
+#   halt  - stop cleanly before starting the next ticker; the run is marked
+#           BUDGET_EXCEEDED and everything already analyzed is kept
+#   warn  - log loudly and keep going
+budget:
+  enabled: true
+  per_run_usd: 15.00        # one pipeline run (~30 tickers at ~$0.37 each)
+  per_day_usd: 25.00        # rolling window below, not calendar day
+  day_window_hours: 24
+  on_exceed: "halt"
+
+# Skip re-analyzing a ticker when nothing material has changed. The fingerprint
+# covers the ticker, the balance-sheet date its figures came from, and a hash of
+# the agent prompts — so a new filing or any prompt edit forces a fresh run.
+#
+# max_age_hours bounds staleness from the things the fingerprint CANNOT see: the
+# agents do live news and web research, so an otherwise-identical run a week later
+# would genuinely surface different information. Keep this well under a week.
+# `--force` on the command line bypasses reuse entirely.
+reuse:
+  enabled: true
+  max_age_hours: 24
 
 tools:
   web_search:
@@ -92,11 +150,54 @@ webapp:
       multi_ticker_only: true                # exclude single-ticker on-demand one-offs
       csv_export: true                       # Ticker,Company,Recommendation download
 
-# LLM pricing used to estimate per-run spend from actual token usage.
-# Update these to the current Google AI pricing for your model/tier (USD per 1M tokens).
+# LLM pricing used to estimate per-run spend from actual token usage (USD per 1M
+# tokens), keyed by the RESOLVED model version reported by the API — not by the
+# alias configured on the agents.
+#
+# Why keyed by resolved version rather than by the configured model: the agents
+# USED to run on the moving alias `gemini-flash-latest`, which Google repointed
+# from Gemini 2.5 Flash to gemini-3.6-flash — a flat price here went stale the
+# moment it moved, understating real spend ~2.4x. agents.model is now pinned, but
+# pricing still keys off what the API reports it actually billed, so a pin that
+# does not match the billed model is caught rather than assumed away.
+#
+# `event.model_version` gives the concrete model per response, so every run is
+# priced against what was actually billed. An unpriced model is logged as a loud
+# warning and its cost recorded as unknown rather than silently priced at zero or
+# at some other model's rate.
+#
+# Thinking models bill `thoughtsTokenCount` at the OUTPUT rate. Those tokens are
+# already folded into the output counter, so no separate line is needed here.
 llm_pricing:
-  input_usd_per_1m: 0.30
-  output_usd_per_1m: 2.50
+  models:
+    # Derived from Cloud Billing SKU lines, 2026-07-27 (exact, not published-rate
+    # guesswork): input $1.184282 / 789,522 tok; output $1.013594 / 135,146 tok;
+    # cached input $0.031888 / 212,609 tok. All three divide out to round numbers.
+    gemini-3.6-flash:
+      input_usd_per_1m: 1.50
+      output_usd_per_1m: 7.50
+      # Gemini bills repeated prompt prefixes as a separate, cheaper SKU. The API's
+      # promptTokenCount INCLUDES these, so full-rate input = prompt - cached.
+      # Ignoring this overstates cost: cached ran 21% of prompt tokens at 1/10 rate.
+      cached_input_usd_per_1m: 0.15
+      confirmed: true
+    gemini-2.5-flash:
+      input_usd_per_1m: 0.30
+      output_usd_per_1m: 2.50
+      cached_input_usd_per_1m: 0.075
+      confirmed: true
+  # Embeddings are billed per input token. Four vectors are generated per ticker
+  # (bear, bull, sale, final report), previously uncounted.
+  #
+  # NOTE: text-embedding-004 is RETIRED — the current API 404s on it. Calls were
+  # failing silently and every stored vector was zeros, so no embedding SKU has
+  # ever appeared on a bill. gemini-embedding-001 replaces it (3072 dims by
+  # default, pinned to 768 to match the vector(768) schema). The rate below is a
+  # placeholder: re-calibrate once an embedding SKU shows up in Cloud Billing.
+  embedding:
+    model: "gemini-embedding-001"
+    input_usd_per_1m: 0.15
+    confirmed: false
 
 # Tavily web-search pricing (USD per 1,000 searches) for per-run cost estimates.
 # Tavily bills per credit ($0.008/credit on Pay-as-you-go); an 'advanced' search

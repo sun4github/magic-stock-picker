@@ -186,6 +186,57 @@ def fetch_sec_10k_data(ticker: str) -> str:
 # ==========================================
 # TOOL 3: FMP Metrics Extractor
 # ==========================================
+# Fields kept from FMP's ratio/key-metric payloads. The whitelists are deliberately
+# generous — everything the research instructions ask for (revenue growth, gross and
+# operating margin, free cash flow, total debt, P/E vs its 5-year average, leverage,
+# returns, valuation multiples) plus the usual supporting ratios. What is dropped is
+# working-capital-cycle exotica (days-payable, cash conversion cycle, Graham net-net,
+# turnover ratios) that no prompt references and no report has ever cited.
+_RATIO_FIELDS = {
+    "date", "fiscalYear", "period",
+    # margins
+    "grossProfitMargin", "operatingProfitMargin", "ebitMargin", "ebitdaMargin",
+    "netProfitMargin", "pretaxProfitMargin",
+    # valuation
+    "priceToEarningsRatio", "priceToBookRatio", "priceToSalesRatio",
+    "priceToFreeCashFlowRatio", "priceToOperatingCashFlowRatio",
+    "enterpriseValueMultiple", "priceToEarningsGrowthRatio",
+    # leverage & liquidity
+    "debtToEquityRatio", "debtToAssetsRatio", "debtToCapitalRatio",
+    "longTermDebtToCapitalRatio", "interestCoverageRatio", "financialLeverageRatio",
+    "currentRatio", "quickRatio", "cashRatio", "solvencyRatio",
+    # per-share & payout
+    "revenuePerShare", "netIncomePerShare", "freeCashFlowPerShare",
+    "operatingCashFlowPerShare", "bookValuePerShare",
+    "dividendYieldPercentage", "dividendPayoutRatio",
+    # efficiency
+    "assetTurnover", "effectiveTaxRate",
+}
+
+_KEY_METRIC_FIELDS = {
+    "date", "fiscalYear", "period",
+    "marketCap", "enterpriseValue", "investedCapital", "workingCapital",
+    "earningsYield", "freeCashFlowYield",
+    "evToEBITDA", "evToSales", "evToFreeCashFlow", "evToOperatingCashFlow",
+    "returnOnEquity", "returnOnAssets", "returnOnInvestedCapital",
+    "returnOnCapitalEmployed", "returnOnTangibleAssets", "operatingReturnOnAssets",
+    "netDebtToEBITDA", "currentRatio", "incomeQuality", "intangiblesToTotalAssets",
+    "capexToRevenue", "capexToOperatingCashFlow", "capexToDepreciation",
+    "researchAndDevelopementToRevenue", "stockBasedCompensationToRevenue",
+    "salesGeneralAndAdministrativeToRevenue",
+    "freeCashFlowToEquity", "freeCashFlowToFirm", "taxBurden", "interestBurden",
+}
+
+
+def _prune_rows(rows, keep):
+    """Keep only whitelisted keys, and drop keys whose value is None — a null adds
+    payload without adding information."""
+    if not isinstance(rows, list):
+        return rows
+    return [{k: v for k, v in row.items() if k in keep and v is not None}
+            for row in rows if isinstance(row, dict)]
+
+
 @mcp.tool()
 def fmp_metrics_extractor(ticker: str) -> str:
     """
@@ -213,6 +264,12 @@ def fmp_metrics_extractor(ticker: str) -> str:
     try:
         key_metrics_3y = _get("key-metrics", symbol=ticker, limit=3)   # 3-year trailing metrics
         ratios_5y = _get("ratios", symbol=ticker, limit=5)             # 5-year ratios incl. P/E
+        # FMP returns 64 ratio fields x 5 years and 47 key-metric fields x 3 years.
+        # The research instructions reference a small fraction of them; the rest is
+        # payload that every agent pays for on every turn. Pruning to a generous
+        # whitelist is lossless for the questions actually asked (see _RATIO_FIELDS).
+        key_metrics_3y = _prune_rows(key_metrics_3y, _KEY_METRIC_FIELDS)
+        ratios_5y = _prune_rows(ratios_5y, _RATIO_FIELDS)
         ratings_snapshot = _get("ratings-snapshot", symbol=ticker)     # replaces legacy /v3/rating
         price_target = _get("price-target-consensus", symbol=ticker)   # analyst consensus targets
         grades = _get("grades-consensus", symbol=ticker)               # analyst buy/hold/sell consensus
@@ -240,7 +297,9 @@ def fmp_metrics_extractor(ticker: str) -> str:
             "grades_consensus": grades,
             "competitors": peers,
         }
-        return json.dumps(result, indent=2)
+        # Compact separators, not indent=2: the pretty-printing was pure whitespace
+        # billed as input tokens on every agent turn.
+        return json.dumps(result, separators=(",", ":"))
     except Exception as e:
         return f"Error fetching FMP metrics for {ticker}: {str(e)}"
 
@@ -306,11 +365,9 @@ def fmp_quarterly_trends(ticker: str) -> str:
     bal = _get("balance-sheet-statement")
 
     if not inc:
-        return json.dumps({
-            "error": f"No quarterly income statement available for {ticker}.",
-            "note": "Treat the absence of quarterly data as a gap in the evidence, "
-                    "not as confirmation that recent quarters were fine.",
-        })
+        return (f"No quarterly income statement available for {ticker}. "
+                "Treat the absence of quarterly data as a gap in the evidence, "
+                "not as confirmation that recent quarters were fine.")
 
     # Index the cash-flow and balance-sheet rows by period end date so a missing or
     # out-of-order statement never silently misaligns a quarter against another.
@@ -344,37 +401,67 @@ def fmp_quarterly_trends(ticker: str) -> str:
 
     # Same-quarter-last-year comparison. Comparing Q1-26 to Q4-25 would confuse
     # seasonality with deterioration, so every delta is Q vs the quarter 4 back.
+    #
+    # Rendered as markdown tables rather than nested JSON. The JSON form repeated
+    # each field name once per quarter and, worse, wrote every value TWICE — once
+    # in `quarters` and again inside `yoy_comparison` as current/year_ago. Tables
+    # name each field once and the YoY block carries only the deltas, which is a
+    # ~75% payload reduction for identical information across four agents.
     metrics = [
-        "revenue", "grossProfit", "operatingIncome", "netIncome",
-        "operatingCashFlow", "capitalExpenditure", "freeCashFlow",
-        "cashAndShortTermInvestments", "totalDebt",
+        ("revenue", "Revenue"),
+        ("grossProfit", "Gross profit"),
+        ("operatingIncome", "Operating income"),
+        ("netIncome", "Net income"),
+        ("operatingCashFlow", "Operating cash flow"),
+        ("capitalExpenditure", "Capital expenditure"),
+        ("freeCashFlow", "Free cash flow"),
+        ("cashAndShortTermInvestments", "Cash & ST investments"),
+        ("totalDebt", "Total debt"),
+        ("interestExpense", "Interest expense"),
     ]
-    yoy = []
-    for i in range(min(4, max(0, len(quarters) - 4))):
-        cur, prior = quarters[i], quarters[i + 4]
-        entry = {"quarter": cur["date"], "vs_year_ago_quarter": prior["date"]}
-        for m in metrics:
-            entry[m] = {
-                "current": cur.get(m),
-                "year_ago": prior.get(m),
-                "yoy_pct_change": _yoy_pct(cur.get(m), prior.get(m)),
-            }
-        yoy.append(entry)
 
-    return json.dumps({
-        "ticker": ticker,
-        "basis": "QUARTERLY — most recent quarter first",
-        "latest_quarter_end": quarters[0]["date"] if quarters else None,
-        "reading_guide": (
-            "yoy_pct_change compares each quarter with the SAME quarter one year "
-            "earlier, so it is already seasonally aligned. A negative figure on "
-            "revenue, operatingIncome, or operatingCashFlow in the most recent "
-            "quarter is recent deterioration and must be reported even when the "
-            "multi-year annual trend looks healthy."
-        ),
-        "yoy_comparison": yoy,
-        "quarters": quarters,
-    }, indent=2)
+    def _m(v):
+        if v is None:
+            return "n/a"
+        return f"{v / 1e6:,.0f}"
+
+    lines = [
+        f"QUARTERLY DATA — {ticker}. All amounts in USD millions. "
+        f"Most recent quarter: {quarters[0]['date']}.",
+        "",
+        "## Quarterly figures (newest first)",
+        "",
+        "| Metric | " + " | ".join(q["date"] for q in quarters) + " |",
+        "| :--- | " + " | ".join("---:" for _ in quarters) + " |",
+    ]
+    for key, label in metrics:
+        lines.append(f"| {label} | " + " | ".join(_m(q.get(key)) for q in quarters) + " |")
+
+    n_yoy = min(4, max(0, len(quarters) - 4))
+    if n_yoy:
+        pairs = [(quarters[i], quarters[i + 4]) for i in range(n_yoy)]
+        lines += [
+            "",
+            "## Year-over-year change (%), each quarter vs the SAME quarter one year earlier",
+            "",
+            "| Metric | " + " | ".join(f"{c['date']} vs {p['date']}" for c, p in pairs) + " |",
+            "| :--- | " + " | ".join("---:" for _ in pairs) + " |",
+        ]
+        for key, label in metrics:
+            cells = []
+            for cur, prior in pairs:
+                pct = _yoy_pct(cur.get(key), prior.get(key))
+                cells.append("n/a" if pct is None else f"{pct:+.1f}%")
+            lines.append(f"| {label} | " + " | ".join(cells) + " |")
+
+    lines += [
+        "",
+        "These percentages are already seasonally aligned (same quarter, one year "
+        "apart). A negative figure on revenue, operating income, or operating cash "
+        "flow in the most recent quarter is recent deterioration and must be "
+        "reported even when the multi-year annual trend looks healthy.",
+    ]
+    return "\n".join(lines)
 
 # ==========================================
 # TOOL 4a: FMP Stock News (recent factual, ticker-tagged financial news)
@@ -552,6 +639,17 @@ def initialize_database():
             "CHECK (verdict IN ('BUY', 'WATCH', 'AVOID', 'HOLD', 'SELL'))"
         )
 
+        # Fingerprint of the inputs a report was produced from (ticker + balance
+        # sheet date + prompt version). Lets a re-run detect that nothing material
+        # has changed and reuse the stored report instead of paying to regenerate an
+        # identical analysis. Nullable: rows written before this existed simply do
+        # not participate in reuse.
+        cur.execute("ALTER TABLE final_reports ADD COLUMN IF NOT EXISTS analysis_key TEXT")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_final_reports_analysis_key "
+            "ON final_reports(ticker, analysis_key)"
+        )
+
         cur.execute("CREATE INDEX IF NOT EXISTS idx_agent_outputs_ticker ON agent_outputs(ticker)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_final_reports_ticker ON final_reports(ticker)")
 
@@ -592,21 +690,75 @@ def initialize_database():
 # Note: In production you'd call this outside module load, but we do it here for simplicity
 initialize_database()
 
+# Embedding calls are billed but were never counted anywhere in the cost estimate.
+# Four vectors are generated per ticker (BEAR_CASE, BULL_CASE, SALE_CASE, final
+# report). The orchestrator drains this counter after each ticker rather than
+# threading a usage object through every db_* tool signature.
+EMBEDDING_USAGE = {"chars": 0, "requests": 0}
+
+
+def drain_embedding_usage() -> dict:
+    """Return counts accumulated since the last drain, and reset."""
+    snapshot = dict(EMBEDDING_USAGE)
+    EMBEDDING_USAGE["chars"] = 0
+    EMBEDDING_USAGE["requests"] = 0
+    return snapshot
+
+
+EMBED_MODEL = "gemini-embedding-001"
+EMBED_DIMS = 768          # must match vector(768) in sql-schema.sql
+_EMBED_FAILURES = {"n": 0}
+
+
 def get_embedding(text: str) -> List[float]:
+    """Embed text for semantic search over stored reports.
+
+    Previously this imported `google.generativeai` (the legacy SDK, not installed
+    here) inside a bare `except: pass`, so every call fell through to a zero vector
+    in complete silence. Every embedding written to the database was zeros and
+    similarity search was returning noise. Two fixes: use the SDK the project
+    actually depends on, and make a failure LOUD — a degraded fallback that says
+    nothing is how that went unnoticed.
+
+    `text-embedding-004` is retired (404 on the current API). `gemini-embedding-001`
+    replaces it and defaults to 3072 dimensions, so output_dimensionality is pinned
+    to 768 to match the schema.
+    """
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        logger.error("GOOGLE_API_KEY not set — storing a ZERO embedding. "
+                     "Semantic search over this row will not work.")
+        return [0.0] * EMBED_DIMS
     try:
-        import google.generativeai as genai
-        google_api_key = os.getenv("GOOGLE_API_KEY")
-        if google_api_key:
-            genai.configure(api_key=google_api_key)
-            result = genai.embed_content(
-                model="models/text-embedding-004",
-                content=text[:10000]
+        from google import genai
+        from google.genai import types as genai_types
+
+        payload = text[:10000]
+        client = genai.Client(api_key=api_key)
+        result = client.models.embed_content(
+            model=EMBED_MODEL,
+            contents=payload,
+            config=genai_types.EmbedContentConfig(output_dimensionality=EMBED_DIMS),
+        )
+        values = list(result.embeddings[0].values)
+        if len(values) != EMBED_DIMS:
+            raise ValueError(f"expected {EMBED_DIMS} dims, got {len(values)}")
+        # The embed response carries no usage metadata, so bill from the payload
+        # actually sent; the caller converts characters to tokens.
+        EMBEDDING_USAGE["chars"] += len(payload)
+        EMBEDDING_USAGE["requests"] += 1
+        return values
+    except Exception as e:
+        _EMBED_FAILURES["n"] += 1
+        # Log the first few in full, then stay quiet to avoid flooding a 30-ticker run.
+        if _EMBED_FAILURES["n"] <= 3:
+            logger.error(
+                f"Embedding failed ({type(e).__name__}: {str(e)[:200]}). Storing a "
+                f"ZERO vector — this row will not be findable by semantic search."
             )
-            return result['embedding']
-    except Exception:
-        pass
-    # Fallback dummy embedding if API key missing or error
-    return [0.0] * 768
+        elif _EMBED_FAILURES["n"] == 4:
+            logger.error("Further embedding failures suppressed for this run.")
+        return [0.0] * EMBED_DIMS
 
 @mcp.tool()
 def db_create_pipeline_run(run_id: str, tickers: List[str]) -> str:
@@ -717,11 +869,119 @@ def db_store_agent_output(run_id: str, ticker: str, agent_type: str, raw_content
         return f"Error storing agent output: {str(e)}"
 
 @mcp.tool()
-def db_store_final_report(run_id: str, ticker: str, verdict: str, markdown_report: str) -> str:
+def db_find_reusable_report(ticker: str, analysis_key: str, max_age_hours: int = 24) -> str:
+    """
+    Finds a previously generated report for `ticker` whose inputs fingerprint
+    (`analysis_key`) matches and which is younger than `max_age_hours`.
+
+    Used to skip paying to regenerate an identical analysis. The age bound matters:
+    the fingerprint covers the filings and the prompt version, but the agents also
+    do live news and web research, so an old report can be stale even when the
+    financials have not moved. Returns JSON with run_id/verdict/markdown_report/
+    created_at, or {"found": false}.
+    """
+    if not analysis_key:
+        return json.dumps({"found": False, "reason": "no analysis key"})
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT run_id, verdict, markdown_report, created_at,
+                   EXTRACT(EPOCH FROM (NOW() - created_at)) / 3600.0 AS age_hours
+              FROM final_reports
+             WHERE ticker = %s AND analysis_key = %s
+               AND created_at > NOW() - (%s || ' hours')::interval
+             ORDER BY created_at DESC
+             LIMIT 1
+        ''', (ticker, analysis_key, str(int(max_age_hours))))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            return json.dumps({"found": False})
+        return json.dumps({
+            "found": True,
+            "run_id": str(row[0]),
+            "verdict": row[1],
+            "markdown_report": row[2],
+            "created_at": str(row[3]),
+            "age_hours": round(float(row[4]), 1),
+        })
+    except Exception as e:
+        logger.error(f"Error looking up reusable report for {ticker}: {e}")
+        return json.dumps({"found": False, "error": str(e)})
+
+
+@mcp.tool()
+def db_copy_ticker_outputs(src_run_id: str, dst_run_id: str, ticker: str) -> str:
+    """
+    Copies a ticker's stored report and agent outputs from one run to another.
+
+    Used by the duplicate-run skip: when a run reuses an earlier report, the new
+    run still needs its own rows or the web UI would list the ticker and then fail
+    to load anything for it. Embeddings are copied as-is rather than regenerated —
+    the text is identical, so re-embedding would be paid work for no change.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT INTO final_reports (run_id, ticker, verdict, markdown_report, embedding, analysis_key)
+            SELECT %s, ticker, verdict, markdown_report, embedding, analysis_key
+              FROM final_reports
+             WHERE run_id = %s AND ticker = %s
+             ORDER BY created_at DESC LIMIT 1
+        ''', (dst_run_id, src_run_id, ticker))
+        reports = cur.rowcount
+        cur.execute('''
+            INSERT INTO agent_outputs (run_id, ticker, agent_type, raw_content, metadata, embedding)
+            SELECT %s, ticker, agent_type, raw_content, metadata, embedding
+              FROM agent_outputs
+             WHERE run_id = %s AND ticker = %s
+        ''', (dst_run_id, src_run_id, ticker))
+        outputs = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        return f"Copied {reports} report and {outputs} agent outputs for {ticker}"
+    except Exception as e:
+        logger.error(f"Error copying outputs for {ticker}: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def db_spend_since(hours: int = 24) -> str:
+    """
+    Total estimated spend recorded across pipeline runs in the last `hours`.
+    Backs the daily budget guard. Returns JSON {total_usd, runs}.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT COALESCE(SUM(total_cost_usd), 0), COUNT(*)
+              FROM pipeline_runs
+             WHERE started_at > NOW() - (%s || ' hours')::interval
+        ''', (str(int(hours)),))
+        total, runs = cur.fetchone()
+        cur.close()
+        conn.close()
+        return json.dumps({"total_usd": float(total or 0), "runs": int(runs or 0)})
+    except Exception as e:
+        logger.error(f"Error computing recent spend: {e}")
+        return json.dumps({"total_usd": 0.0, "runs": 0, "error": str(e)})
+
+
+@mcp.tool()
+def db_store_final_report(run_id: str, ticker: str, verdict: str, markdown_report: str,
+                          analysis_key: str = "") -> str:
     """
     Stores final report in PostgreSQL database with vector embeddings.
     The verdict is normalized to the uppercase BUY/WATCH/AVOID values allowed by
     the final_reports CHECK constraint (WATCH is the neutral default).
+
+    `analysis_key` fingerprints the inputs this report was produced from so a later
+    run can detect that nothing material changed and reuse it (see db_find_reusable_report).
     """
     try:
         normalized = (verdict or "").strip().upper()
@@ -731,9 +991,9 @@ def db_store_final_report(run_id: str, ticker: str, verdict: str, markdown_repor
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute('''
-            INSERT INTO final_reports (run_id, ticker, verdict, markdown_report, embedding)
-            VALUES (%s, %s, %s, %s, %s)
-        ''', (run_id, ticker, normalized, markdown_report, embedding))
+            INSERT INTO final_reports (run_id, ticker, verdict, markdown_report, embedding, analysis_key)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        ''', (run_id, ticker, normalized, markdown_report, embedding, analysis_key or None))
         conn.commit()
         cur.close()
         conn.close()

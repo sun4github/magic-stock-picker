@@ -3,6 +3,7 @@ import re
 import time
 import json
 import asyncio
+import hashlib
 import logging
 from datetime import datetime
 import uuid
@@ -10,7 +11,9 @@ import yaml
 import pandas as pd
 from dotenv import load_dotenv
 
-from google.adk.agents import LlmAgent, SequentialAgent
+from google.adk.agents import LlmAgent
+from google.adk.agents.context_cache_config import ContextCacheConfig
+from google.adk.apps import App
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -30,7 +33,11 @@ from mcp_server import (
     db_store_agent_output,
     db_store_final_report,
     db_store_ticker_run,
-    db_get_sale_case
+    db_get_sale_case,
+    db_find_reusable_report,
+    db_copy_ticker_outputs,
+    db_spend_since,
+    drain_embedding_usage,
 )
 # The screener's CSV output path (default source for --from-csv mode) and the
 # shared dollar formatter, so amounts read identically in reports and logs.
@@ -66,10 +73,31 @@ with open(config_path, "r") as f:
 
 top_n = config.get("agents", {}).get("screener_agent", {}).get("top_n_candidates", 30)
 
-# LLM pricing (USD per 1M tokens) for estimating per-run spend from token usage.
+# PINNED model version, deliberately not the `gemini-flash-latest` alias.
+#
+# That alias is one Google moves at each new Flash release. It moved from Gemini
+# 2.5 Flash to gemini-3.6-flash without any change here, and per-run cost rose
+# ~3.5x silently (input $0.30 -> $1.50/1M, output $2.50 -> $7.50/1M). Pinning makes
+# a model change a decision taken here, reviewed against specs/config.yaml pricing,
+# rather than one made for us. Read from config so there is a single place to
+# change it; the runtime still prices whatever `event.model_version` reports, so a
+# mismatch between this pin and the billed model is caught by the cost accounting.
+AGENT_MODEL = config.get("agents", {}).get("model", "gemini-3.6-flash")
+
+# LLM pricing (USD per 1M tokens), keyed by the RESOLVED model version the API
+# reports — see the commentary in specs/config.yaml. Pricing the alias instead of
+# the resolved model is what caused per-run spend to be understated ~2.4x once
+# `gemini-flash-latest` moved from Gemini 2.5 Flash to gemini-3.6-flash.
 _pricing = config.get("llm_pricing", {})
-PRICE_INPUT_PER_1M = float(_pricing.get("input_usd_per_1m", 0.30))
-PRICE_OUTPUT_PER_1M = float(_pricing.get("output_usd_per_1m", 2.50))
+MODEL_PRICES = _pricing.get("models", {}) or {}
+_embed_cfg = _pricing.get("embedding", {}) or {}
+EMBED_MODEL = _embed_cfg.get("model", "text-embedding-004")
+EMBED_PRICE_INPUT_PER_1M = float(_embed_cfg.get("input_usd_per_1m", 0.0))
+
+# Models seen at runtime with no configured price, and unconfirmed prices already
+# warned about. Both are reported once per process rather than per call.
+_UNPRICED_MODELS = set()
+_UNCONFIRMED_WARNED = set()
 
 # Web search (Tavily) pricing (USD per 1,000 requests) for per-run cost estimates.
 TAVILY_PRICE_PER_1K = float(config.get("search_pricing", {}).get("tavily_usd_per_1k", 16.00))
@@ -96,7 +124,9 @@ with open(sale_advisor_path, "r") as f:
 #   1. Pure data relays (SEC 10-K, FMP metrics) — deterministic tool calls invoked
 #      DIRECTLY in analyze_ticker (100% fidelity, 0 tokens), seeded into session
 #      state as sec_data / metrics_data (shared by both advocates below).
-#   2. Reasoning — a SequentialAgent of THREE roles that hand off via session state:
+#   2. Reasoning — FOUR roles run in order over one shared session, handing off
+#      via session state (PIPELINE_AGENTS; see _run_pipeline_async for why this
+#      is a list rather than a SequentialAgent):
 #         bear_agent  (research-instructions.md) -> state['bear_data']
 #         bull_agent  (bullish-research-instructions.md) -> state['bull_data']
 #                     (runs after bear so it can refute it)
@@ -111,9 +141,10 @@ APP_NAME = "skeptical_decomposer"
 # quarters were contracting -- the annual feed simply could not show it.
 RECENCY_MANDATE = (
     "## Recency requirement (mandatory)\n"
-    "QUARTERLY_DATA below contains the last 8 quarters and an explicit "
-    "year-over-year comparison of each recent quarter against the same quarter a "
-    "year earlier. METRICS_DATA is ANNUAL and cannot show recent deterioration.\n"
+    "QUARTERLY_DATA below holds two tables: the last 8 quarters of figures (USD "
+    "millions, newest first), and the year-over-year percentage change of each "
+    "recent quarter against the SAME quarter one year earlier. METRICS_DATA is "
+    "ANNUAL and cannot show recent deterioration.\n"
     "- You MUST examine the most recent quarter before writing any conclusion.\n"
     "- You MUST state plainly whether the most recent quarter CONFIRMS or "
     "CONTRADICTS the multi-year annual trend, and quote the specific year-over-year "
@@ -129,6 +160,38 @@ RECENCY_MANDATE = (
 # asserting $36.9B of debt for a company carrying $29.3B -- the wrong figure then
 # propagated into the bull refutation, the final verdict, and a sell trigger that
 # was calibrated against a number that never existed.
+# Reference data blocks, templated into each agent's instruction.
+#
+# An attempt was made to move these out of the instruction and into the first
+# conversation message, so that ADK could build an explicit Gemini cache (a cache
+# cannot be created from a system instruction alone — the API returns "contents are
+# required", which is why ADK's every attempt failed silently). Measured on FISV,
+# that restructure made things WORSE: cached share fell 32% -> 6% and cost rose
+# $0.32 -> $0.43 per run.
+#
+# The reason is that the long, stable system instruction was precisely what Gemini's
+# IMPLICIT caching had been matching on. Moving the bulk into `contents` — which
+# grows and shifts as each agent appends to the session — destroyed the stable
+# prefix and bought nothing, because no explicit cache was created either.
+#
+# So the data stays here, in the instruction, where implicit caching demonstrably
+# works. See specs/agent_architecture.md §5B.
+# Given to every reasoning agent.
+REFERENCE_DATA_BLOCKS = (
+    "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
+    "<VERIFIED_FIGURES>\n{verified_figures}\n</VERIFIED_FIGURES>\n\n"
+    "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
+)
+
+# Given only to the two research advocates. The judge works from their arguments
+# plus the verified figures, and the sale advisor from the finished report — neither
+# needs the raw filing extract or the annual ratio dump, and sending it to them
+# would add ~10k tokens per turn for nothing.
+RESEARCH_SOURCE_BLOCKS = (
+    "<METRICS_DATA>\n{metrics_data}\n</METRICS_DATA>\n\n"
+    "<SEC_DATA>\n{sec_data}\n</SEC_DATA>\n"
+)
+
 VERIFIED_FIGURES_MANDATE = (
     "## Verified figures (authoritative)\n"
     "VERIFIED_FIGURES below were computed directly from the company's filings by "
@@ -147,7 +210,7 @@ VERIFIED_FIGURES_MANDATE = (
 # --- Advocate 1: BEAR (skeptical research) ---
 bear_agent = LlmAgent(
     name="bear_agent",
-    model="gemini-flash-latest",
+    model=AGENT_MODEL,
     instruction=(
         research_instructions
         + "\n\n## How to run this research\n"
@@ -162,11 +225,8 @@ bear_agent = LlmAgent(
         "cash flow, capital expenditure, total debt -- each against the same quarter a "
         "year earlier) BEFORE presenting the three-year annual summary.\n\n"
         + VERIFIED_FIGURES_MANDATE
-        + "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
-        "<VERIFIED_FIGURES>\n{verified_figures}\n</VERIFIED_FIGURES>\n\n"
-        "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
-        "<SEC_DATA>\n{sec_data}\n</SEC_DATA>\n\n"
-        "<METRICS_DATA>\n{metrics_data}\n</METRICS_DATA>\n"
+        + REFERENCE_DATA_BLOCKS
+        + RESEARCH_SOURCE_BLOCKS
     ),
     tools=[fmp_stock_news, web_search_tool],
     output_key="bear_data",
@@ -175,7 +235,7 @@ bear_agent = LlmAgent(
 # --- Advocate 2: BULL (runs after bear; §4 refutes the bear case) ---
 bull_agent = LlmAgent(
     name="bull_agent",
-    model="gemini-flash-latest",
+    model=AGENT_MODEL,
     instruction=(
         bullish_instructions
         + "\n\n## How to run this research\n"
@@ -199,12 +259,9 @@ bull_agent = LlmAgent(
         "contracted, or filed) or SPECULATIVE (rumoured transaction, press report of "
         "talks, management target for a future year, analyst projection). State each "
         "catalyst's label inline. A rumoured deal is optionality, not a plan.\n\n"
-        "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
-        "<VERIFIED_FIGURES>\n{verified_figures}\n</VERIFIED_FIGURES>\n\n"
-        "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
-        "<SEC_DATA>\n{sec_data}\n</SEC_DATA>\n\n"
-        "<METRICS_DATA>\n{metrics_data}\n</METRICS_DATA>\n\n"
-        "<BEAR_CASE>\n{bear_data}\n</BEAR_CASE>\n"
+        + REFERENCE_DATA_BLOCKS
+        + RESEARCH_SOURCE_BLOCKS
+        + "\n<BEAR_CASE>\n{bear_data}\n</BEAR_CASE>\n"
     ),
     tools=[fmp_stock_news, web_search_tool],
     output_key="bull_data",
@@ -213,7 +270,7 @@ bull_agent = LlmAgent(
 # --- Judge: NEUTRAL analyst (no skeptical prompt) weighs bull vs bear ---
 analyst_agent = LlmAgent(
     name="analyst_agent",
-    model="gemini-flash-latest",
+    model=AGENT_MODEL,
     instruction=(
         "You are a NEUTRAL, balanced investment analyst — neither skeptical-by-default "
         "nor promotional. You are given a fully-argued BEAR case and a fully-argued BULL "
@@ -309,10 +366,8 @@ analyst_agent = LlmAgent(
         "earnings report if it were happening. For a 'Buy', this is the thing most "
         "likely to break the case; for 'Watch' or 'Avoid', the thing most likely to "
         "prove you too cautious. Do not use the word 'Verdict' in this section.\n\n"
-        "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
-        "<VERIFIED_FIGURES>\n{verified_figures}\n</VERIFIED_FIGURES>\n\n"
-        "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
-        "<BEAR_CASE>\n{bear_data}\n</BEAR_CASE>\n\n"
+        + REFERENCE_DATA_BLOCKS
+        + "<BEAR_CASE>\n{bear_data}\n</BEAR_CASE>\n\n"
         "<BULL_CASE>\n{bull_data}\n</BULL_CASE>\n"
     ),
     tools=[],
@@ -326,7 +381,7 @@ analyst_agent = LlmAgent(
 # recent developments. Its output is persisted as SALE_CASE.
 sale_advisor_agent = LlmAgent(
     name="sale_advisor_agent",
-    model="gemini-flash-latest",
+    model=AGENT_MODEL,
     instruction=(
         sale_advisor_instructions
         + "\n\n## How to run this analysis\n"
@@ -350,7 +405,7 @@ sale_advisor_agent = LlmAgent(
         "current figures already satisfy, or that sits so far from them it could never "
         "realistically fire, is worse than useless: check each one against the actual "
         "value before you write it.\n\n"
-        "<VERIFIED_FIGURES>\n{verified_figures}\n</VERIFIED_FIGURES>\n\n"
+        + "<VERIFIED_FIGURES>\n{verified_figures}\n</VERIFIED_FIGURES>\n\n"
         "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
         "<FINAL_REPORT>\n{final_report}\n</FINAL_REPORT>\n"
     ),
@@ -362,10 +417,11 @@ sale_advisor_agent = LlmAgent(
 # (Phase C). SEC and metrics are gathered by direct tool calls in analyze_ticker,
 # not by agents. The sale advisor runs last so it can read the analyst's
 # {final_report} (bull + bear thesis + verdict) from session state.
-skeptical_pipeline = SequentialAgent(
-    name="skeptical_pipeline",
-    sub_agents=[bear_agent, bull_agent, analyst_agent, sale_advisor_agent],
-)
+# Run in order, each against the SAME session so `output_key` handoffs work exactly
+# as they did inside SequentialAgent. Kept as a plain list rather than a
+# SequentialAgent so `_run_pipeline_async` can retry ONE failed role on a 429
+# instead of re-running (and re-paying for) every role before it.
+PIPELINE_AGENTS = [bear_agent, bull_agent, analyst_agent, sale_advisor_agent]
 
 # --- Phase C follow-up: SELL-CONDITION CHECK (standalone, on-demand) ---
 # A separate single-stock flow. It loads the ticker's most recent SALE_CASE (the
@@ -376,7 +432,7 @@ skeptical_pipeline = SequentialAgent(
 # and {metrics_data} (a fresh direct FMP call), plus live news/web research.
 sell_check_agent = LlmAgent(
     name="sell_check_agent",
-    model="gemini-flash-latest",
+    model=AGENT_MODEL,
     instruction=(
         "You are a SELL-CONDITION EVALUATOR for {company_name} ({ticker}). A previous "
         "analysis produced a set of SALE CONDITIONS — specific, measurable business "
@@ -420,6 +476,49 @@ sell_check_agent = LlmAgent(
 MAX_AGENT_RETRIES = 5
 BASE_BACKOFF_SECONDS = 20
 INTER_CALL_DELAY_SECONDS = 2
+INTER_AGENT_DELAY_SECONDS = 1
+
+# --- Context caching ----------------------------------------------------------
+# Gemini bills a repeated prompt prefix at $0.15/1M instead of $1.50/1M. Two ways to
+# get it: IMPLICIT (automatic prefix matching) and EXPLICIT (a pinned CachedContent).
+#
+# Explicit caching is DISABLED by default, on evidence. An explicit cache cannot be
+# built from a system instruction alone — the API rejects it with "contents are
+# required" — and all of our data lives in the agent instruction, so ADK's every
+# attempt failed silently on every turn.
+#
+# The obvious fix, moving the data block into the first conversation message so it
+# lands in `contents`, was implemented and measured on FISV. It was WORSE: cached
+# share fell 32% -> 6% and cost rose $0.32 -> $0.43 per run. The long, stable
+# system instruction turned out to be exactly what implicit caching had been
+# matching on; relocating it into `contents` (which grows as each agent appends to
+# the session) destroyed that stable prefix and bought no explicit cache either.
+#
+# So: leave the data in the instruction, let implicit caching do its job (~32% of
+# prompt tokens), and keep this switch here for when ADK or the API supports
+# caching a system instruction directly. See specs/agent_architecture.md §5B.
+#
+# ttl_seconds: cache storage bills per token-hour, so this covers one ticker only.
+# min_tokens: below this, storage costs more than it saves.
+# cache_intervals: invocations reusing one cache before it is refreshed.
+CONTEXT_CACHE = ContextCacheConfig(
+    ttl_seconds=int(config.get("context_cache", {}).get("ttl_seconds", 900)),
+    min_tokens=int(config.get("context_cache", {}).get("min_tokens", 4096)),
+    cache_intervals=int(config.get("context_cache", {}).get("cache_intervals", 10)),
+)
+CONTEXT_CACHE_ENABLED = bool(config.get("context_cache", {}).get("enabled", True))
+
+
+def _build_runner(agent, session_service) -> Runner:
+    """Runner for one agent, with context caching attached via App.
+
+    Caching is configured on the App rather than the Runner, so each agent gets an
+    App wrapper. Falls back to a plain Runner if caching is disabled in config, so
+    the feature can be switched off without touching code."""
+    if not CONTEXT_CACHE_ENABLED:
+        return Runner(app_name=APP_NAME, agent=agent, session_service=session_service)
+    app = App(name=APP_NAME, root_agent=agent, context_cache_config=CONTEXT_CACHE)
+    return Runner(app=app, session_service=session_service)
 
 
 def _is_rate_limit_error(err: Exception) -> bool:
@@ -428,8 +527,110 @@ def _is_rate_limit_error(err: Exception) -> bool:
 
 
 # --- Token usage / cost accounting ---------------------------------------
+# --- Budget guard -------------------------------------------------------------
+_budget = config.get("budget", {}) or {}
+BUDGET_ENABLED = bool(_budget.get("enabled", True))
+BUDGET_PER_RUN_USD = float(_budget.get("per_run_usd", 15.0))
+BUDGET_PER_DAY_USD = float(_budget.get("per_day_usd", 25.0))
+BUDGET_DAY_WINDOW_HOURS = int(_budget.get("day_window_hours", 24))
+BUDGET_ON_EXCEED = str(_budget.get("on_exceed", "halt")).lower()
+
+
+class BudgetExceeded(Exception):
+    """Raised to stop a run cleanly when a spend ceiling is hit. Work already
+    completed is persisted; only the remaining tickers are skipped."""
+
+
+def _prior_day_spend() -> float:
+    """Spend already recorded in the rolling window, from the DB. Excludes the
+    current run, whose row is only finalized at the end."""
+    try:
+        return float(json.loads(db_spend_since(BUDGET_DAY_WINDOW_HOURS)).get("total_usd", 0.0))
+    except Exception as e:
+        # A guard that fails open is worse than no guard being claimed, so say so.
+        logger.warning(f"Could not read recent spend for the budget guard: {e}. "
+                       f"Proceeding with the per-run ceiling only.")
+        return 0.0
+
+
+def _check_budget(run_usage: dict, prior_day_usd: float, next_label: str) -> None:
+    """Enforce the spend ceilings before starting another ticker.
+
+    Checked between tickers rather than mid-ticker: stopping half way through a
+    ticker would leave a partial analysis and still have paid for it."""
+    if not BUDGET_ENABLED:
+        return
+    run_cost = _total_cost(run_usage)
+    day_cost = prior_day_usd + run_cost
+
+    breach = None
+    if run_cost >= BUDGET_PER_RUN_USD:
+        breach = (f"per-run ceiling reached: ${run_cost:.2f} of ${BUDGET_PER_RUN_USD:.2f}")
+    elif day_cost >= BUDGET_PER_DAY_USD:
+        breach = (f"{BUDGET_DAY_WINDOW_HOURS}h ceiling reached: ${day_cost:.2f} of "
+                  f"${BUDGET_PER_DAY_USD:.2f} (${prior_day_usd:.2f} before this run)")
+    if not breach:
+        return
+
+    if BUDGET_ON_EXCEED == "halt":
+        raise BudgetExceeded(f"{breach}. Stopping before {next_label}. "
+                             f"Raise budget.per_run_usd / budget.per_day_usd in "
+                             f"specs/config.yaml to continue.")
+    logger.warning(f"BUDGET: {breach}. Continuing because budget.on_exceed is "
+                   f"'{BUDGET_ON_EXCEED}' — set it to 'halt' to stop instead.")
+
+
+# --- Duplicate-run skip --------------------------------------------------------
+_reuse = config.get("reuse", {}) or {}
+REUSE_ENABLED = bool(_reuse.get("enabled", True))
+REUSE_MAX_AGE_HOURS = int(_reuse.get("max_age_hours", 24))
+
+
+def _prompt_version() -> str:
+    """Short hash of every agent instruction plus the shared prompt fragments.
+
+    Any edit to a prompt changes this, which invalidates reuse — otherwise tuning
+    the analyst's verdict stance would silently keep serving reports written under
+    the old rules."""
+    blob = "".join(a.instruction for a in PIPELINE_AGENTS)
+    blob += RECENCY_MANDATE + VERIFIED_FIGURES_MANDATE + REFERENCE_DATA_BLOCKS
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
+def _analysis_key(ticker: str, candidate: dict) -> str:
+    """Fingerprint of the inputs a report is produced from.
+
+    Deliberately built from the BALANCE SHEET DATE rather than today's date: two
+    runs a day apart against the same filing are the same analysis. A new filing
+    moves the date and forces a fresh run, as does any prompt edit.
+
+    Returns "" when the balance sheet date is unknown, which disables reuse for
+    that ticker — better to pay again than to serve a report whose provenance we
+    cannot establish."""
+    bs_date = (candidate or {}).get("BalanceSheetDate")
+    if not bs_date:
+        return ""
+    raw = f"{ticker}|{bs_date}|{_prompt_version()}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
 def _new_usage() -> dict:
-    return {"input": 0, "output": 0, "total": 0, "requests": 0, "search_requests": 0}
+    """Usage accumulator. `by_model` splits tokens by the resolved model version so
+    each is priced at its own rate; the flat input/output/total counters are kept
+    for the existing DB columns and log lines. `embed_input` counts embedding
+    tokens, which are billed separately and were previously not counted at all."""
+    return {
+        "input": 0, "output": 0, "total": 0, "requests": 0, "search_requests": 0,
+        "cached_input": 0, "embed_input": 0, "embed_requests": 0,
+        "by_model": {},
+    }
+
+
+def _model_bucket(usage: dict, model: str) -> dict:
+    return usage["by_model"].setdefault(
+        model or "unknown",
+        {"input": 0, "cached_input": 0, "output": 0, "total": 0, "requests": 0},
+    )
 
 
 def _add_event_usage(usage: dict, event) -> None:
@@ -453,23 +654,124 @@ def _add_event_usage(usage: dict, event) -> None:
     um = getattr(event, "usage_metadata", None)
     if um is None:
         return
-    usage["input"] += um.prompt_token_count or 0
-    usage["output"] += (um.candidates_token_count or 0) + (um.thoughts_token_count or 0)
-    usage["total"] += um.total_token_count or 0
+    tokens_in = um.prompt_token_count or 0
+    # Thinking tokens bill at the output rate. gemini-3.6-flash spends the large
+    # majority of its output budget here -- a probe showed 388 of 478 output
+    # tokens were thoughts -- so dropping them would badly understate cost.
+    tokens_out = (um.candidates_token_count or 0) + (getattr(um, "thoughts_token_count", 0) or 0)
+    tokens_total = um.total_token_count or 0
+    # Repeated prompt prefixes bill as a separate, much cheaper SKU. prompt_token_count
+    # INCLUDES these, so full-rate input is (prompt - cached). Ignoring the split
+    # overstates cost -- on a real day's billing, cached was 21% of prompt tokens at
+    # one tenth the rate.
+    tokens_cached = getattr(um, "cached_content_token_count", 0) or 0
+
+    usage["input"] += tokens_in
+    usage["cached_input"] += tokens_cached
+    usage["output"] += tokens_out
+    usage["total"] += tokens_total
     usage["requests"] += 1
+
+    # The alias configured on the agent is not what gets billed; the resolved
+    # version is. Bucket by it so each model is priced at its own rate.
+    bucket = _model_bucket(usage, getattr(event, "model_version", None))
+    bucket["input"] += tokens_in
+    bucket["cached_input"] += tokens_cached
+    bucket["output"] += tokens_out
+    bucket["total"] += tokens_total
+    bucket["requests"] += 1
+
+
+# Embedding responses carry no usage metadata, so tokens are approximated from the
+# payload length. 4 chars/token is the usual rule of thumb for English prose; this
+# line is a small fraction of total spend, so the approximation is not material —
+# but counting it approximately beats the previous behaviour of not counting it.
+_CHARS_PER_TOKEN = 4
+
+
+def _collect_embedding_usage(usage: dict) -> None:
+    """Fold embedding calls made since the last collection into `usage`."""
+    drained = drain_embedding_usage()
+    usage["embed_input"] += drained["chars"] // _CHARS_PER_TOKEN
+    usage["embed_requests"] += drained["requests"]
 
 
 def _merge_usage(acc: dict, other: dict) -> None:
     for k in acc:
-        acc[k] += other.get(k, 0)
+        if k == "by_model":
+            for model, b in other.get("by_model", {}).items():
+                target = _model_bucket(acc, model)
+                for field in ("input", "output", "total", "requests"):
+                    target[field] += b.get(field, 0)
+        else:
+            acc[k] += other.get(k, 0)
+
+
+def _model_price(model: str):
+    """(input_per_1m, cached_input_per_1m, output_per_1m) for a resolved model
+    version, or None when the model has no configured price. Returning None rather
+    than a default is deliberate: silently falling back to another model's rate is
+    exactly how the original 2.4x understatement went unnoticed for so long."""
+    entry = MODEL_PRICES.get(model)
+    if not entry:
+        if model not in _UNPRICED_MODELS:
+            _UNPRICED_MODELS.add(model)
+            logger.error(
+                f"No price configured for model '{model}'. Its tokens are EXCLUDED "
+                f"from the cost estimate, so reported spend is too low. Add it under "
+                f"llm_pricing.models in specs/config.yaml."
+            )
+        return None
+    if not entry.get("confirmed", False) and model not in _UNCONFIRMED_WARNED:
+        _UNCONFIRMED_WARNED.add(model)
+        logger.warning(
+            f"Price for '{model}' is marked unconfirmed in specs/config.yaml "
+            f"(${entry.get('input_usd_per_1m')}/1M in, ${entry.get('output_usd_per_1m')}/1M out). "
+            f"Verify against the Cloud Billing SKU lines and set confirmed: true."
+        )
+    return (
+        float(entry.get("input_usd_per_1m", 0.0)),
+        float(entry.get("cached_input_usd_per_1m", 0.0)),
+        float(entry.get("output_usd_per_1m", 0.0)),
+    )
+
+
+def _model_cost(bucket: dict, price) -> float:
+    """Cost for one model's tokens. `prompt_token_count` includes cached tokens, so
+    the full rate applies only to (input - cached); the remainder bills at the
+    cheaper cached-input rate."""
+    p_in, p_cached, p_out = price
+    cached = min(bucket.get("cached_input", 0), bucket["input"])
+    full = bucket["input"] - cached
+    return (full / 1e6) * p_in + (cached / 1e6) * p_cached + (bucket["output"] / 1e6) * p_out
 
 
 def _llm_cost(usage: dict) -> float:
-    return (usage["input"] / 1e6) * PRICE_INPUT_PER_1M + (usage["output"] / 1e6) * PRICE_OUTPUT_PER_1M
+    """Sum per-model cost. Models without a configured price contribute nothing and
+    are logged as errors by _model_price -- the estimate is then a known lower
+    bound rather than a wrong number presented as fact."""
+    total = 0.0
+    for model, b in usage.get("by_model", {}).items():
+        price = _model_price(model)
+        if price is None:
+            continue
+        total += _model_cost(b, price)
+    return total + _embedding_cost(usage)
+
+
+def _embedding_cost(usage: dict) -> float:
+    """Embedding spend. Four vectors are generated per ticker (bear, bull, sale,
+    final report); before this was added they were billed but never counted."""
+    return (usage.get("embed_input", 0) / 1e6) * EMBED_PRICE_INPUT_PER_1M
 
 
 def _search_cost(usage: dict) -> float:
     return (usage["search_requests"] / 1000.0) * TAVILY_PRICE_PER_1K
+
+
+def _total_cost(usage: dict) -> float:
+    """Combined LLM + embedding + web-search spend for a usage accumulator."""
+    return _llm_cost(usage) + _search_cost(usage)
 
 
 def _log_usage(label: str, usage: dict) -> float:
@@ -483,33 +785,58 @@ def _log_usage(label: str, usage: dict) -> float:
         f"| Tavily: {usage['search_requests']} searches "
         f"| est. cost: LLM=${llm:.4f} Tavily=${search:.4f} TOTAL=${total:.4f}"
     )
+    # Per-model breakdown. Printed because the agents are configured with a moving
+    # alias -- seeing the resolved version in the log is what makes a repointed
+    # alias (and the stale price that follows) noticeable instead of silent.
+    for model, b in sorted(usage.get("by_model", {}).items()):
+        price = _model_price(model)
+        cost = ("$%.4f" % _model_cost(b, price)) if price else "UNPRICED"
+        cached = b.get("cached_input", 0)
+        cached_note = f" (of which {cached:,} cached)" if cached else ""
+        logger.info(
+            f"[{label}]   {model}: {b['requests']} calls "
+            f"in={b['input']:,}{cached_note} out={b['output']:,} -> {cost}"
+        )
+    if usage.get("embed_input"):
+        logger.info(
+            f"[{label}]   {EMBED_MODEL}: {usage['embed_requests']} embeddings "
+            f"in={usage['embed_input']:,} -> ${_embedding_cost(usage):.4f}"
+        )
     return total
 
 
-def _finalize_run(run_id: str, usage: dict, run_label: str) -> None:
+def _finalize_run(run_id: str, usage: dict, run_label: str, status: str = "COMPLETED") -> None:
     """Log the run's usage/cost and persist it (with terminal status) to
-    pipeline_runs."""
+    pipeline_runs. `status` is BUDGET_EXCEEDED when a spend ceiling stopped the run
+    early, so a short run is distinguishable from a completed one in the history."""
     total_cost = _log_usage(f"RUN {run_id} TOTAL", usage)
     _check_db(
         db_finalize_pipeline_run(
-            run_id, "COMPLETED",
+            run_id, status,
             usage["requests"], usage["input"], usage["output"], usage["total"],
             usage["search_requests"],
             round(_llm_cost(usage), 6), round(_search_cost(usage), 6), round(total_cost, 6),
         ),
         "finalize pipeline run",
     )
-    logger.info(f"{run_label} {run_id} COMPLETED. Estimated spend (LLM+Tavily): ${total_cost:.4f}")
+    logger.info(f"{run_label} {run_id} {status}. Estimated spend (LLM+Tavily): ${total_cost:.4f}")
 
 
 async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
                               sec_data: str, metrics_data: str, screen_context: str,
                               quarterly_data: str = "", verified_figures: str = ""):
-    """Run the search->analysis graph for one ticker. Returns (state, usage) where
-    state holds search_data/final_report (plus the seeded sec_data/metrics_data)
-    and usage holds the aggregated token counts for this ticker's model calls."""
+    """Run the analysis graph for one ticker. Returns (state, usage).
+
+    The four roles are run as SEPARATE runners over ONE shared session rather than
+    as a single SequentialAgent, so a 429 can be retried at the agent that failed.
+    Retrying the whole graph (the previous behaviour) discarded completed bear and
+    bull work and paid for it again — at ~$0.39/ticker a single mid-sequence rate
+    limit cost a full extra run, and those wasted tokens were never even counted.
+
+    Handoff still happens through session state: each agent's `output_key` writes
+    into the shared session, and the next agent templates that key. That is exactly
+    what SequentialAgent did internally, so behaviour is unchanged."""
     session_service = InMemorySessionService()
-    runner = Runner(app_name=APP_NAME, agent=skeptical_pipeline, session_service=session_service)
     session_id = f"{run_id}:{ticker}"
 
     # Seed per-ticker context. sec_data/metrics_data/quarterly_data come from direct
@@ -537,12 +864,33 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
         parts=[types.Part(text=f"Run the skeptical decomposer analysis for {company_name} ({ticker}).")],
     )
 
-    # Drive the graph to completion; sub-agent handoffs happen via session state.
     usage = _new_usage()
-    async for event in runner.run_async(
-        user_id="orchestrator", session_id=session_id, new_message=message
-    ):
-        _add_event_usage(usage, event)
+    for agent in PIPELINE_AGENTS:
+        # Per-agent retry. Tokens spent on a failed attempt ARE counted: they were
+        # billed, and hiding them is how the previous accounting understated the
+        # true cost of a rate-limited run.
+        for attempt in range(MAX_AGENT_RETRIES):
+            runner = _build_runner(agent, session_service)
+            try:
+                async for event in runner.run_async(
+                    user_id="orchestrator", session_id=session_id, new_message=message
+                ):
+                    _add_event_usage(usage, event)
+                break
+            except Exception as e:
+                if _is_rate_limit_error(e) and attempt < MAX_AGENT_RETRIES - 1:
+                    wait = BASE_BACKOFF_SECONDS * (2 ** attempt)
+                    logger.warning(
+                        f"[{ticker}] {agent.name} rate limited (429). Backing off {wait}s "
+                        f"(attempt {attempt + 1}/{MAX_AGENT_RETRIES}). Earlier agents in "
+                        f"this ticker are NOT re-run."
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                logger.error(f"[{ticker}] {agent.name} failed: {e}")
+                raise
+        # Gentle throttle between agents, replacing the old per-ticker sleep.
+        await asyncio.sleep(INTER_AGENT_DELAY_SECONDS)
 
     final = await session_service.get_session(
         app_name=APP_NAME, user_id="orchestrator", session_id=session_id
@@ -553,32 +901,21 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
 def run_pipeline(run_id: str, ticker: str, company_name: str, sec_data: str,
                  metrics_data: str, screen_context: str,
                  quarterly_data: str = "", verified_figures: str = ""):
-    """Synchronous wrapper around the Phase-B graph with 429 exponential backoff.
-    Returns (state, usage). Note: tokens from a failed attempt before a 429 are
-    not counted (the retry re-runs the whole ticker); this is a minor undercount.
+    """Synchronous wrapper around the Phase-B graph. Returns (state, usage).
 
-    A 429 mid-sequence re-runs the whole ticker pipeline; with the analysis
-    agent on flash plus throttling this should be rare.
+    Rate-limit retries happen INSIDE `_run_pipeline_async`, per agent — there is
+    deliberately no retry loop here. Wrapping this call in a second retry would
+    re-run every completed role on a late 429 and re-pay for it, which is the waste
+    the per-agent retry exists to remove. Tokens burned on a failed attempt are
+    counted rather than silently dropped, so a rate-limited run reports what it
+    actually cost.
     """
-    for attempt in range(MAX_AGENT_RETRIES):
-        try:
-            state, usage = asyncio.run(_run_pipeline_async(
-                run_id, ticker, company_name, sec_data, metrics_data, screen_context,
-                quarterly_data, verified_figures,
-            ))
-            time.sleep(INTER_CALL_DELAY_SECONDS)  # gentle throttle between tickers
-            return state, usage
-        except Exception as e:
-            if _is_rate_limit_error(e) and attempt < MAX_AGENT_RETRIES - 1:
-                wait = BASE_BACKOFF_SECONDS * (2 ** attempt)
-                logger.warning(
-                    f"[{ticker}] Rate limited (429). Backing off {wait}s "
-                    f"(attempt {attempt + 1}/{MAX_AGENT_RETRIES})."
-                )
-                time.sleep(wait)
-                continue
-            logger.error(f"[{ticker}] Pipeline run failed: {e}")
-            raise
+    state, usage = asyncio.run(_run_pipeline_async(
+        run_id, ticker, company_name, sec_data, metrics_data, screen_context,
+        quarterly_data, verified_figures,
+    ))
+    time.sleep(INTER_CALL_DELAY_SECONDS)  # gentle throttle between tickers
+    return state, usage
 
 
 async def _run_sell_check_async(ticker: str, company_name: str,
@@ -587,7 +924,7 @@ async def _run_sell_check_async(ticker: str, company_name: str,
     """Run the standalone sell_check_agent for one ticker. Returns (state, usage);
     state['sell_check'] holds the evaluation report."""
     session_service = InMemorySessionService()
-    runner = Runner(app_name=APP_NAME, agent=sell_check_agent, session_service=session_service)
+    runner = _build_runner(sell_check_agent, session_service)
     session_id = f"sellcheck:{ticker}:{timestamp}"
 
     await session_service.create_session(
@@ -680,8 +1017,9 @@ def _extract_verdict(report_text: str) -> str:
     return min(positions, key=positions.get).upper() if positions else "WATCH"
 
 
-def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: str = "", candidate: dict = None) -> dict:
-    """Run the Phase-B SequentialAgent graph for one ticker and persist its
+def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: str = "",
+                   candidate: dict = None, force: bool = False) -> dict:
+    """Run the Phase-B agent sequence for one ticker and persist its
     outputs and final report. Returns the ticker's token-usage dict (zero usage
     if the pipeline failed).
 
@@ -698,6 +1036,39 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     Assumes the parent pipeline_runs row for `run_id` already exists (the
     agent_outputs/final_reports tables have a FK onto it).
     """
+    # Reuse check FIRST, before any billed work. The fingerprint covers the ticker,
+    # the balance-sheet date its figures came from, and the prompt version, so a new
+    # filing or any prompt edit forces a fresh analysis.
+    analysis_key = _analysis_key(ticker, candidate)
+    if REUSE_ENABLED and not force and analysis_key:
+        try:
+            prior = json.loads(db_find_reusable_report(ticker, analysis_key, REUSE_MAX_AGE_HOURS))
+        except Exception as e:
+            logger.warning(f"[{ticker}] Reuse lookup failed ({e}); analyzing fresh.")
+            prior = {"found": False}
+        if prior.get("found"):
+            logger.info(
+                f"[{ticker}] Reusing the report from run {prior['run_id'][:8]} "
+                f"({prior['age_hours']}h old, verdict {prior['verdict']}): same filing "
+                f"({candidate.get('BalanceSheetDate')}) and same prompts, so a fresh run "
+                f"would cost ~$0.37 to reproduce it. Use --force to re-analyze."
+            )
+            # Give THIS run its own rows. Indexing the ticker without copying the
+            # report and agent outputs would list it in the web UI and then fail to
+            # load anything for it.
+            _check_db(
+                db_copy_ticker_outputs(prior["run_id"], run_id, ticker),
+                f"{ticker} copy reused outputs",
+            )
+            _check_db(
+                db_store_ticker_run(run_id, ticker, company_name or ticker, prior["verdict"]),
+                f"{ticker} ticker_run (reused)",
+            )
+            report_path = os.path.join("reports", f"{ticker}_Final_Report_{prior['verdict'].title()}.md")
+            with open(report_path, "w", encoding="utf-8") as f:
+                f.write(prior["markdown_report"])
+            return _new_usage()
+
     logger.info(f"[{ticker}] Gathering SEC + metrics + quarterly trends (direct tool calls)...")
     # Pure data relays: call the deterministic tools directly (100% fidelity, 0 tokens).
     sec_data = fetch_sec_10k_data(ticker)
@@ -760,6 +1131,7 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
 
     if not report_text:
         logger.error(f"[{ticker}] No final report produced; skipping report persistence.")
+        _collect_embedding_usage(usage)
         return usage
 
     # Reconciliation gate. Check the model-written sections against the figures the
@@ -799,13 +1171,18 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
         f"{_format_reconciliation_section(recon_findings)}"
     )
     report_stored = _with_run_header(report_with_metrics, run_id, ticker)
-    _check_db(db_store_final_report(run_id, ticker, verdict, report_stored), f"{ticker} final report")
+    # Store the fingerprint alongside the report so a later run can reuse it.
+    _check_db(db_store_final_report(run_id, ticker, verdict, report_stored, analysis_key),
+              f"{ticker} final report")
     # Index this run under the ticker for the web UI.
     _check_db(db_store_ticker_run(run_id, ticker, company_name or ticker, verdict), f"{ticker} ticker_run")
 
     report_path = os.path.join("reports", f"{ticker}_Final_Report_{verdict.title()}.md")
     with open(report_path, "w", encoding='utf-8') as f:
         f.write(report_stored)
+
+    # Fold in the embedding calls made by the db_store_* tools above.
+    _collect_embedding_usage(usage)
 
     logger.info(f"[{ticker}] Completed Analysis ({verdict}) and saved to {report_path}")
     return usage
@@ -1337,7 +1714,7 @@ def _format_magic_formula_section(candidate: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _run_phase_b(top_candidates: list, source_label: str):
+def _run_phase_b(top_candidates: list, source_label: str, force: bool = False):
     """Create a pipeline run and analyze each candidate through Phase B.
     Shared by the full-pipeline and CSV modes."""
     run_id = str(uuid.uuid4())
@@ -1348,18 +1725,42 @@ def _run_phase_b(top_candidates: list, source_label: str):
     tickers = [c.get("Symbol") for c in top_candidates if c.get("Symbol")]
     _check_db(db_create_pipeline_run(run_id, tickers), "create pipeline run")
 
+    prior_day_usd = _prior_day_spend() if BUDGET_ENABLED else 0.0
+    if BUDGET_ENABLED:
+        logger.info(
+            f"Budget: ${BUDGET_PER_RUN_USD:.2f}/run, ${BUDGET_PER_DAY_USD:.2f}/"
+            f"{BUDGET_DAY_WINDOW_HOURS}h (${prior_day_usd:.2f} already spent in that "
+            f"window), on_exceed={BUDGET_ON_EXCEED}."
+        )
+
     run_usage = _new_usage()
+    completed = 0
+    halted = None
     for idx, candidate in enumerate(top_candidates):
         ticker = candidate.get("Symbol")
         company_name = candidate.get("CompanyName")
+        try:
+            _check_budget(run_usage, prior_day_usd, f"{ticker} ({idx + 1}/{len(top_candidates)})")
+        except BudgetExceeded as e:
+            halted = str(e)
+            logger.error(f"BUDGET: {halted}")
+            break
         logger.info(f"--- Processing {idx+1}/{len(top_candidates)}: {ticker} ({company_name}) ---")
         screen_context = _format_screen_context(candidate)
-        _merge_usage(run_usage, analyze_ticker(run_id, ticker, company_name, screen_context, candidate))
+        _merge_usage(run_usage,
+                     analyze_ticker(run_id, ticker, company_name, screen_context, candidate, force))
+        completed += 1
 
-    _finalize_run(run_id, run_usage, "Workflow Run")
+    if halted:
+        logger.warning(
+            f"Stopped after {completed}/{len(top_candidates)} tickers. Everything "
+            f"analyzed so far is saved under run {run_id}."
+        )
+    _finalize_run(run_id, run_usage, "Workflow Run",
+                  status="BUDGET_EXCEEDED" if halted else "COMPLETED")
 
 
-def run_orchestrator():
+def run_orchestrator(force: bool = False):
     """Full pipeline: Phase A screener -> Phase B analysis over the Top N."""
     # Phase A: Screener. We invoke the screener tool directly (deterministic JSON);
     # this also writes the rankings CSV that --from-csv can reuse later.
@@ -1372,10 +1773,10 @@ def run_orchestrator():
 
     top_candidates = top_candidates[:top_n]
     logger.info(f"Phase A Complete. Retrieved {len(top_candidates)} candidates.")
-    _run_phase_b(top_candidates, "Phase A screener")
+    _run_phase_b(top_candidates, "Phase A screener", force)
 
 
-def run_from_csv(csv_path: str = None):
+def run_from_csv(csv_path: str = None, force: bool = False):
     """Skip Phase A: load the screener's rankings CSV from a previous run and run
     Phase B over the top N. Phase A (the full FMP universe scan) is slow, so this
     reuses its output when you just want to (re)run the analysis."""
@@ -1395,16 +1796,25 @@ def run_from_csv(csv_path: str = None):
         return
 
     logger.info(f"Loaded top {len(top_candidates)} candidates from CSV.")
-    _run_phase_b(top_candidates, f"CSV '{csv_path}'")
+    _run_phase_b(top_candidates, f"CSV '{csv_path}'", force)
 
 
-def run_single_ticker(ticker: str, company_name: str = None):
+def run_single_ticker(ticker: str, company_name: str = None, force: bool = False):
     """On-demand Phase B: run the skeptical analysis for a single arbitrary
     ticker, bypassing Phase A. Logged as its own one-company pipeline run."""
     ticker = ticker.strip().upper()
     company_name = company_name or ticker
     run_id = str(uuid.uuid4())
     logger.info(f"Starting On-Demand Run: {run_id} for {ticker} ({company_name})")
+
+    # A single ticker cannot breach the per-run ceiling, but it can push the rolling
+    # window over. Check once, up front, rather than after paying for it.
+    if BUDGET_ENABLED:
+        try:
+            _check_budget(_new_usage(), _prior_day_spend(), f"{ticker}")
+        except BudgetExceeded as e:
+            logger.error(f"BUDGET: {e}")
+            return
 
     # Parent pipeline_runs row for just this company (FK target for outputs).
     _check_db(db_create_pipeline_run(run_id, [ticker]), "create pipeline run")
@@ -1433,7 +1843,7 @@ def run_single_ticker(ticker: str, company_name: str = None):
         candidate.setdefault("CompanyName", company_name)
         screen_context = _format_screen_context(candidate)
 
-    usage = analyze_ticker(run_id, ticker, company_name, screen_context, candidate)
+    usage = analyze_ticker(run_id, ticker, company_name, screen_context, candidate, force)
 
     _finalize_run(run_id, usage, "On-Demand Run")
 
@@ -1536,7 +1946,19 @@ if __name__ == "__main__":
         "--run", metavar="RUN_ID", default=None,
         help="With --sell-check: evaluate against a SPECIFIC run's SALE_CASE (the run you purchased under) instead of the latest",
     )
+    parser.add_argument(
+        "--force", action="store_true",
+        help="Re-analyze even when an identical recent report exists (bypasses the reuse check)",
+    )
+    parser.add_argument(
+        "--no-budget", action="store_true",
+        help="Disable the spend ceilings in specs/config.yaml for this invocation",
+    )
     args = parser.parse_args()
+
+    if args.no_budget:
+        BUDGET_ENABLED = False
+        logger.warning("Budget guard DISABLED for this run (--no-budget).")
 
     if args.run and not args.sell_check:
         parser.error("--run is only valid together with --sell-check")
@@ -1546,8 +1968,8 @@ if __name__ == "__main__":
             parser.error("--sell-check requires a TICKER (e.g. python main.py --sell-check CROX)")
         run_sell_check(args.ticker, args.company, args.run)
     elif args.from_csv:
-        run_from_csv(args.from_csv)
+        run_from_csv(args.from_csv, args.force)
     elif args.ticker:
-        run_single_ticker(args.ticker, args.company)
+        run_single_ticker(args.ticker, args.company, args.force)
     else:
-        run_orchestrator()
+        run_orchestrator(args.force)

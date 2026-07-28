@@ -384,6 +384,200 @@ The system stores all intermediate outputs and final reports in a PostgreSQL dat
 - The four analytical reports (`BEAR_CASE`, `BULL_CASE`, `SALE_CASE`, and the final report) are stamped with a **run_id banner** at the top before storage (a blockquote with the `run_id` + ticker). This makes the `run_id` visible in the web viewer so it can be recorded against a purchased lot (the value `--run` pins for the sell-condition check). SEC/metrics rows are left unstamped. The banner does not affect verdict parsing (it sits above the `## Final Verdict` section) and is negligible for the embeddings.
 
 
+## 5A. Cost Accounting
+
+**Price the resolved model, never the alias.** Every agent is configured with
+`gemini-flash-latest` — a *moving* alias that Google repoints at each new Flash
+release. A flat price in `config.yaml` therefore goes stale silently the moment
+the alias moves. It did: the alias now resolves to **`gemini-3.6-flash`** while
+the config still priced Gemini 2.5 Flash ($0.30/$2.50), understating real spend by
+**~2.4x** — two runs billed at $0.55 were reported as $0.233.
+
+Rules:
+
+- `llm_pricing.models` in `config.yaml` is keyed by **resolved model version**,
+  read from `event.model_version` on each response and accumulated per model in
+  `usage["by_model"]`.
+- **An unpriced model is an ERROR, not a default.** Its tokens are excluded from
+  the estimate and logged loudly, so the figure is a known lower bound rather than
+  a wrong number presented as fact. Silently falling back to another model's rate
+  is how the original understatement went unnoticed.
+- Prices carry a `confirmed` flag. Unconfirmed prices log a warning naming the
+  rates in use and telling the reader to check them against the Cloud Billing SKU.
+- Per-run logs print a **per-model breakdown**, so a repointed alias is visible in
+  the output rather than silent.
+
+**Confirmed rates** (`gemini-3.6-flash`, derived from Cloud Billing SKU rows on
+2026-07-27 — exact division, not published-rate guesswork):
+
+| SKU | Tokens | Charge | Rate |
+| :--- | ---: | ---: | ---: |
+| Generate content input token count | 789,522 | $1.184282 | **$1.50 / 1M** |
+| Generate content output token count | 135,146 | $1.013594 | **$7.50 / 1M** |
+| Generate content cached input token count | 212,609 | $0.031888 | **$0.15 / 1M** |
+
+**Cached input is a third SKU.** Gemini bills repeated prompt prefixes at one tenth
+the input rate, and `promptTokenCount` **includes** them — so full-rate input is
+`prompt - cached`. Cached ran **21%** of prompt tokens. Ignoring the split
+overstates cost; ignoring caching as a lever leaves the single largest saving on
+the table (see §5B).
+
+**Thinking tokens.** These models bill `thoughtsTokenCount` at the *output* rate,
+and they dominate: a probe of `gemini-3.6-flash` showed **388 of 478** output
+tokens were thoughts, and a two-token "say hi" produced 134. They are folded into
+the output counter — dropping them would understate cost several-fold. At $7.50/1M
+this is the expensive side of the ledger.
+
+**Billing data lags by hours.** A report pulled mid-day covers only the runs that
+had already posted. On 2026-07-27 the export showed $2.23 against 1,002,131 prompt
+tokens while the pipeline had recorded 2,952,571 for the day — the report covered
+~34% of the day's work. Repricing the first 6 runs (through 18:42) at the rates
+above gives **$2.29 against the posted $2.23, a 2.7% match**, which is what
+confirms both the rates and the token accounting. Never treat a same-day export as
+the day's total: `calibrate_pricing.py` warns when the SKU token counts fall well
+short of what was recorded.
+
+**Embeddings.** Four `text-embedding-004` vectors are generated per ticker
+(`BEAR_CASE`, `BULL_CASE`, `SALE_CASE`, final report). These were billed but never
+counted. `mcp_server.EMBEDDING_USAGE` accumulates payload size and
+`analyze_ticker` drains it via `_collect_embedding_usage`. The API returns no usage
+metadata for embeddings, so tokens are approximated at 4 chars/token — immaterial
+to the total, but counted approximately rather than not at all.
+
+**Calibration.** `src/calibrate_pricing.py` reconciles recorded token counts
+against a real bill:
+
+```
+python calibrate_pricing.py --runs 2 --actual 0.55                       # ratio check
+python calibrate_pricing.py --runs 2 --input-charge X --output-charge Y  # exact solve
+```
+
+A combined total is one equation in two unknowns and cannot pin both rates; the
+two Cloud Billing SKU amounts (Billing → Reports, grouped by SKU) solve it exactly.
+
+---
+
+## 5B. Cost Reduction — what worked, and what did not
+
+Measured on repeated FISV runs at the confirmed `gemini-3.6-flash` rates. Baseline
+before any of this: **$0.497/ticker**.
+
+| Change | Effect | Kept? |
+| :--- | :--- | :--- |
+| Prune duplicated payload | `quarterly_data` 9,404 → 2,132 chars (−77%); `metrics_data` 23,413 → 11,689 (−50%) | ✅ |
+| Per-agent 429 retry | a mid-sequence rate limit no longer re-runs and re-pays for completed roles | ✅ |
+| Pin the model version | prevents a repeat of the silent 3.5x cost rise | ✅ |
+| Explicit context caching | **cost went UP**, 32% → 6% cached | ❌ reverted |
+
+**Payload pruning.** `quarterly_data` was written as nested JSON that repeated every
+value twice — once in `quarters`, again inside `yoy_comparison` as
+`current`/`year_ago`. It is now two markdown tables: values appear once, field names
+appear once instead of per-quarter. It gained an interest-expense row while
+shrinking 77%, and the deterioration arc is legible at a glance. `metrics_data` was
+64 FMP ratio fields × 5 years plus 47 key-metric fields × 3 years; whitelisted to
+the ~35 and ~33 the research instructions actually reference, and serialised with
+compact separators rather than `indent=2`.
+
+**Per-agent retry.** `run_pipeline` previously wrapped the whole `SequentialAgent`
+in a retry loop, so one 429 in the sale advisor discarded completed bear, bull and
+analyst work and paid for all of it again — a full extra ticker. The four roles now
+run as separate runners over one shared session, retrying only the role that
+failed. Handoff is unchanged: each agent's `output_key` writes into the shared
+session exactly as `SequentialAgent` did internally. Tokens burned on a failed
+attempt are now counted rather than dropped.
+
+### Explicit context caching — tried, measured, reverted
+
+Gemini bills a repeated prompt prefix at $0.15/1M against $1.50/1M, so pinning the
+~15k-token shared block looked like the largest single lever. It does not work here:
+
+1. **ADK cannot create the cache.** Every attempt failed with
+   `Failed to create cache: contents are required` — visible only at WARNING level
+   inside ADK. An explicit cache cannot be built from a system instruction alone,
+   and all our data sits in the agent `instruction` while `contents` is nearly empty.
+2. **Fixing that made it worse.** Moving the block into the first conversation
+   message (so it lands in `contents`) was implemented and measured: cached share
+   fell **32% → 6%** and cost rose **$0.32 → $0.43** per run.
+
+The reason is that the long, stable system instruction was exactly what Gemini's
+**implicit** caching had been matching on. Relocating it into `contents` — which
+grows and shifts as each agent appends to the session — destroyed that stable prefix
+and bought no explicit cache in exchange.
+
+**Conclusion: leave the data in the instruction.** Implicit caching needs no
+configuration and covers ~32% of prompt tokens. `context_cache.enabled` is `false`
+in config.yaml and the plumbing (`_build_runner`, `CONTEXT_CACHE`) is retained for
+when ADK or the API supports caching a system instruction directly — re-measure
+before trusting it.
+
+### Budget guard
+
+A 30-ticker screen is ~$11 at current rates, and the cost accounting was wrong by
+3.5x for a while without anyone noticing — so an unbounded run is a real risk.
+Ceilings live under `budget:` in config.yaml and are checked **between tickers**,
+never mid-ticker: stopping half way through would leave a partial analysis and
+still have paid for it.
+
+- `per_run_usd` — one pipeline run's accumulated cost.
+- `per_day_usd` / `day_window_hours` — a **rolling** window, not a calendar day.
+  Prior spend comes from `db_spend_since`, so the ceiling accounts for earlier runs
+  rather than just the current one.
+- `on_exceed: halt` stops cleanly before the next ticker and finalizes the run as
+  **`BUDGET_EXCEEDED`**, so a short run is distinguishable from a completed one in
+  the history. Everything already analyzed is kept. `warn` logs loudly and continues.
+- `--no-budget` disables the ceilings for one invocation.
+
+The single-ticker path checks once up front and returns **before** creating the
+`pipeline_runs` row, so a blocked run leaves no orphan record.
+
+If the spend lookup fails the guard logs a warning and falls back to the per-run
+ceiling alone — a guard that fails open silently would be worse than none, because
+the run would look protected when it is not.
+
+### Duplicate-run skip
+
+`analyze_ticker` checks for a reusable report **before any billed work**. The
+fingerprint (`analysis_key`, stored on `final_reports`) is:
+
+```
+sha256(ticker | balance-sheet date | prompt version)
+```
+
+- **Balance-sheet date, not today's date.** Two runs a day apart against the same
+  filing are the same analysis; a new filing moves the date and forces a fresh run.
+- **Prompt version** is a hash of every agent instruction plus the shared prompt
+  fragments, so editing the verdict stance invalidates reuse instead of silently
+  serving reports written under the old rules.
+- **No balance-sheet date → reuse disabled** for that ticker. Pay again rather than
+  serve a report whose provenance cannot be established.
+
+`reuse.max_age_hours` (default 24) bounds staleness from what the fingerprint
+*cannot* see: the agents do live news and web research, so an otherwise-identical
+run a week later would genuinely surface different information. Keep it well under
+a week. `--force` bypasses reuse entirely.
+
+A reused report is still indexed under the new `run_id` in `ticker_runs` and
+rewritten to `reports/`, so the web UI and the local files behave as if it ran.
+
+Regression tests: `src/test_guards.py` (offline, no billed work).
+
+### Embeddings were silently broken
+
+Found while adding embedding cost accounting: `get_embedding` imported
+`google.generativeai` (the legacy SDK, **not installed** — the project depends on
+`google.genai`) inside a bare `except: pass`. Every call fell through to a zero
+vector in complete silence. **All 248 stored `agent_outputs` embeddings and all 98
+`final_reports` embeddings are zeros**, so similarity search has never worked.
+Additionally `text-embedding-004` is retired and now 404s.
+
+Fixed to use `google.genai` with `gemini-embedding-001` (3072 dims by default,
+pinned to 768 via `output_dimensionality` to match `vector(768)`), and the fallback
+now logs an ERROR naming the row as unsearchable instead of failing silently.
+**Historical rows still hold zero vectors and need re-embedding to become
+searchable.**
+
+---
+
 ## 6. API Rate Limiting & Throttling Rules
 
 The coding agent **must implement explicit rate-limiting middleware or throttle delays** for all HTTP requests to prevent API blocks or 429/403 errors:

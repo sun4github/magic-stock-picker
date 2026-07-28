@@ -6,6 +6,9 @@ CREATE TABLE pipeline_runs (
     run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     started_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     completed_at TIMESTAMP WITH TIME ZONE,     -- Set when the run finishes
+    -- RUNNING -> COMPLETED, or BUDGET_EXCEEDED when a spend ceiling stopped the run
+    -- early (see `budget:` in specs/config.yaml). Everything analyzed before the
+    -- stop is kept, so a short run must stay distinguishable from a finished one.
     status VARCHAR(50) NOT NULL DEFAULT 'RUNNING',
     top_30_tickers TEXT[],                     -- Array of tickers identified in Phase A
     -- Aggregated LLM/search usage & estimated cost for the run
@@ -28,7 +31,9 @@ CREATE TABLE agent_outputs (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     raw_content TEXT NOT NULL,
     metadata JSONB, -- Stores structured JSON like customer concentration %, P/E, etc.
-    embedding vector(768) -- Vector embedding using text-embedding-004
+    -- gemini-embedding-001 pinned to 768 dims via output_dimensionality (it defaults
+    -- to 3072). text-embedding-004 is retired and 404s on the current API.
+    embedding vector(768)
 );
 
 -- 3. Final Synthesized Reports
@@ -41,7 +46,14 @@ CREATE TABLE final_reports (
     -- to initiate). Legacy BUY/SELL/HOLD kept valid for historical rows.
     verdict VARCHAR(10) CHECK (verdict IN ('BUY', 'WATCH', 'AVOID', 'HOLD', 'SELL')),
     markdown_report TEXT NOT NULL,
-    embedding vector(768)
+    embedding vector(768),
+    -- Fingerprint of the inputs this report was produced from:
+    --   sha256(ticker | balance-sheet date | prompt version)
+    -- A later run matching the same fingerprint reuses this report instead of
+    -- paying to regenerate an identical analysis (see `reuse:` in config.yaml and
+    -- db_find_reusable_report). Nullable: rows written before this column existed
+    -- simply do not participate in reuse.
+    analysis_key TEXT
 );
 
 -- 4. Ticker Runs (per-ticker index of pipeline runs; drives the web UI)
@@ -62,3 +74,6 @@ CREATE INDEX idx_agent_outputs_embedding ON agent_outputs USING hnsw (embedding 
 CREATE INDEX idx_final_reports_embedding ON final_reports USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX idx_ticker_runs_ticker ON ticker_runs(ticker);
 CREATE INDEX idx_ticker_runs_date ON ticker_runs(run_date DESC);
+-- Backs the duplicate-run skip: looked up as (ticker, analysis_key) before any
+-- billed work starts, so it sits on the hot path of every ticker.
+CREATE INDEX idx_final_reports_analysis_key ON final_reports(ticker, analysis_key);
