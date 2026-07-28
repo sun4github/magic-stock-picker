@@ -207,6 +207,10 @@
       return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
     }
 
+    function shortId(id) {
+      return id ? String(id).slice(0, 8) : "";
+    }
+
     async function loadRuns(ticker) {
       const res = await fetch("/api/runs?ticker=" + encodeURIComponent(ticker));
       const runs = await res.json();
@@ -224,7 +228,7 @@
         const o = document.createElement("option");
         o.value = r.run_id;
         o.dataset.date = r.run_date || "";
-        o.textContent = fmtDate(r.run_date) + "  —  " + (r.verdict || "—");
+        o.textContent = fmtDate(r.run_date) + "  —  " + (r.verdict || "—") + "  [" + shortId(r.run_id) + "]";
         sel.appendChild(o);
       });
       sel.disabled = false;
@@ -282,7 +286,7 @@
         o.value = r.run_id;
         o.dataset.date = r.run_date || "";
         const n = r.ticker_count;
-        o.textContent = fmtDate(r.run_date) + "  —  " + n + (n === 1 ? " ticker" : " tickers");
+        o.textContent = fmtDate(r.run_date) + "  —  " + n + (n === 1 ? " ticker" : " tickers") + "  [" + shortId(r.run_id) + "]";
         sel.appendChild(o);
       });
       sel.disabled = false;
