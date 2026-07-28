@@ -4,6 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Magic Stock Picker — Report Viewer</title>
+  <!-- Fonts/icons used by the embedded "Learn" simulator -->
+  <link href="https://fonts.googleapis.com/css2?family=Material+Icons" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@300;400;500;700&family=Google+Sans+Code:wght@300;400;500;700&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg: #f7f8fa; --panel: #ffffff; --border: #e2e5ea; --text: #1c2430;
@@ -104,6 +107,108 @@
     .md pre { background: var(--bg); padding: 12px; border-radius: 8px; overflow-x: auto; border: 1px solid var(--border); }
     .md blockquote { border-left: 3px solid var(--border); margin: .8em 0; padding: .2em 1em; color: var(--muted); }
     .md a { color: var(--accent); }
+
+    /* ---- Embedded "Learn" simulator (scoped under .lemonade-sim so it can't
+       leak into / clash with the report-viewer's own styles) ---- */
+    .lemonade-sim {
+      --ls-primary: #0b57d0; --ls-on-primary: #fff; --ls-primary-container: #d3e3fd;
+      --ls-surface: #fff; --ls-surface-container: #f0f4f9; --ls-surface-container-high: #e9ebf0;
+      --ls-on-surface: #1b1c1d; --ls-on-surface-de-emphasis: #444746;
+      --ls-outline: #747775; --ls-stroke: #dcdfe5;
+      --ls-chart-1: #1558d6; --ls-chart-2: #046e00; --ls-chart-3: #eaa937;
+      --ls-chart-4: #c0151d; --ls-chart-5: #681da8; --ls-chart-6: #d85900;
+      --ls-ff-sans: "Google Sans", "Roboto", sans-serif; --ls-ff-mono: "Google Sans Code", monospace;
+      height: 92vh; min-height: 800px; overflow: hidden; position: relative;
+      border: 1px solid var(--border); border-radius: 12px;
+      font-family: var(--ls-ff-sans); background: var(--ls-surface); color: var(--ls-on-surface);
+    }
+    @media (prefers-color-scheme: dark) {
+      .lemonade-sim {
+        --ls-primary: #a8c7fa; --ls-on-primary: #062e6f; --ls-primary-container: #1f3760;
+        --ls-surface: #101218; --ls-surface-container: #282a2c; --ls-surface-container-high: #3a3f50;
+        --ls-on-surface: #fff; --ls-on-surface-de-emphasis: #c4c7c5;
+        --ls-outline: #9a9b9c; --ls-stroke: #2d2f38;
+      }
+    }
+    .lemonade-sim, .lemonade-sim *, .lemonade-sim ::after, .lemonade-sim ::before { box-sizing: border-box; }
+    .lemonade-sim .app-layout { display: flex; flex-direction: column; height: 100%; overflow: hidden; position: relative; }
+    .lemonade-sim .widget-container { display: flex; flex-direction: column; height: 100%; width: 100%; }
+    .lemonade-sim .widget-header { padding: 0.85rem 1.25rem 0.5rem; background: var(--ls-surface); border-bottom: 1px solid var(--ls-stroke); display: flex; align-items: center; justify-content: space-between; }
+    .lemonade-sim .widget-title { font-size: 1.15rem; font-weight: 500; display: flex; align-items: center; gap: 0.5rem; margin: 0; }
+    .lemonade-sim .controls-root { padding: 0.6rem 1rem; background: var(--ls-surface-container); border-top: 1px solid var(--ls-stroke); max-height: 26vh; overflow-y: auto; flex-shrink: 0; }
+    .lemonade-sim .controls-root label { display: block; margin-bottom: 1px; }
+    .lemonade-sim .controls-root input[type=range] { margin: 0; }
+    .lemonade-sim .editorial-layout { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+    .lemonade-sim .editorial-text-panel { padding: 0.75rem 1rem; background: var(--ls-surface); border-bottom: 1px solid var(--ls-stroke); }
+    .lemonade-sim .editorial-hud { display: flex; justify-content: space-around; gap: 0.75rem; width: 100%; }
+    .lemonade-sim .editorial-hud-item { display: flex; flex-direction: column; align-items: center; flex: 1; border-right: 1px solid var(--ls-stroke); padding: 0 0.5rem; cursor: pointer; transition: background 0.15s ease; border-radius: 8px; }
+    .lemonade-sim .editorial-hud-item:hover { background: var(--ls-surface-container); }
+    .lemonade-sim .editorial-hud-item:last-child { border-right: none; }
+    .lemonade-sim .editorial-hud-label { font-size: 0.7rem; color: var(--ls-on-surface-de-emphasis); text-transform: uppercase; margin-bottom: 0.2rem; display: flex; align-items: center; gap: 3px; }
+    .lemonade-sim .editorial-hud-value { font-size: 1.05rem; font-weight: 700; font-family: var(--ls-ff-mono); }
+    .lemonade-sim .editorial-viz-panel { display: flex; flex: 1; min-height: 0; position: relative; overflow: hidden; }
+
+    .lemonade-sim .interactive-table { width: 100%; border-collapse: collapse; font-size: 0.825rem; }
+    .lemonade-sim .interactive-table th { padding: 8px 12px; font-weight: 600; text-align: left; color: var(--ls-on-surface-de-emphasis); border-bottom: 1px solid var(--ls-stroke); position: sticky; top: 0; background: var(--ls-surface); z-index: 2; }
+    .lemonade-sim .interactive-table td { padding: 6px 12px; border-bottom: 1px solid var(--ls-stroke); }
+    .lemonade-sim .interactive-table tr.is-highlighted { background: var(--ls-primary-container); font-weight: 600; }
+    .lemonade-sim .interactive-table tr.is-error { color: var(--ls-chart-4); }
+    .lemonade-sim .interactive-table tr.is-header-row { background: var(--ls-surface-container-high); font-weight: 700; letter-spacing: 0.5px; }
+
+    .lemonade-sim .term-hover-link {
+      display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+      text-decoration: underline dotted var(--ls-outline); text-underline-offset: 3px;
+      color: inherit; transition: color 0.15s ease, text-decoration-color 0.15s ease; font-weight: inherit;
+    }
+    .lemonade-sim .term-hover-link:hover { color: var(--ls-primary); text-decoration-color: var(--ls-primary); }
+    .lemonade-sim .term-hover-link .material-icons { font-size: 14px; opacity: 0.6; vertical-align: middle; }
+    .lemonade-sim .term-hover-link:hover .material-icons { opacity: 1; }
+
+    .lemonade-sim #ls-term-popover {
+      position: fixed; z-index: 1000; width: 320px; max-width: 90vw;
+      background: var(--ls-surface); border: 1px solid var(--ls-primary); border-radius: 12px;
+      padding: 1rem; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+      display: none; opacity: 0; transform: translateY(6px);
+      transition: opacity 0.18s ease, transform 0.18s ease; pointer-events: none;
+    }
+    .lemonade-sim #ls-term-popover.visible { display: block; opacity: 1; transform: translateY(0); pointer-events: auto; }
+    .lemonade-sim .popover-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.5rem; border-bottom: 1px solid var(--ls-stroke); padding-bottom: 0.4rem; }
+    .lemonade-sim .popover-title { font-size: 0.95rem; font-weight: 700; color: var(--ls-primary); }
+    .lemonade-sim .popover-badge { font-size: 0.65rem; font-family: var(--ls-ff-mono); background: var(--ls-primary-container); color: var(--ls-on-surface); padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+    .lemonade-sim .popover-formula { font-size: 0.75rem; font-family: var(--ls-ff-mono); background: var(--ls-surface-container); padding: 4px 8px; border-radius: 6px; margin-bottom: 0.5rem; color: var(--ls-on-surface); border-left: 3px solid var(--ls-primary); }
+    .lemonade-sim .popover-body { font-size: 0.8rem; line-height: 1.4; color: var(--ls-on-surface); margin-bottom: 0.6rem; }
+    .lemonade-sim .popover-example { font-size: 0.75rem; line-height: 1.35; background: var(--ls-surface-container-high); padding: 8px; border-radius: 6px; font-style: italic; color: var(--ls-on-surface-de-emphasis); }
+    .lemonade-sim .popover-example strong { font-style: normal; color: var(--ls-on-surface); }
+
+    /* ---- Learn-tab extras: preset scenarios + illustrative screen banner ---- */
+    .ls-presets { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
+    .ls-presets .label { color: var(--muted); font-size: 0.85rem; margin-right: 2px; }
+    .ls-preset {
+      font-size: 0.82rem; font-weight: 600; padding: 6px 12px; border-radius: 999px;
+      border: 1px solid var(--border); background: var(--panel); color: var(--text); cursor: pointer;
+    }
+    .ls-preset:hover { border-color: var(--accent); color: var(--accent); }
+    .ls-preset.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+    .lemonade-sim .ls-screen {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 8px 1rem; border-bottom: 1px solid var(--ls-stroke); background: var(--ls-surface-container);
+    }
+    .lemonade-sim .ls-screen-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: .03em; color: var(--ls-on-surface-de-emphasis); font-weight: 600; }
+    .lemonade-sim .ls-screen-badge {
+      font-weight: 700; font-size: 0.78rem; letter-spacing: .04em; padding: 3px 12px;
+      border-radius: 999px; color: #fff; text-transform: uppercase;
+    }
+    .lemonade-sim .ls-screen-badge.buy { background: var(--buy); }
+    .lemonade-sim .ls-screen-badge.watch { background: var(--watch); }
+    .lemonade-sim .ls-screen-badge.avoid { background: var(--avoid); }
+    .lemonade-sim .ls-screen-badge.na { background: var(--muted); }
+    .lemonade-sim .ls-screen-why { font-size: 0.78rem; color: var(--ls-on-surface-de-emphasis); }
+    .lemonade-sim .ls-screen-note { font-size: 0.68rem; color: var(--ls-on-surface-de-emphasis); opacity: .85; width: 100%; }
+    .lemonade-sim .ls-flag {
+      font-size: 0.75rem; padding: 2px 8px; border-radius: 6px; font-weight: 600;
+      background: rgba(192, 21, 29, .12); color: var(--ls-chart-4); border: 1px solid rgba(192, 21, 29, .35);
+    }
   </style>
 </head>
 <body>
@@ -117,6 +222,7 @@
       <div class="modes" style="margin-bottom:0;">
         <button class="mode active" data-mode="ticker">By ticker</button>
         <button class="mode" data-mode="run">By pipeline run</button>
+        <button class="mode" data-mode="learn">🍋 Learn the terms</button>
       </div>
       <button id="refreshBtn" class="btn" type="button">⟳ Refresh</button>
     </div>
@@ -152,6 +258,118 @@
           <a id="downloadCsv" class="btn" href="#">⬇ Download CSV</a>
         </div>
         <div class="decisions" id="decisions"></div>
+      </div>
+    </div>
+
+    <!-- Mode: learn the terms (embedded lemonade-stand simulator) -->
+    <div id="learnMode" style="display:none;">
+      <div class="run-head" style="margin-bottom:14px;">
+        <span class="label">Drag the sliders below to see how a change flows through the statements and Magic Formula ratios — using a lemonade stand as the example.</span>
+        <span class="spacer"></span>
+        <a class="btn" href="/static/learn/lemonade-cheat-sheet.html" target="_blank" rel="noopener">📄 Open cheat sheet — print or save as PDF</a>
+        <a class="btn" href="/static/learn/lemonade-cheat-sheet.html" download="lemonade-cheat-sheet.html">⬇ Download</a>
+      </div>
+
+      <div class="ls-presets">
+        <span class="label">Try a scenario:</span>
+        <button class="ls-preset active" data-preset="cheatsheet">📄 Cheat-sheet example</button>
+        <button class="ls-preset" data-preset="sweetspot">✅ Cheap &amp; high quality</button>
+        <button class="ls-preset" data-preset="expensive">💎 Great business, priced for perfection</button>
+        <button class="ls-preset" data-preset="mediocre">⚠️ Cheap but mediocre</button>
+        <button class="ls-preset" data-preset="trap">🕳️ Value trap</button>
+        <button class="ls-preset" data-preset="rollup">🎭 Goodwill rollup (the ROC mirage)</button>
+      </div>
+
+      <div class="lemonade-sim">
+        <div class="app-layout">
+          <div class="widget-container">
+            <div class="widget-header">
+              <h3 class="widget-title">
+                <span class="material-icons" style="color: var(--ls-primary);">equalizer</span>
+                Lemonade Stand Finance &amp; Magic Formula Simulator
+              </h3>
+            </div>
+
+            <div class="ls-screen">
+              <span class="ls-screen-label">Illustrative screen</span>
+              <span id="ls-screen-badge" class="ls-screen-badge na">—</span>
+              <span id="ls-screen-why" class="ls-screen-why"></span>
+              <span id="ls-screen-flag"></span>
+              <span class="ls-screen-note">
+                Teaching cutoffs (EY ≥ 10%, ROC ≥ 25%) — <em>not</em> this app's verdict, which comes from full bear / bull / sale-advisory analysis.
+              </span>
+            </div>
+
+            <div class="editorial-layout">
+              <div class="editorial-text-panel">
+                <div id="ls-editorial-hud-container" class="editorial-hud">
+                  <!-- HUD items populated dynamically -->
+                </div>
+              </div>
+
+              <div class="editorial-viz-panel">
+                <div id="ls-viz" style="width: 100%; height: 100%; display: flex; flex-direction: column;"></div>
+              </div>
+            </div>
+
+            <!-- Controls Panel -->
+            <div id="ls-controls-root" class="controls-root">
+              <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 0.45rem 0.75rem;">
+                <div>
+                  <label style="font-size: 0.75rem; color: var(--ls-on-surface-de-emphasis);">Cups Sold: <span id="ls-val-cups">100</span></label>
+                  <input type="range" min="0" max="400" step="5" value="100" id="ls-in-cups" style="width: 100%;">
+                </div>
+                <div>
+                  <label style="font-size: 0.75rem; color: var(--ls-on-surface-de-emphasis);">Price / Cup ($): <span id="ls-val-price">2.50</span></label>
+                  <input type="range" min="0.5" max="10" step="0.1" value="2.5" id="ls-in-price" style="width: 100%;">
+                </div>
+                <div>
+                  <label style="font-size: 0.75rem; color: var(--ls-on-surface-de-emphasis);">Ingredients / COGS ($): <span id="ls-val-cogs">60</span></label>
+                  <input type="range" min="10" max="250" step="5" value="60" id="ls-in-cogs" style="width: 100%;">
+                </div>
+                <div>
+                  <label style="font-size: 0.75rem; color: var(--ls-on-surface-de-emphasis);">Operating Expenses ($): <span id="ls-val-opex">40</span></label>
+                  <input type="range" min="5" max="150" step="5" value="40" id="ls-in-opex" style="width: 100%;">
+                </div>
+                <div>
+                  <label style="font-size: 0.75rem; color: var(--ls-on-surface-de-emphasis);">Stand Equipment CapEx ($): <span id="ls-val-stand">150</span></label>
+                  <input type="range" min="20" max="500" step="10" value="150" id="ls-in-stand" style="width: 100%;">
+                </div>
+                <div>
+                  <label style="font-size: 0.75rem; color: var(--ls-on-surface-de-emphasis);">Total Debt Owed ($): <span id="ls-val-debt">100</span></label>
+                  <input type="range" min="0" max="600" step="10" value="100" id="ls-in-debt" style="width: 100%;">
+                </div>
+                <div>
+                  <label style="font-size: 0.75rem; color: var(--ls-on-surface-de-emphasis);">Cash &amp; Reserves ($): <span id="ls-val-cash">40</span></label>
+                  <input type="range" min="0" max="300" step="5" value="40" id="ls-in-cash" style="width: 100%;">
+                </div>
+                <div>
+                  <label style="font-size: 0.75rem; color: var(--ls-on-surface-de-emphasis);">Acquisition Goodwill ($): <span id="ls-val-goodwill">80</span></label>
+                  <input type="range" min="0" max="400" step="10" value="80" id="ls-in-goodwill" style="width: 100%;">
+                </div>
+                <div>
+                  <label style="font-size: 0.75rem; color: var(--ls-on-surface-de-emphasis);">Market Capitalization ($): <span id="ls-val-mcap">400</span></label>
+                  <input type="range" min="50" max="1200" step="25" value="400" id="ls-in-mcap" style="width: 100%;">
+                </div>
+                <div>
+                  <label style="font-size: 0.75rem; color: var(--ls-on-surface-de-emphasis);">Effective Tax Rate (%): <span id="ls-val-tax">0</span></label>
+                  <input type="range" min="0" max="40" step="1" value="0" id="ls-in-tax" style="width: 100%;">
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Floating Term Popover -->
+          <div id="ls-term-popover">
+            <div class="popover-header">
+              <span id="ls-popover-title" class="popover-title">Term</span>
+              <span id="ls-popover-badge" class="popover-badge">Statement</span>
+            </div>
+            <div id="ls-popover-formula" class="popover-formula">Formula: Revenue - Expenses</div>
+            <div id="ls-popover-body" class="popover-body">Definition goes here...</div>
+            <div id="ls-popover-example" class="popover-example"><strong>Example:</strong> Lemonade stand scenario...</div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -340,6 +558,7 @@
       document.querySelectorAll(".mode").forEach(m => m.classList.toggle("active", m.dataset.mode === mode));
       $("tickerMode").style.display = mode === "ticker" ? "block" : "none";
       $("runMode").style.display = mode === "run" ? "block" : "none";
+      $("learnMode").style.display = mode === "learn" ? "block" : "none";
       $("viewer").style.display = "none";
       $("empty").style.display = mode === "ticker" ? "block" : "none";
       $("runEmpty").style.display = mode === "run" && !state.pipelineRunsLoaded ? "block" : "none";
@@ -354,7 +573,7 @@
         await loadTickers();
         if (state.mode === "ticker") {
           if (state.ticker) await loadRuns(state.ticker, state.runId);
-        } else {
+        } else if (state.mode === "run") {
           await loadPipelineRuns(state.runId);
         }
       } finally {
@@ -392,6 +611,589 @@
     });
 
     loadTickers();
+  </script>
+
+  <!-- Embedded "Learn the terms" simulator — isolated in its own IIFE so its
+       identifiers (state, WH, ui, ...) never collide with the script above. -->
+  <script>
+  (function () {
+    const simRoot = document.querySelector('.lemonade-sim');
+
+    const WH = {
+      createApp: function (config) {
+        const stateObj = {};
+        for (let [k, v] of Object.entries(config.params || {})) {
+          stateObj[k] = v.value;
+        }
+        if (config.internal_state) Object.assign(stateObj, config.internal_state);
+        const subscribers = [];
+        const proxyState = new Proxy(stateObj, {
+          set(target, prop, val) {
+            target[prop] = val;
+            if (prop === '_subscribe') return true;
+            subscribers.forEach(cb => cb(prop, val));
+            simRoot.dispatchEvent(new CustomEvent('widget-state-update', { detail: { key: prop, value: val } }));
+            return true;
+          }
+        });
+        proxyState._subscribe = (key, callback) => {
+          subscribers.push((p, v) => { if (p === key) callback(v); });
+        };
+        return { state: proxyState };
+      },
+      initCanvas: function (el, drawFn) {
+        const canvas = document.createElement('canvas');
+        canvas.style.width = '100%';
+        canvas.style.height = '100%';
+        el.appendChild(canvas);
+        const ctx = canvas.getContext('2d');
+        const render = () => {
+          const rect = el.getBoundingClientRect();
+          const dpr = window.devicePixelRatio || 1;
+          canvas.width = rect.width * dpr;
+          canvas.height = rect.height * dpr;
+          ctx.resetTransform();
+          ctx.scale(dpr, dpr);
+          drawFn({ ctx, width: rect.width, height: rect.height, state: LS.state });
+        };
+        new ResizeObserver(render).observe(el);
+        simRoot.addEventListener('widget-state-update', render);
+        setTimeout(render, 50);
+      },
+      initTable: function (el, configFn) {
+        const render = () => {
+          const cfg = configFn({ state: LS.state });
+          let html = '<table class="interactive-table"><thead><tr>';
+          cfg.columns.forEach(col => { html += `<th>${col.label}</th>`; });
+          html += '</tr></thead><tbody>';
+          cfg.data.forEach((row) => {
+            let rowClass = '';
+            if (row.isHeader) rowClass = 'is-header-row';
+            else if (cfg.highlightCondition) {
+              const h = cfg.highlightCondition(row);
+              if (h === 'info' || h === 'success') rowClass = 'is-highlighted';
+              if (h === 'error') rowClass = 'is-error';
+            }
+            html += `<tr class="${rowClass}">`;
+            cfg.columns.forEach(col => {
+              let val = row[col.key];
+              if (col.format) val = col.format(val, row);
+              html += `<td>${val ?? ''}</td>`;
+            });
+            html += '</tr>';
+          });
+          html += '</tbody></table>';
+          el.innerHTML = html;
+          attachGlossaryEvents();
+        };
+        new ResizeObserver(render).observe(el);
+        simRoot.addEventListener('widget-state-update', render);
+        setTimeout(render, 50);
+      },
+      getColor: function (token) {
+        return getComputedStyle(simRoot).getPropertyValue(token).trim() || token;
+      }
+    };
+
+    const ui = {
+      splitViz: function () {
+        const viz = document.getElementById('ls-viz');
+        // Fixed-height charts + flexible table: on a short viewport the table
+        // shrinks and scrolls rather than the bars collapsing into their labels.
+        viz.innerHTML = `
+          <div id="ls-vizTop" style="height: 168px; flex-shrink: 0; width: 100%; position: relative; border-bottom: 1px solid var(--ls-stroke);"></div>
+          <div id="ls-vizBottom" style="flex: 1; min-height: 0; width: 100%; position: relative; overflow-y: auto;"></div>
+        `;
+        return { vizTop: document.getElementById('ls-vizTop'), vizBottom: document.getElementById('ls-vizBottom') };
+      },
+      setEditorial: function (data) {
+        if (data.hud) {
+          const panel = document.getElementById('ls-editorial-hud-container');
+          if (!panel) return;
+          panel.innerHTML = data.hud.map(h => `
+            <div class="editorial-hud-item" data-term-key="${h.termKey || ''}">
+              <span class="editorial-hud-label">${h.label} <span class="material-icons">info_outline</span></span>
+              <span class="editorial-hud-value">${h.value}</span>
+            </div>
+          `).join('');
+          attachGlossaryEvents();
+        }
+      }
+    };
+
+    /* Glossary — mirrors the investor cheat sheet's term definitions */
+    const FINANCIAL_GLOSSARY = {
+      'revenue': { title: 'Revenue (Sales)', badge: 'Income Statement', formula: 'Quantity Sold × Price per Cup',
+        def: 'Total money collected directly from customers from primary activities before deducting any costs.',
+        example: 'Selling 100 cups at $2.50 each generates <strong>$250.00 Revenue</strong>.' },
+      'cogs': { title: 'Cost of Goods Sold (COGS)', badge: 'Income Statement', formula: 'Sum of Raw Material Ingredients',
+        def: 'Direct input costs required to make the physical product sold.',
+        example: 'Spending <strong>$60.00</strong> on lemons, sugar, ice, and paper cups.' },
+      'gross_margin': { title: 'Gross Margin (Gross Profit)', badge: 'Income Statement', formula: 'Revenue - COGS',
+        def: 'Profit remaining after covering direct variable manufacturing costs. Shows product pricing leverage.',
+        example: '$250.00 Revenue - $60.00 Ingredients = <strong>$190.00 Gross Margin</strong>.' },
+      'opex': { title: 'Operating Expenses (OpEx)', badge: 'Income Statement', formula: 'Rent + Advertising + Wages',
+        def: 'Fixed & variable costs required to run daily business overhead not directly in the ingredient formula.',
+        example: '$30.00 stand rental + $10.00 marketing flyers = <strong>$40.00 OpEx</strong>.' },
+      'ebitda': { title: 'EBITDA', badge: 'Operating Cash Proxy', formula: 'Gross Profit - OpEx',
+        def: 'Earnings Before Interest, Taxes, Depreciation, and Amortization. Pure operational cash earnings.',
+        example: '$190.00 Gross Profit - $40.00 OpEx = <strong>$150.00 EBITDA</strong>.' },
+      'depreciation': { title: 'Depreciation (D&A)', badge: 'Accounting Rule', formula: 'Initial Asset Cost / Useful Lifespan (Years)',
+        def: 'Non-cash accounting expense spreading the initial capital cost of a physical asset over its lifespan.',
+        example: 'A $150.00 stand lasting 5 years records <strong>$30.00/yr Depreciation</strong>.' },
+      'ebit': { title: 'Operating Income (EBIT)', badge: 'Income Statement', formula: 'EBITDA - Depreciation',
+        def: 'Earnings Before Interest and Taxes. True economic profit earned strictly from core operations after asset wear.',
+        example: '$150.00 EBITDA - $30.00 Depreciation = <strong>$120.00 EBIT</strong>.' },
+      'interest': { title: 'Interest Expense', badge: 'Financing Cost', formula: 'Total Debt × Interest Rate',
+        def: 'Contractual financial fee paid to lenders or parents for servicing borrowed loan capital.',
+        example: 'An 8% annual charge on a $100.00 loan costs <strong>$8.00 Interest</strong>.' },
+      'net_income': { title: 'Net Income (Bottom Line)', badge: 'Income Statement', formula: 'EBIT - Interest Expense - Taxes',
+        def: 'Final accounting profit remaining for shareholders after all operational, capital, debt, and tax expenses.',
+        example: '$120.00 EBIT − $8.00 Interest − $0.00 Taxes = <strong>$112.00 Net Income</strong>. Raise the tax slider and only this line and Free Cash Flow move.' },
+      'ocf': { title: 'Operating Cash Flow (OCF)', badge: 'Cash Flow Statement', formula: 'EBITDA - Interest Paid - Taxes Paid',
+        def: 'Actual paper and bank cash generated by core daily business operations.',
+        example: '$150.00 EBITDA − $8.00 Interest − $0.00 Taxes = <strong>$142.00 OCF</strong>.' },
+      'capex': { title: 'Capital Expenditures (CapEx)', badge: 'Cash Flow Statement', formula: 'Maintenance CapEx = 15% of Stand Equipment Value',
+        def: 'Cash spent acquiring, upgrading, or maintaining physical long-term assets. Real filings derive this as Ending PP&E − Beginning PP&E + Depreciation; this model uses a simpler stand-in — 15% of the equipment value each year — so that moving the Stand Equipment slider shows how a heavier asset base quietly eats free cash flow.',
+        example: '15% of the $150.00 stand = <strong>$22.50 CapEx</strong> for new pitchers and repainting.' },
+      'fcf': { title: 'Free Cash Flow (FCF)', badge: 'Cash Flow Statement', formula: 'Operating Cash Flow - CapEx',
+        def: 'Discretionary cash left over after maintaining core operational capacity and equipment upgrades.',
+        example: '$142.00 OCF - $22.50 CapEx = <strong>$119.50 Free Cash Flow</strong>.' },
+      'mcap': { title: 'Market Capitalization', badge: 'Valuation Metric', formula: 'Share Price × Total Shares Outstanding',
+        def: 'Total market dollar value of all outstanding equity shares combined.',
+        example: 'Investors value overall equity in the lemonade stand at <strong>$400.00</strong>.' },
+      'debt': { title: 'Total Debt Owed', badge: 'Balance Sheet', formula: 'Sum of Principal Borrowings',
+        def: 'Total financial debts and obligations owed to lenders or parents.',
+        example: 'Outstanding startup loan balance is <strong>$100.00 Debt</strong>.' },
+      'cash': { title: 'Cash & Short-Term Reserves', badge: 'Balance Sheet', formula: 'Liquid Bank & Tip Jar Funds',
+        def: 'Unencumbered liquid money held in reserves.',
+        example: 'Holding <strong>$40.00 Cash</strong> in the tip jar.' },
+      'ev': { title: 'Enterprise Value (EV)', badge: 'Valuation Metric', formula: 'Market Cap + Total Debt - Cash',
+        def: 'Total theoretical purchase price required to buy the entire operational business outright.',
+        example: '$400 Cap + $100 Debt - $40 Cash = <strong>$460.00 EV</strong>.' },
+      'capital_employed': { title: 'Capital Employed', badge: 'Balance Sheet', formula: 'Net Fixed Assets + Working Capital',
+        def: 'Tangible physical capital deployed actively inside core business operations. Greenblatt deliberately EXCLUDES cash — idle money in the tip jar is not capital the business is putting to work, so counting it would understate how efficient the operation really is. Move the Cash slider: it changes Enterprise Value, but never ROC.',
+        example: '$120.00 Stand Value + $12.00 Working Cap (inventory, not cash) = <strong>$132.00 Capital Employed</strong>.' },
+      'goodwill': { title: 'Goodwill / Intangibles', badge: 'Balance Sheet', formula: 'Acquisition Price - Net Asset Value',
+        def: 'Premium price paid over net book value when acquiring another stand location or brand.',
+        example: 'Buying a rival stand for $100 with $20 physical assets creates <strong>$80.00 Goodwill</strong>.' },
+      'total_invested_capital': { title: 'Total Invested Capital', badge: 'Balance Sheet', formula: 'Equity + Total Debt − Cash  (≡ Capital Employed + Goodwill)',
+        def: 'Cumulative capital invested into the business, inclusive of historical M&A buyout prices. The screener computes this as Equity + Debt − Cash; the cheat sheet presents it as Capital Employed + Goodwill. Those are two views of the same number — expand the first and the cash and debt cancel, leaving net fixed assets + working capital + goodwill.',
+        example: '$152.00 Equity + $100.00 Debt − $40.00 Cash = <strong>$212.00</strong>, identical to $132.00 Capital Employed + $80.00 Goodwill.' },
+      'working_capital': { title: 'Working Capital (Inventory)', badge: 'Balance Sheet', formula: 'Current Assets − Current Liabilities, excluding excess cash',
+        def: 'Money tied up in day-to-day trading stock rather than in equipment. In this model it is the lemons, sugar and cups sitting unsold — 20% of the ingredient spend. The screener floors this at zero, so a business financed by its suppliers uses no net working capital at all.',
+        example: '20% of $60.00 ingredients = <strong>$12.00</strong> of stock on the shelf.' },
+      'book_value': { title: 'Book Value (Equity)', badge: 'Balance Sheet', formula: 'Total Assets - Total Debt',
+        def: 'Net accounting equity value belonging to owners on the balance sheet.',
+        example: '$252.00 Assets - $100.00 Debt = <strong>$152.00 Book Value</strong>.' },
+      'earnings_yield': { title: 'Earnings Yield (Magic Formula)', badge: 'Cheapness Ratio', formula: '(EBIT / Enterprise Value) × 100',
+        def: 'Evaluates how cheap a business is relative to operating earnings. Higher yield indicates a bargain.',
+        example: '($120.00 / $460.00) × 100 = <strong>26.09% Earnings Yield</strong>.' },
+      'return_on_capital': { title: 'Return on Capital (ROC)', badge: 'Quality Ratio', formula: '(EBIT / Capital Employed) × 100',
+        def: 'Greenblatt\'s Magic Formula quality metric measuring efficiency turning tangible capital into profit.',
+        example: '($120.00 / $132.00) × 100 = <strong>90.91% ROC</strong> (High ROC = Economic Moat).' },
+      'roic_spent': { title: 'ROIC inc. Goodwill', badge: 'Conservative Quality Ratio', formula: '(EBIT / Total Invested Capital) × 100',
+        def: 'Return on capital penalizing the business for high takeover premiums paid in past M&A acquisitions.',
+        example: '($120.00 / $212.00) × 100 = <strong>56.60% ROIC</strong>.' },
+      'fcf_yield': { title: 'Free Cash Flow Yield', badge: 'Valuation Ratio', formula: '(Free Cash Flow / Market Cap) × 100',
+        def: 'Measures cash output relative to market valuation.',
+        example: '($119.50 / $400.00) × 100 = <strong>29.88% FCF Yield</strong>.' },
+      'taxes': { title: 'Tax Expense', badge: 'Income Statement', formula: 'max(0, EBIT - Interest) × Effective Tax Rate',
+        def: 'Government share of pre-tax profit. Note that EBIT, Earnings Yield and ROC all sit ABOVE this line — that is deliberate. Greenblatt compares businesses pre-tax so that differing tax jurisdictions and one-off tax breaks do not distort which business is genuinely better. Tax only bites into Net Income and Free Cash Flow.',
+        example: 'The cheat sheet models a kid\'s lemonade stand at <strong>0% tax</strong>, so Net Income is $120.00 EBIT − $8.00 Interest − $0.00 Taxes = $112.00. Raise the slider to see the bottom line shrink while ROC stays put.' },
+      'total_assets': { title: 'Total Assets', badge: 'Balance Sheet', formula: 'Net Fixed Assets + Cash + Inventory + Goodwill',
+        def: 'Everything the enterprise owns that carries economic value. Inventory belongs here: the stock counted as working capital is an asset too, and leaving it out is what made the original cheat sheet\'s balance sheet disagree with its own Capital Employed figure.',
+        example: '$120.00 stand + $40.00 cash + $12.00 inventory + $80.00 goodwill = <strong>$252.00 Total Assets</strong>.' },
+      'intangibles_share': { title: 'Intangibles Share of Assets', badge: '⚠ Quality Warning Flag', formula: '(Goodwill & Intangibles / Total Assets) × 100',
+        def: 'How much of the balance sheet is acquisition premium rather than physical, productive assets. A high share means the headline ROC is flattered: Greenblatt\'s capital employed excludes goodwill, so a company assembled by acquisition shows a tiny denominator and a spectacular ROC that says nothing about the return earned on the price actually paid.',
+        example: '$80.00 goodwill / $252.00 assets = <strong>31.75%</strong>. In a real screen this app flagged FISV at 59.1% — its ROC read 136.7% while ROIC including goodwill was just 9.4%.' },
+      'roc_roic_gap': { title: 'ROC ÷ ROIC Gap', badge: '⚠ Quality Warning Flag', formula: 'Return on Capital ÷ ROIC including Goodwill',
+        def: 'The multiple between the flattering number and the honest one. Near 1× means the returns are real and earned on capital actually invested. A wide gap means the business bought its earnings and the headline ROC is a definitional artifact, not an economic moat.',
+        example: '90.91% ÷ 56.60% = <strong>1.61×</strong> (healthy). FISV\'s real-world gap was <strong>14×</strong> — the tell that its "elite capital efficiency" was an accounting shadow.' }
+    };
+
+    const popover = document.getElementById('ls-term-popover');
+    const titleEl = document.getElementById('ls-popover-title');
+    const badgeEl = document.getElementById('ls-popover-badge');
+    const formulaEl = document.getElementById('ls-popover-formula');
+    const bodyEl = document.getElementById('ls-popover-body');
+    const exampleEl = document.getElementById('ls-popover-example');
+
+    const showPopover = (key, targetEl) => {
+      const item = FINANCIAL_GLOSSARY[key];
+      if (!item) return;
+      titleEl.textContent = item.title;
+      badgeEl.textContent = item.badge;
+      formulaEl.textContent = `Formula: ${item.formula}`;
+      bodyEl.textContent = item.def;
+      exampleEl.innerHTML = `<strong>Example:</strong> ${item.example}`;
+      popover.classList.add('visible');
+
+      // fixed positioning: use viewport-relative coordinates directly (no
+      // scroll offset) so the popover stays correctly anchored regardless of
+      // where this widget sits on the (scrollable) report-viewer page.
+      const rect = targetEl.getBoundingClientRect();
+      const popRect = popover.getBoundingClientRect();
+      let top = rect.bottom + 8;
+      let left = rect.left;
+      if (left + popRect.width > window.innerWidth - 16) left = window.innerWidth - popRect.width - 16;
+      if (left < 16) left = 16;
+      if (rect.bottom + popRect.height + 20 > window.innerHeight) top = rect.top - popRect.height - 8;
+      popover.style.top = `${Math.max(10, top)}px`;
+      popover.style.left = `${Math.max(10, left)}px`;
+    };
+
+    const hidePopover = () => popover.classList.remove('visible');
+
+    document.addEventListener('click', (e) => {
+      if (!popover.contains(e.target)) hidePopover();
+    });
+
+    function attachGlossaryEvents() {
+      simRoot.querySelectorAll('[data-term-key]').forEach(el => {
+        const key = el.getAttribute('data-term-key');
+        if (!key || !FINANCIAL_GLOSSARY[key]) return;
+        el.addEventListener('mouseenter', () => showPopover(key, el));
+        el.addEventListener('mouseleave', hidePopover);
+        el.addEventListener('click', (e) => { e.stopPropagation(); showPopover(key, el); });
+      });
+    }
+
+    const LS = WH.createApp({
+      params: {
+        cupsSold: { value: 100 }, pricePerCup: { value: 2.5 }, ingredientsCost: { value: 60 },
+        operatingExp: { value: 40 }, standCost: { value: 150 }, debt: { value: 100 },
+        cash: { value: 40 }, goodwill: { value: 80 }, marketCap: { value: 400 },
+        taxRate: { value: 0 }
+      },
+      internal_state: { financials: [] }
+    });
+
+    /* Preset scenarios — the four corners of Greenblatt's cheap-vs-quality grid,
+       plus the goodwill-rollup case that makes ROC lie. */
+    const PRESETS = {
+      cheatsheet: { cupsSold: 100, pricePerCup: 2.5, ingredientsCost: 60, operatingExp: 40, standCost: 150, debt: 100, cash: 40, goodwill: 80, marketCap: 400, taxRate: 0 },
+      sweetspot:  { cupsSold: 120, pricePerCup: 2.5, ingredientsCost: 60, operatingExp: 40, standCost: 150, debt: 100, cash: 40, goodwill: 80, marketCap: 700, taxRate: 21 },
+      expensive:  { cupsSold: 80,  pricePerCup: 2.5, ingredientsCost: 60, operatingExp: 40, standCost: 150, debt: 100, cash: 40, goodwill: 80, marketCap: 1200, taxRate: 21 },
+      mediocre:   { cupsSold: 140, pricePerCup: 2.5, ingredientsCost: 100, operatingExp: 80, standCost: 500, debt: 100, cash: 40, goodwill: 80, marketCap: 250, taxRate: 21 },
+      trap:       { cupsSold: 130, pricePerCup: 2.5, ingredientsCost: 110, operatingExp: 90, standCost: 500, debt: 300, cash: 40, goodwill: 80, marketCap: 800, taxRate: 21 },
+      rollup:     { cupsSold: 100, pricePerCup: 2.5, ingredientsCost: 60, operatingExp: 40, standCost: 50,  debt: 100, cash: 40, goodwill: 400, marketCap: 600, taxRate: 21 }
+    };
+
+    const CONTROL_MAP = {
+      cupsSold: ['ls-in-cups', 'ls-val-cups', v => v],
+      pricePerCup: ['ls-in-price', 'ls-val-price', v => v.toFixed(2)],
+      ingredientsCost: ['ls-in-cogs', 'ls-val-cogs', v => v],
+      operatingExp: ['ls-in-opex', 'ls-val-opex', v => v],
+      standCost: ['ls-in-stand', 'ls-val-stand', v => v],
+      debt: ['ls-in-debt', 'ls-val-debt', v => v],
+      cash: ['ls-in-cash', 'ls-val-cash', v => v],
+      goodwill: ['ls-in-goodwill', 'ls-val-goodwill', v => v],
+      marketCap: ['ls-in-mcap', 'ls-val-mcap', v => v],
+      taxRate: ['ls-in-tax', 'ls-val-tax', v => v]
+    };
+
+    function applyPreset(name) {
+      const p = PRESETS[name];
+      if (!p) return;
+      Object.entries(p).forEach(([key, val]) => {
+        const entry = CONTROL_MAP[key];
+        if (!entry) return;
+        const [inputId, labelId, fmt] = entry;
+        const input = document.getElementById(inputId);
+        const label = document.getElementById(labelId);
+        if (input) input.value = val;
+        if (label) label.textContent = fmt(val);
+        LS.state[key] = val;   // triggers subscribers -> updateFinancials
+      });
+      document.querySelectorAll('.ls-preset').forEach(b =>
+        b.classList.toggle('active', b.dataset.preset === name));
+    }
+
+    document.querySelectorAll('.ls-preset').forEach(btn => {
+      btn.addEventListener('click', () => applyPreset(btn.dataset.preset));
+    });
+
+    const bindControl = (id, key, valLabelId, formatFn = v => v) => {
+      const el = document.getElementById(id);
+      const lbl = document.getElementById(valLabelId);
+      if (!el) return;
+      el.addEventListener('input', (e) => {
+        const val = parseFloat(e.target.value);
+        LS.state[key] = val;
+        if (lbl) lbl.textContent = formatFn(val);
+        // hand-editing a slider means we're no longer on a named scenario
+        document.querySelectorAll('.ls-preset').forEach(b => b.classList.remove('active'));
+      });
+    };
+
+    bindControl('ls-in-cups', 'cupsSold', 'ls-val-cups');
+    bindControl('ls-in-price', 'pricePerCup', 'ls-val-price', v => v.toFixed(2));
+    bindControl('ls-in-cogs', 'ingredientsCost', 'ls-val-cogs');
+    bindControl('ls-in-opex', 'operatingExp', 'ls-val-opex');
+    bindControl('ls-in-stand', 'standCost', 'ls-val-stand');
+    bindControl('ls-in-debt', 'debt', 'ls-val-debt');
+    bindControl('ls-in-cash', 'cash', 'ls-val-cash');
+    bindControl('ls-in-goodwill', 'goodwill', 'ls-val-goodwill');
+    bindControl('ls-in-mcap', 'marketCap', 'ls-val-mcap');
+    bindControl('ls-in-tax', 'taxRate', 'ls-val-tax');
+
+    const { vizTop, vizBottom } = ui.splitViz();
+
+    /* Illustrative Greenblatt-style screen. Deliberately NOT the app's verdict —
+       a real Buy/Watch/Avoid comes from the bear/bull/sale agents reading filings.
+       This exists to show WHY the Magic Formula insists on both metrics at once. */
+    const EY_BAR = 10;   // % — "is it cheap?"
+    const ROC_BAR = 25;  // % — "is it any good?"
+
+    function renderScreen({ earningsYield, returnOnCapital, intangiblesShare, rocRoicGap, isProfitable }) {
+      const badge = document.getElementById('ls-screen-badge');
+      const why = document.getElementById('ls-screen-why');
+      const flag = document.getElementById('ls-screen-flag');
+
+      if (!isProfitable || earningsYield === null || returnOnCapital === null) {
+        badge.textContent = 'AVOID';
+        badge.className = 'ls-screen-badge avoid';
+        why.textContent = 'The stand loses money at the operating line, so both Magic Formula ratios are undefined.';
+        flag.innerHTML = '';
+        return;
+      }
+
+      const cheap = earningsYield >= EY_BAR;
+      const quality = returnOnCapital >= ROC_BAR;
+      // A rollup whose ROC is mostly a goodwill artifact shouldn't screen as quality.
+      const mirage = (intangiblesShare !== null && intangiblesShare > 50) &&
+                     (rocRoicGap !== null && rocRoicGap > 3);
+
+      let verdict, reason;
+      if (cheap && quality && !mirage) {
+        verdict = 'BUY'; reason = `Cheap (EY ${earningsYield.toFixed(1)}% ≥ ${EY_BAR}%) AND high quality (ROC ${returnOnCapital.toFixed(1)}% ≥ ${ROC_BAR}%) — both Greenblatt tests pass.`;
+      } else if (cheap && quality && mirage) {
+        verdict = 'WATCH'; reason = `Both ratios pass, but that ROC is inflated by acquisition goodwill — the return on money actually spent is far lower.`;
+      } else if (cheap && !quality) {
+        verdict = 'WATCH'; reason = `Cheap (EY ${earningsYield.toFixed(1)}%) but low quality (ROC ${returnOnCapital.toFixed(1)}% < ${ROC_BAR}%) — cheap for a reason? Classic value-trap territory.`;
+      } else if (!cheap && quality) {
+        verdict = 'WATCH'; reason = `High quality (ROC ${returnOnCapital.toFixed(1)}%) but expensive (EY ${earningsYield.toFixed(1)}% < ${EY_BAR}%) — a fine business at a demanding price.`;
+      } else {
+        verdict = 'AVOID'; reason = `Neither cheap (EY ${earningsYield.toFixed(1)}%) nor high quality (ROC ${returnOnCapital.toFixed(1)}%) — fails both tests.`;
+      }
+
+      badge.textContent = verdict;
+      badge.className = 'ls-screen-badge ' + verdict.toLowerCase();
+      why.textContent = reason;
+      flag.innerHTML = mirage
+        ? `<span class="ls-flag">⚠ ROC mirage: ${intangiblesShare.toFixed(0)}% of assets are goodwill, ROC is ${rocRoicGap.toFixed(1)}× ROIC</span>`
+        : '';
+    }
+
+    const updateFinancials = () => {
+      const s = LS.state;
+      const revenue = s.cupsSold * s.pricePerCup;
+      const grossMargin = revenue - s.ingredientsCost;
+      const ebitda = grossMargin - s.operatingExp;
+      const depreciation = s.standCost / 5;
+      const ebit = ebitda - depreciation;
+      const interestExpense = s.debt * 0.08;
+      const pretaxIncome = ebit - interestExpense;
+      const taxes = Math.max(0, pretaxIncome) * (s.taxRate / 100);
+      const netIncome = pretaxIncome - taxes;
+
+      const operatingCashFlow = ebitda - interestExpense - taxes;
+      const capex = s.standCost * 0.15;
+      const freeCashFlow = operatingCashFlow - capex;
+
+      const netFixedAssets = Math.max(0, s.standCost - depreciation);
+      // Greenblatt's capital employed excludes cash: idle money isn't capital the
+      // business is working. Matches the cheat sheet ($120 + $12 = $132) and the
+      // pipeline's own screener (magic_formula_starter_screener.py), which strips
+      // excess cash out of net working capital for exactly this reason.
+      const inventory = s.ingredientsCost * 0.2;   // stock on hand = the working capital
+      const capitalEmployed = netFixedAssets + inventory;
+      const enterpriseValue = s.marketCap + s.debt - s.cash;
+      const totalAssets = netFixedAssets + s.cash + inventory + s.goodwill;
+      const bookValue = totalAssets - s.debt;      // shareholders' equity
+      // Stated exactly as the pipeline computes it (equity + debt - cash). With the
+      // balance sheet above this is algebraically identical to Capital Employed +
+      // Goodwill, which is how the cheat sheet presents it — same number, two views.
+      const totalInvestedCapital = bookValue + s.debt - s.cash;
+      const intangiblesShare = totalAssets > 0 ? (s.goodwill / totalAssets) * 100 : null;
+
+      const isProfitable = ebit > 0;
+      const earningsYield = (isProfitable && enterpriseValue > 0) ? (ebit / enterpriseValue) * 100 : null;
+      const returnOnCapital = (isProfitable && capitalEmployed > 0) ? (ebit / capitalEmployed) * 100 : null;
+      const roicSpent = (isProfitable && totalInvestedCapital > 0) ? (ebit / totalInvestedCapital) * 100 : null;
+      const fcfYield = s.marketCap > 0 ? (freeCashFlow / s.marketCap) * 100 : null;
+      const rocRoicGap = (returnOnCapital !== null && roicSpent > 0) ? returnOnCapital / roicSpent : null;
+
+      renderScreen({ earningsYield, returnOnCapital, intangiblesShare, rocRoicGap, isProfitable });
+
+      LS.state.financials = [
+        { label: '--- INCOME STATEMENT ---', value: null, isHeader: true },
+        { label: 'Revenue (Total Sales)', value: revenue, termKey: 'revenue' },
+        { label: 'Cost of Ingredients (COGS)', value: -s.ingredientsCost, termKey: 'cogs' },
+        { label: 'Gross Margin / Gross Profit', value: grossMargin, termKey: 'gross_margin' },
+        { label: 'Operating Expenses (Rent & Labor)', value: -s.operatingExp, termKey: 'opex' },
+        { label: 'EBITDA', value: ebitda, termKey: 'ebitda' },
+        { label: 'Depreciation (Stand Equipment)', value: -depreciation, termKey: 'depreciation' },
+        { label: 'Operating Profit (EBIT)', value: ebit, isTotal: true, termKey: 'ebit' },
+        { label: 'Interest Expense (8% on Debt)', value: -interestExpense, termKey: 'interest' },
+        { label: 'Taxes (' + s.taxRate + '% of pre-tax profit)', value: -taxes, termKey: 'taxes' },
+        { label: 'Net Income (Bottom Line Profit)', value: netIncome, isTotal: true, termKey: 'net_income' },
+
+        { label: '--- CASH FLOW STATEMENT ---', value: null, isHeader: true },
+        { label: 'Operating Cash Flow (OCF)', value: operatingCashFlow, termKey: 'ocf' },
+        { label: 'Capital Expenditures (CapEx)', value: -capex, termKey: 'capex' },
+        { label: 'Free Cash Flow (FCF)', value: freeCashFlow, isTotal: true, termKey: 'fcf' },
+
+        { label: '--- BALANCE SHEET & VALUATION ---', value: null, isHeader: true },
+        { label: 'Market Capitalisation (Share Value)', value: s.marketCap, termKey: 'mcap' },
+        { label: 'Total Debt Owed', value: s.debt, termKey: 'debt' },
+        { label: 'Cash & Short-Term Reserves', value: -s.cash, termKey: 'cash' },
+        { label: 'Enterprise Value (EV)', value: enterpriseValue, isTotal: true, termKey: 'ev' },
+        { label: 'Inventory / Working Capital', value: inventory, termKey: 'working_capital' },
+        { label: 'Capital Employed (Core Ops)', value: capitalEmployed, termKey: 'capital_employed' },
+        { label: 'Goodwill / M&A Intangibles', value: s.goodwill, termKey: 'goodwill' },
+        { label: 'Total Capital Spent (inc. Goodwill)', value: totalInvestedCapital, isTotal: true, termKey: 'total_invested_capital' },
+        { label: 'Total Assets', value: totalAssets, termKey: 'total_assets' },
+        { label: 'Book Value (Assets minus Debt)', value: bookValue, termKey: 'book_value' },
+
+        { label: '--- MAGIC FORMULA & KEY RATIOS ---', value: null, isHeader: true },
+        { label: 'Earnings Yield (EBIT / EV)', value: earningsYield, isRatio: true, isTotal: true, termKey: 'earnings_yield' },
+        { label: 'Return on Capital (ROC: EBIT / Cap Employed)', value: returnOnCapital, isRatio: true, isTotal: true, termKey: 'return_on_capital' },
+        { label: 'Return on Capital Spent (inc. Goodwill / M&A)', value: roicSpent, isRatio: true, termKey: 'roic_spent' },
+        { label: 'Free Cash Flow Yield (FCF / Market Cap)', value: fcfYield, isRatio: true, termKey: 'fcf_yield' },
+
+        { label: '--- QUALITY WARNING FLAGS ---', value: null, isHeader: true },
+        { label: 'Intangibles Share of Assets', value: intangiblesShare, isRatio: true, termKey: 'intangibles_share', isWarn: intangiblesShare !== null && intangiblesShare > 50 },
+        { label: 'ROC ÷ ROIC Gap (1.0× = returns are real)', value: rocRoicGap, isMultiple: true, termKey: 'roc_roic_gap', isWarn: rocRoicGap !== null && rocRoicGap > 3 }
+      ];
+
+      ui.setEditorial({
+        hud: [
+          { label: "Earnings Yield", value: earningsYield !== null ? `${earningsYield.toFixed(2)}%` : "N/A", termKey: "earnings_yield" },
+          { label: "Return on Capital", value: returnOnCapital !== null ? `${returnOnCapital.toFixed(2)}%` : "N/A", termKey: "return_on_capital" },
+          { label: "ROIC inc. Goodwill", value: roicSpent !== null ? `${roicSpent.toFixed(2)}%` : "N/A", termKey: "roic_spent" },
+          { label: "Intangibles / Assets", value: intangiblesShare !== null ? `${intangiblesShare.toFixed(1)}%` : "N/A", termKey: "intangibles_share" },
+          { label: "Free Cash Flow", value: `$${freeCashFlow.toFixed(2)}`, termKey: "fcf" }
+        ]
+      });
+    };
+
+    WH.initTable(vizBottom, ({ state }) => ({
+      data: state.financials || [],
+      columns: [
+        {
+          key: 'label',
+          label: 'Financial Line Item / Metric (Hover / Tap for Definition)',
+          format: (v, row) => {
+            if (row.isHeader) return v;
+            if (row.termKey) {
+              return `<span class="term-hover-link" data-term-key="${row.termKey}">
+                ${v} <span class="material-icons">info_outline</span>
+              </span>`;
+            }
+            return `&nbsp;&nbsp;${v}`;
+          }
+        },
+        {
+          key: 'value',
+          label: 'Amount / Ratio',
+          format: (v, row) => {
+            if (v === null || v === undefined) return row.isRatio || row.isMultiple ? 'N/A' : '';
+            if (row.isMultiple) return `${v.toFixed(2)}×`;
+            if (row.isRatio) return `${v.toFixed(2)}%`;
+            return `$${v.toFixed(2)}`;
+          }
+        }
+      ],
+      highlightCondition: (row) => {
+        if (row.isHeader) return 'info';
+        if (row.isWarn) return 'error';
+        if (row.isTotal) return 'success';
+        if (typeof row.value === 'number' && row.value < 0) return 'error';
+        return null;
+      }
+    }));
+
+    WH.initCanvas(vizTop, ({ ctx, width, height, state }) => {
+      ctx.clearRect(0, 0, width, height);
+
+      const revenue = state.cupsSold * state.pricePerCup;
+      const ebitda = revenue - state.ingredientsCost - state.operatingExp;
+      const ebit = ebitda - (state.standCost / 5);
+      const enterpriseValue = state.marketCap + state.debt - state.cash;
+      const netFixedAssets = Math.max(0, state.standCost - (state.standCost / 5));
+      // cash excluded — see updateFinancials()
+      const capitalEmployed = netFixedAssets + (state.ingredientsCost * 0.2);
+      const totalInvestedCapital = capitalEmployed + state.goodwill;
+
+      const isProfitable = ebit > 0;
+      const ey = (isProfitable && enterpriseValue > 0) ? (ebit / enterpriseValue) * 100 : 0;
+      const roc = (isProfitable && capitalEmployed > 0) ? (ebit / capitalEmployed) * 100 : 0;
+      const roic = (isProfitable && totalInvestedCapital > 0) ? (ebit / totalInvestedCapital) * 100 : 0;
+
+      const padding = 30;
+      const sectionWidth = (width - padding * 3) / 2;
+
+      ctx.fillStyle = WH.getColor('--ls-on-surface');
+      ctx.font = 'bold 12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Enterprise Value & Capital Structure ($)', padding + sectionWidth / 2, 18);
+
+      const maxVal = Math.max(state.marketCap + state.debt, totalInvestedCapital, 100);
+      const barScale = (height - 70) / maxVal;
+      const barW = 38;
+
+      const drawBar = (x, hVal, color, label, valStr) => {
+        const h = Math.max(0, hVal * barScale);
+        ctx.fillStyle = color;
+        ctx.fillRect(x - barW / 2, height - 25 - h, barW, h);
+        ctx.fillStyle = WH.getColor('--ls-on-surface');
+        ctx.font = '10px sans-serif';
+        ctx.fillText(label, x, height - 10);
+        ctx.fillText(valStr, x, height - 28 - h);
+      };
+
+      const leftCX = padding + sectionWidth / 2;
+      drawBar(leftCX - 50, state.marketCap, WH.getColor('--ls-chart-1'), 'Market Cap', `$${state.marketCap}`);
+      drawBar(leftCX, enterpriseValue, WH.getColor('--ls-chart-3'), 'EV', `$${enterpriseValue.toFixed(0)}`);
+      drawBar(leftCX + 50, totalInvestedCapital, WH.getColor('--ls-chart-5'), 'Capital Spent', `$${totalInvestedCapital.toFixed(0)}`);
+
+      ctx.strokeStyle = WH.getColor('--ls-stroke');
+      ctx.beginPath();
+      ctx.moveTo(padding * 1.5 + sectionWidth, 10);
+      ctx.lineTo(padding * 1.5 + sectionWidth, height - 10);
+      ctx.stroke();
+
+      const rightCX = padding * 2 + sectionWidth + sectionWidth / 2;
+      ctx.fillStyle = WH.getColor('--ls-on-surface');
+      ctx.font = 'bold 12px sans-serif';
+      ctx.fillText('Magic Formula Ratios (%)', rightCX, 18);
+
+      const maxRatio = Math.max(ey, roc, roic, 30);
+      const ratioScale = (height - 70) / maxRatio;
+
+      const drawRatioBar = (x, ratioVal, color, label) => {
+        const h = Math.max(0, ratioVal * ratioScale);
+        ctx.fillStyle = color;
+        ctx.fillRect(x - barW / 2, height - 25 - h, barW, h);
+        ctx.fillStyle = WH.getColor('--ls-on-surface');
+        ctx.font = '10px sans-serif';
+        ctx.fillText(label, x, height - 10);
+        ctx.fillText(isProfitable ? `${ratioVal.toFixed(1)}%` : 'N/A', x, height - 28 - h);
+      };
+
+      drawRatioBar(rightCX - 50, ey, WH.getColor('--ls-chart-2'), 'Earn Yield');
+      drawRatioBar(rightCX, roc, WH.getColor('--ls-chart-1'), 'ROC');
+      drawRatioBar(rightCX + 50, roic, WH.getColor('--ls-chart-6'), 'ROIC (M&A)');
+    });
+
+    ['cupsSold', 'pricePerCup', 'ingredientsCost', 'operatingExp', 'standCost', 'debt', 'cash', 'goodwill', 'marketCap', 'taxRate'].forEach(k => {
+      LS.state._subscribe(k, updateFinancials);
+    });
+
+    updateFinancials();
+  })();
   </script>
 </body>
 </html>

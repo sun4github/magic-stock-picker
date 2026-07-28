@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lemonade Stand Investor Financial Terms — Cheat Sheet</title>
+<style>
+  :root {
+    --ink: #1b1c1d; --muted: #5f6368; --rule: #d8dce2; --accent: #0b57d0;
+    --soft: #f2f5fa; --soft2: #e8edf5; --warn: #c0151d; --good: #046e00;
+    --ff: "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+    --mono: "Cascadia Mono", "SF Mono", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 20px 64px; background: #fff; color: var(--ink);
+    font-family: var(--ff); line-height: 1.55; font-size: 15px;
+  }
+  .sheet { max-width: 860px; margin: 0 auto; }
+
+  header.doc { border-bottom: 3px solid var(--accent); padding-bottom: 14px; margin-bottom: 22px; }
+  header.doc h1 { margin: 0 0 6px; font-size: 1.75rem; line-height: 1.2; }
+  header.doc .sub { color: var(--muted); font-size: 0.92rem; }
+
+  .toolbar { display: flex; gap: 8px; margin: 18px 0 26px; flex-wrap: wrap; }
+  .toolbar button, .toolbar a {
+    font: inherit; font-size: 0.87rem; font-weight: 600; padding: 8px 15px; border-radius: 8px;
+    border: 1px solid var(--rule); background: #fff; color: var(--ink); cursor: pointer; text-decoration: none;
+  }
+  .toolbar button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .toolbar button:hover, .toolbar a:hover { border-color: var(--accent); }
+
+  h2 {
+    font-size: 1.16rem; margin: 34px 0 12px; padding-bottom: 6px;
+    border-bottom: 1px solid var(--rule);
+  }
+  h2 .n { color: var(--accent); font-variant-numeric: tabular-nums; }
+  h3 { font-size: 0.98rem; margin: 20px 0 4px; }
+
+  .term { margin: 0 0 15px; page-break-inside: avoid; break-inside: avoid; }
+  .term > .name { font-weight: 700; }
+  .term > .desc { margin: 2px 0 6px; }
+  .fml, .exm {
+    font-family: var(--mono); font-size: 0.83rem; padding: 5px 10px; border-radius: 5px;
+    margin: 4px 0; background: var(--soft); border-left: 3px solid var(--accent);
+  }
+  .exm { background: var(--soft2); border-left-color: var(--muted); }
+  .exm b { font-family: var(--ff); }
+  .lbl { display: inline-block; min-width: 62px; color: var(--muted); font-family: var(--ff); font-size: 0.74rem;
+         text-transform: uppercase; letter-spacing: .04em; font-weight: 700; }
+
+  .callout {
+    background: var(--soft); border: 1px solid var(--rule); border-left: 4px solid var(--accent);
+    border-radius: 8px; padding: 13px 16px; margin: 18px 0; font-size: 0.9rem;
+  }
+  .callout.warn { border-left-color: var(--warn); }
+  .callout h4 { margin: 0 0 5px; font-size: 0.92rem; }
+  .callout p { margin: 5px 0 0; }
+
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 0.86rem; }
+  th, td { border: 1px solid var(--rule); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--soft); font-weight: 700; }
+  td.num { text-align: right; font-family: var(--mono); white-space: nowrap; }
+  tr.sub td { background: var(--soft); font-weight: 700; }
+  tr.tot td { font-weight: 700; }
+  tr.flag td { color: var(--warn); }
+  caption { caption-side: top; text-align: left; font-weight: 700; padding: 6px 0; font-size: 0.92rem; }
+
+  code { font-family: var(--mono); font-size: 0.86em; background: var(--soft); padding: 1px 5px; border-radius: 4px; }
+  .frac { display: inline-block; text-align: center; vertical-align: middle; margin: 0 2px; }
+  .frac > .top { display: block; border-bottom: 1.3px solid currentColor; padding: 0 5px; }
+  .frac > .bot { display: block; padding: 0 5px; }
+  footer.doc { margin-top: 40px; padding-top: 12px; border-top: 1px solid var(--rule); color: var(--muted); font-size: 0.8rem; }
+
+  @media print {
+    @page { margin: 15mm 14mm; }
+    body { padding: 0; font-size: 10.5pt; }
+    .toolbar, .noprint { display: none !important; }
+    h2 { page-break-after: avoid; break-after: avoid; }
+    .sheet { max-width: none; }
+    a { color: inherit; text-decoration: none; }
+  }
+</style>
+</head>
+<body>
+<div class="sheet">
+
+  <header class="doc">
+    <h1>Lemonade Stand — Investor Financial Terms Cheat Sheet</h1>
+    <div class="sub">A plain-English reference for every figure the Magic Stock Picker reports, worked end-to-end on one small business.</div>
+  </header>
+
+  <div class="toolbar noprint">
+    <button class="primary" onclick="window.print()">🖨 Print / Save as PDF</button>
+    <a href="/">← Back to the Report Viewer</a>
+  </div>
+
+  <p><strong>Executive summary.</strong> The three statements work together to show a business's health, and the ratios then judge whether it is cheap and whether it is any good.</p>
+  <ul>
+    <li>The <strong>Income Statement</strong> measures operating performance and profitability on paper, over a period of time.</li>
+    <li>The <strong>Cash Flow Statement</strong> tracks actual liquidity — money genuinely moving in and out of the bank account.</li>
+    <li>The <strong>Balance Sheet</strong> is a point-in-time snapshot of assets, obligations and net equity.</li>
+    <li><strong>Valuation &amp; Return Ratios</strong> decide whether the enterprise is cheap, expensive, or earning strong returns on the capital it employs.</li>
+  </ul>
+
+  <div class="callout">
+    <h4>These figures match the screener exactly</h4>
+    <p>Every formula below is the one <code>magic_formula_starter_screener.py</code> actually computes, so a number you learn here means the same thing when you meet it in a real report. Two conventions are worth knowing up front, because both are deliberate and both differ from a naive reading:</p>
+    <p><strong>1. Capital Employed excludes cash.</strong> Idle money in the tip jar is not capital the business is putting to work, so counting it would understate how efficient the operation really is. The screener keeps only the cash needed to cover current liabilities and strips the surplus.</p>
+    <p><strong>2. Total Invested Capital is stated two equivalent ways.</strong> The screener computes <code>Equity + Debt − Cash</code>; this sheet also shows it as <code>Capital Employed + Goodwill</code>. Expand the first and the cash and debt cancel out, leaving net fixed assets + working capital + goodwill. Same number, two views.</p>
+  </div>
+
+  <h2><span class="n">1.</span> Income Statement — the profit tracker</h2>
+
+  <div class="term">
+    <div class="name">Revenue (Sales)</div>
+    <div class="desc">Total money collected from customers before any cost is deducted.</div>
+    <div class="fml"><span class="lbl">Formula</span> Quantity Sold × Price per Unit</div>
+    <div class="exm"><span class="lbl">Example</span> 100 cups × $2.50 = <b>$250.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Cost of Goods Sold (COGS)</div>
+    <div class="desc">Direct cost of the materials that went into what you sold.</div>
+    <div class="fml"><span class="lbl">Formula</span> Σ (Unit Material Cost × Units Sold)</div>
+    <div class="exm"><span class="lbl">Example</span> Lemons, sugar, ice and cups = <b>$60.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Gross Margin (Gross Profit)</div>
+    <div class="desc">What survives after direct input costs. Shows the pricing power of the product itself.</div>
+    <div class="fml"><span class="lbl">Formula</span> Revenue − COGS</div>
+    <div class="exm"><span class="lbl">Example</span> $250.00 − $60.00 = <b>$190.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Operating Expenses (OpEx)</div>
+    <div class="desc">Day-to-day overhead needed to run the business but not tied to any individual cup — rent, advertising, wages.</div>
+    <div class="fml"><span class="lbl">Formula</span> Selling Expenses + General &amp; Administrative Expenses</div>
+    <div class="exm"><span class="lbl">Example</span> $30.00 stand rental + $10.00 flyers = <b>$40.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">EBITDA</div>
+    <div class="desc">Earnings Before Interest, Taxes, Depreciation and Amortization — a proxy for operational cash generation before accounting adjustments.</div>
+    <div class="fml"><span class="lbl">Formula</span> Gross Profit − OpEx</div>
+    <div class="exm"><span class="lbl">Example</span> $190.00 − $40.00 = <b>$150.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Depreciation</div>
+    <div class="desc">A non-cash charge spreading the cost of a long-lived physical asset across the years it will actually be used.</div>
+    <div class="fml"><span class="lbl">Formula</span> (Initial Asset Cost − Salvage Value) ÷ Useful Life in Years</div>
+    <div class="exm"><span class="lbl">Example</span> $150.00 stand over 5 years = <b>$30.00 / yr</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Operating Income (EBIT)</div>
+    <div class="desc">Earnings Before Interest and Taxes. The true economic profit of the operation once asset wear is accounted for — and the numerator of both Magic Formula ratios.</div>
+    <div class="fml"><span class="lbl">Formula</span> EBITDA − Depreciation</div>
+    <div class="exm"><span class="lbl">Example</span> $150.00 − $30.00 = <b>$120.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Interest Expense</div>
+    <div class="desc">The contractual cost of servicing borrowed money.</div>
+    <div class="fml"><span class="lbl">Formula</span> Total Debt × Interest Rate</div>
+    <div class="exm"><span class="lbl">Example</span> 8% on a $100.00 loan = <b>$8.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Taxes</div>
+    <div class="desc">The government's share of pre-tax profit. Note that EBIT, Earnings Yield and ROC all sit <em>above</em> this line — deliberately, so that differing tax jurisdictions and one-off tax breaks cannot distort which business is genuinely better.</div>
+    <div class="fml"><span class="lbl">Formula</span> max(0, EBIT − Interest) × Effective Tax Rate</div>
+    <div class="exm"><span class="lbl">Example</span> A child's lemonade stand pays none: <b>$0.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Net Income (the bottom line)</div>
+    <div class="desc">Final accounting profit left for shareholders after every cost, including interest and tax.</div>
+    <div class="fml"><span class="lbl">Formula</span> EBIT − Interest − Taxes</div>
+    <div class="exm"><span class="lbl">Example</span> $120.00 − $8.00 − $0.00 = <b>$112.00</b></div>
+  </div>
+
+  <h2><span class="n">2.</span> Cash Flow Statement — the liquidity tracker</h2>
+
+  <div class="term">
+    <div class="name">Operating Cash Flow (OCF)</div>
+    <div class="desc">Cash actually thrown off by daily operations, before reinvestment.</div>
+    <div class="fml"><span class="lbl">Formula</span> EBITDA − Interest Paid − Taxes Paid ± Δ Working Capital</div>
+    <div class="exm"><span class="lbl">Example</span> $150.00 − $8.00 − $0.00 = <b>$142.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Capital Expenditures (CapEx)</div>
+    <div class="desc">Cash spent acquiring, upgrading or maintaining physical assets. Real filings derive this from the change in PP&amp;E; this model uses a maintenance stand-in of 15% of equipment value per year, so a heavier asset base visibly eats free cash flow.</div>
+    <div class="fml"><span class="lbl">Formula</span> Ending PP&amp;E − Beginning PP&amp;E + Depreciation&nbsp;&nbsp;(model: 15% of equipment value)</div>
+    <div class="exm"><span class="lbl">Example</span> 15% of the $150.00 stand = <b>$22.50</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Free Cash Flow (FCF)</div>
+    <div class="desc">Discretionary cash left after keeping the existing operation intact. This is what can pay dividends or clear debt.</div>
+    <div class="fml"><span class="lbl">Formula</span> Operating Cash Flow − CapEx</div>
+    <div class="exm"><span class="lbl">Example</span> $142.00 − $22.50 = <b>$119.50</b></div>
+  </div>
+
+  <h2><span class="n">3.</span> Balance Sheet &amp; capital structure</h2>
+
+  <div class="term">
+    <div class="name">Assets</div>
+    <div class="desc">Everything the business owns that carries economic value — cash, inventory, equipment and goodwill. Inventory belongs here: stock counted as working capital is an asset too.</div>
+    <div class="fml"><span class="lbl">Formula</span> Net Fixed Assets + Cash + Inventory + Goodwill</div>
+    <div class="exm"><span class="lbl">Example</span> $120.00 + $40.00 + $12.00 + $80.00 = <b>$252.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Liabilities (Total Debt)</div>
+    <div class="desc">Debts and obligations owed to outside creditors.</div>
+    <div class="exm"><span class="lbl">Example</span> Outstanding startup loan = <b>$100.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Equity (Book Value)</div>
+    <div class="desc">Net worth belonging to the owners once liabilities are settled.</div>
+    <div class="fml"><span class="lbl">Formula</span> Total Assets − Total Liabilities</div>
+    <div class="exm"><span class="lbl">Example</span> $252.00 − $100.00 = <b>$152.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Working Capital (Inventory)</div>
+    <div class="desc">Money tied up in trading stock rather than equipment. The screener excludes surplus cash and floors this at zero, so a business financed by its suppliers uses no net working capital at all.</div>
+    <div class="fml"><span class="lbl">Formula</span> Current Assets − Current Liabilities, excluding excess cash</div>
+    <div class="exm"><span class="lbl">Example</span> 20% of $60.00 ingredients held as stock = <b>$12.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Market Capitalization</div>
+    <div class="desc">The aggregate market price of all equity shares.</div>
+    <div class="fml"><span class="lbl">Formula</span> Share Price × Total Shares Outstanding</div>
+    <div class="exm"><span class="lbl">Example</span> The market values the stand's equity at <b>$400.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Enterprise Value (EV)</div>
+    <div class="desc">What it would truly cost to buy the whole operating business: you pay for the equity, inherit the debt, and keep the cash that comes with it.</div>
+    <div class="fml"><span class="lbl">Formula</span> Market Cap + Total Debt − Cash &amp; Short-term Investments</div>
+    <div class="exm"><span class="lbl">Example</span> $400.00 + $100.00 − $40.00 = <b>$460.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Capital Employed</div>
+    <div class="desc">Tangible capital genuinely deployed inside core operations. Cash is excluded on purpose — see the note at the top.</div>
+    <div class="fml"><span class="lbl">Formula</span> Net Fixed Assets + Working Capital</div>
+    <div class="exm"><span class="lbl">Example</span> $120.00 stand + $12.00 stock = <b>$132.00</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Goodwill / M&amp;A Intangibles</div>
+    <div class="desc">The premium paid above net book value when buying another business or brand.</div>
+    <div class="exm"><span class="lbl">Example</span> Paying $100.00 for a rival whose physical assets were worth $20.00 creates <b>$80.00</b> of goodwill</div>
+  </div>
+
+  <div class="term">
+    <div class="name">Total Invested Capital</div>
+    <div class="desc">All capital committed to the business, including what was historically paid for acquisitions.</div>
+    <div class="fml"><span class="lbl">Formula</span> Equity + Total Debt − Cash&nbsp;&nbsp;(≡ Capital Employed + Goodwill)</div>
+    <div class="exm"><span class="lbl">Example</span> $152.00 + $100.00 − $40.00 = <b>$212.00</b>, identical to $132.00 + $80.00</div>
+  </div>
+
+  <h2><span class="n">4.</span> Magic Formula &amp; return ratios</h2>
+  <p>Adapted from Joel Greenblatt's <em>The Little Book That Still Beats the Market</em>. These ratios separate operating efficiency from capital structure and market sentiment. The method insists on <strong>both</strong> at once: cheap alone is a value trap, quality alone is an expensive darling.</p>
+
+  <div class="term">
+    <div class="name">Earnings Yield (EBIT / EV) — the "is it cheap?" test</div>
+    <div class="desc">Operating earnings relative to the full takeover price. Unlike P/E, it uses Enterprise Value, so a debt-laden company cannot hide behind a flattering share price.</div>
+    <div class="fml"><span class="lbl">Formula</span> <span class="frac"><span class="top">EBIT</span><span class="bot">Enterprise Value</span></span> × 100</div>
+    <div class="exm"><span class="lbl">Example</span> $120.00 ÷ $460.00 × 100 = <b>26.09%</b> — higher means cheaper</div>
+  </div>
+
+  <div class="term">
+    <div class="name">Return on Capital (ROC) — the "is it any good?" test</div>
+    <div class="desc">How efficiently the operation turns tangible capital into operating profit. A persistently high ROC is the fingerprint of an economic moat.</div>
+    <div class="fml"><span class="lbl">Formula</span> <span class="frac"><span class="top">EBIT</span><span class="bot">Capital Employed</span></span> × 100</div>
+    <div class="exm"><span class="lbl">Example</span> $120.00 ÷ $132.00 × 100 = <b>90.91%</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">ROIC including Goodwill</div>
+    <div class="desc">The same question, but charging the business for what it actually paid in past acquisitions. Read it alongside ROC, never instead of it.</div>
+    <div class="fml"><span class="lbl">Formula</span> <span class="frac"><span class="top">EBIT</span><span class="bot">Total Invested Capital</span></span> × 100</div>
+    <div class="exm"><span class="lbl">Example</span> $120.00 ÷ $212.00 × 100 = <b>56.60%</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">Free Cash Flow Yield</div>
+    <div class="desc">Cash generation measured against the equity market valuation.</div>
+    <div class="fml"><span class="lbl">Formula</span> <span class="frac"><span class="top">Free Cash Flow</span><span class="bot">Market Capitalization</span></span> × 100</div>
+    <div class="exm"><span class="lbl">Example</span> $119.50 ÷ $400.00 × 100 = <b>29.88%</b></div>
+  </div>
+
+  <h2><span class="n">5.</span> Quality warning flags</h2>
+
+  <div class="callout warn">
+    <h4>Why a spectacular ROC can be an illusion</h4>
+    <p>Greenblatt's Capital Employed deliberately excludes goodwill, because he is asking what the <em>next</em> dollar put into the business would earn. That is the right question for ranking a basket — but for a company assembled by acquisition it shrinks the denominator dramatically and produces a headline ROC that says nothing about the return earned on the price actually paid.</p>
+    <p>A real screen by this system flagged <strong>FISV</strong> at <strong>59.1%</strong> intangibles, with ROC reading <strong>136.7%</strong> against ROIC of just <strong>9.4%</strong> — a 14× gap. An earlier draft of the analysis called that "elite capital efficiency". It was an accounting shadow. These two flags exist so that mistake cannot repeat.</p>
+  </div>
+
+  <div class="term">
+    <div class="name">Intangibles Share of Assets</div>
+    <div class="desc">How much of the balance sheet is acquisition premium rather than productive physical assets. Treat anything above roughly 50% as a reason to read ROC sceptically.</div>
+    <div class="fml"><span class="lbl">Formula</span> (Goodwill &amp; Intangibles ÷ Total Assets) × 100</div>
+    <div class="exm"><span class="lbl">Example</span> $80.00 ÷ $252.00 × 100 = <b>31.75%</b></div>
+  </div>
+
+  <div class="term">
+    <div class="name">ROC ÷ ROIC Gap</div>
+    <div class="desc">The multiple between the flattering number and the honest one. Near 1× means the returns are real and earned on capital genuinely invested. A wide gap means the business bought its earnings.</div>
+    <div class="fml"><span class="lbl">Formula</span> Return on Capital ÷ ROIC including Goodwill</div>
+    <div class="exm"><span class="lbl">Example</span> 90.91% ÷ 56.60% = <b>1.61×</b> — healthy</div>
+  </div>
+
+  <h2><span class="n">6.</span> The whole stand on one page</h2>
+  <p class="noprint">Every figure below follows from the same nine inputs. This is the page worth keeping.</p>
+
+  <table>
+    <caption>Inputs</caption>
+    <tbody>
+      <tr><td>Cups sold</td><td class="num">100</td><td>Price per cup</td><td class="num">$2.50</td></tr>
+      <tr><td>Ingredients (COGS)</td><td class="num">$60.00</td><td>Operating expenses</td><td class="num">$40.00</td></tr>
+      <tr><td>Stand equipment (5-yr life)</td><td class="num">$150.00</td><td>Debt @ 8%</td><td class="num">$100.00</td></tr>
+      <tr><td>Cash &amp; reserves</td><td class="num">$40.00</td><td>Acquisition goodwill</td><td class="num">$80.00</td></tr>
+      <tr><td>Market capitalisation</td><td class="num">$400.00</td><td>Effective tax rate</td><td class="num">0%</td></tr>
+    </tbody>
+  </table>
+
+  <table>
+    <caption>Statements &amp; ratios</caption>
+    <tbody>
+      <tr class="sub"><td colspan="2">Income statement</td></tr>
+      <tr><td>Revenue</td><td class="num">$250.00</td></tr>
+      <tr><td>Cost of goods sold</td><td class="num">−$60.00</td></tr>
+      <tr><td>Gross margin</td><td class="num">$190.00</td></tr>
+      <tr><td>Operating expenses</td><td class="num">−$40.00</td></tr>
+      <tr><td>EBITDA</td><td class="num">$150.00</td></tr>
+      <tr><td>Depreciation</td><td class="num">−$30.00</td></tr>
+      <tr class="tot"><td>Operating profit (EBIT)</td><td class="num">$120.00</td></tr>
+      <tr><td>Interest expense</td><td class="num">−$8.00</td></tr>
+      <tr><td>Taxes</td><td class="num">−$0.00</td></tr>
+      <tr class="tot"><td>Net income</td><td class="num">$112.00</td></tr>
+
+      <tr class="sub"><td colspan="2">Cash flow</td></tr>
+      <tr><td>Operating cash flow</td><td class="num">$142.00</td></tr>
+      <tr><td>Capital expenditures</td><td class="num">−$22.50</td></tr>
+      <tr class="tot"><td>Free cash flow</td><td class="num">$119.50</td></tr>
+
+      <tr class="sub"><td colspan="2">Balance sheet &amp; valuation</td></tr>
+      <tr><td>Net fixed assets</td><td class="num">$120.00</td></tr>
+      <tr><td>Cash &amp; reserves</td><td class="num">$40.00</td></tr>
+      <tr><td>Inventory / working capital</td><td class="num">$12.00</td></tr>
+      <tr><td>Goodwill</td><td class="num">$80.00</td></tr>
+      <tr class="tot"><td>Total assets</td><td class="num">$252.00</td></tr>
+      <tr><td>Total debt</td><td class="num">$100.00</td></tr>
+      <tr class="tot"><td>Equity (book value)</td><td class="num">$152.00</td></tr>
+      <tr><td>Capital employed</td><td class="num">$132.00</td></tr>
+      <tr class="tot"><td>Total invested capital</td><td class="num">$212.00</td></tr>
+      <tr class="tot"><td>Enterprise value</td><td class="num">$460.00</td></tr>
+
+      <tr class="sub"><td colspan="2">Magic Formula &amp; ratios</td></tr>
+      <tr class="tot"><td>Earnings yield (EBIT / EV)</td><td class="num">26.09%</td></tr>
+      <tr class="tot"><td>Return on capital (EBIT / Capital Employed)</td><td class="num">90.91%</td></tr>
+      <tr><td>ROIC including goodwill</td><td class="num">56.60%</td></tr>
+      <tr><td>Free cash flow yield</td><td class="num">29.88%</td></tr>
+
+      <tr class="sub"><td colspan="2">Quality warning flags</td></tr>
+      <tr><td>Intangibles share of assets</td><td class="num">31.75%</td></tr>
+      <tr><td>ROC ÷ ROIC gap</td><td class="num">1.61×</td></tr>
+    </tbody>
+  </table>
+
+  <h2><span class="n">7.</span> Formula index</h2>
+  <table>
+    <thead><tr><th style="width:34%">Term</th><th>Calculation</th></tr></thead>
+    <tbody>
+      <tr><td>Revenue</td><td>Quantity Sold × Price per Unit</td></tr>
+      <tr><td>COGS</td><td>Σ (Unit Material Cost × Units Sold)</td></tr>
+      <tr><td>Gross Margin</td><td>Revenue − COGS</td></tr>
+      <tr><td>OpEx</td><td>Selling + General &amp; Administrative Expenses</td></tr>
+      <tr><td>EBITDA</td><td>Gross Profit − OpEx</td></tr>
+      <tr><td>Depreciation</td><td>(Initial Asset Cost − Salvage Value) ÷ Useful Life</td></tr>
+      <tr><td>EBIT</td><td>EBITDA − Depreciation</td></tr>
+      <tr><td>Interest Expense</td><td>Total Debt × Interest Rate</td></tr>
+      <tr><td>Taxes</td><td>max(0, EBIT − Interest) × Effective Tax Rate</td></tr>
+      <tr><td>Net Income</td><td>EBIT − Interest − Taxes</td></tr>
+      <tr><td>Operating Cash Flow</td><td>EBITDA − Interest Paid − Taxes Paid ± Δ Working Capital</td></tr>
+      <tr><td>CapEx</td><td>Ending PP&amp;E − Beginning PP&amp;E + Depreciation&nbsp;&nbsp;(model: 15% of equipment value)</td></tr>
+      <tr><td>Free Cash Flow</td><td>Operating Cash Flow − CapEx</td></tr>
+      <tr><td>Total Assets</td><td>Net Fixed Assets + Cash + Inventory + Goodwill</td></tr>
+      <tr><td>Equity (Book Value)</td><td>Total Assets − Total Liabilities</td></tr>
+      <tr><td>Working Capital</td><td>Current Assets − Current Liabilities, excluding excess cash</td></tr>
+      <tr><td>Market Capitalization</td><td>Share Price × Shares Outstanding</td></tr>
+      <tr><td>Enterprise Value</td><td>Market Cap + Total Debt − Cash</td></tr>
+      <tr><td>Capital Employed</td><td>Net Fixed Assets + Working Capital</td></tr>
+      <tr><td>Total Invested Capital</td><td>Equity + Total Debt − Cash&nbsp;&nbsp;(≡ Capital Employed + Goodwill)</td></tr>
+      <tr><td>Earnings Yield</td><td>EBIT ÷ Enterprise Value</td></tr>
+      <tr><td>Return on Capital</td><td>EBIT ÷ Capital Employed</td></tr>
+      <tr><td>ROIC incl. Goodwill</td><td>EBIT ÷ Total Invested Capital</td></tr>
+      <tr><td>Free Cash Flow Yield</td><td>Free Cash Flow ÷ Market Capitalization</td></tr>
+      <tr class="flag"><td>Intangibles Share of Assets</td><td>Goodwill &amp; Intangibles ÷ Total Assets</td></tr>
+      <tr class="flag"><td>ROC ÷ ROIC Gap</td><td>Return on Capital ÷ ROIC including Goodwill</td></tr>
+    </tbody>
+  </table>
+
+  <footer class="doc">
+    Magic Stock Picker — investor education reference. Figures mirror
+    <code>magic_formula_starter_screener.py</code>. Educational material only; not investment advice.
+  </footer>
+
+</div>
+</body>
+</html>
