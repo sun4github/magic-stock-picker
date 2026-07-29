@@ -10,19 +10,28 @@ unbounded run is a real risk. The reuse check is the other half: 16 runs in one
 day, several of them the same ticker against the same filing, each paying again to
 regenerate a near-identical report.
 """
+import math
+
 import main
 
 
 def _usage_costing(usd):
-    """A usage dict whose LLM cost is approximately `usd`.
+    """A usage dict whose LLM cost is at least `usd`.
 
     Built from output tokens only, priced at the confirmed $7.50/1M output rate, so
     the arithmetic is easy to follow and does not depend on the cached-input split.
+
+    Rounded UP, not truncated. The "cost hits the ceiling" case needs a usage that
+    genuinely reaches the ceiling, and truncation leaves it a fraction of a cent
+    short whenever the ceiling is not an exact multiple of the rate. That made the
+    test silently dependent on the configured budget dividing evenly by 7.50: it
+    passed at $15.00 and failed at $20.00, reporting a guard regression where the
+    guard was correct and the fixture was wrong.
     """
     u = main._new_usage()
     u["by_model"]["gemini-3.6-flash"] = {
         "input": 0, "cached_input": 0,
-        "output": int(usd / 7.50 * 1e6),
+        "output": math.ceil(usd / 7.50 * 1e6),
         "total": 0, "requests": 1,
     }
     return u

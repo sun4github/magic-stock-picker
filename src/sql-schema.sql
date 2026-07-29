@@ -64,6 +64,12 @@ CREATE TABLE ticker_runs (
     company_name TEXT,
     verdict VARCHAR(10),
     run_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    -- Final_Rank from the Magic Formula screen that selected this ticker (1 = best
+    -- combined ROC + Earnings Yield). Stored so the UI can order a run's decisions
+    -- by conviction without re-reading the screener CSV, which is overwritten every
+    -- run and so cannot answer "how was this ticker ranked back then".
+    -- NULL for on-demand single-ticker runs, which never went through a ranking.
+    magic_rank INTEGER,
     UNIQUE (ticker, run_id)  -- one index row per (ticker, run)
 );
 

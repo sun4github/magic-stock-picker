@@ -3,7 +3,7 @@ import time
 import requests
 import pandas as pd
 import yaml
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -42,6 +42,38 @@ EXCLUDED_SECTORS = screening_params.get("excluded_sectors", [
     "Utilities",
     "Banking"
 ])
+
+# Greenblatt's step-by-step screen ("The Little Book That Still Beats the Market",
+# step-by-step appendix). These are ELIGIBILITY GATES applied on top of the universe;
+# the RANKING remains the real Magic Formula (Return on Capital + Earnings Yield).
+# See the long comment block under `screening_parameters:` in specs/config.yaml.
+MIN_ROA = screening_params.get("min_roa", 0.25)
+ROA_BASIS = (screening_params.get("roa_basis") or "ebit").lower()
+MIN_PE = screening_params.get("min_pe", 5.0)
+RECENT_EARNINGS_DAYS = screening_params.get("exclude_recent_earnings_days", 7)
+
+# Financial/fund industries that FMP files OUTSIDE the excluded sectors above.
+# Matched case-insensitively as substrings of the `industry` field.
+EXCLUDED_INDUSTRIES = [
+    s.lower() for s in screening_params.get("excluded_industries", [
+        "bank", "insurance", "asset management", "capital markets",
+        "financial conglomerate", "financial data", "shell companies",
+        "mortgage", "closed-end fund", "exchange traded fund", "reit",
+    ])
+]
+
+EXCLUDE_ADR = screening_params.get("exclude_adr", True)
+ALLOWED_COUNTRIES = {
+    (c or "").upper() for c in screening_params.get("allowed_countries", ["US"])
+}
+
+# Name markers for a depositary receipt. FMP writes these into `companyName` for
+# foreign issuers trading on US exchanges; the ticker itself carries no reliable
+# signal (the 5-letter '...Y' convention only covers OTC receipts).
+ADR_NAME_MARKERS = (
+    "adr", "ads", "american depositary", "american depository",
+    "depositary receipt", "depositary share",
+)
 
 headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -106,6 +138,49 @@ def fmp_get(url, params=None, context=""):
     raise FMPError(f"{label}: failed after {HTTP_MAX_RETRIES} attempts — {last_err}")
 
 
+def is_adr(company):
+    """True if a screener row looks like a foreign issuer's depositary receipt.
+
+    Greenblatt's step-by-step screen says to "eliminate all foreign companies",
+    which on a US screener means the ADRs. There is no `isAdr` flag on the screener
+    payload, so this leans on the two signals that ARE present: the depositary-receipt
+    wording FMP writes into the company name, and a non-US country of domicile.
+    """
+    name = (company.get("companyName") or "").lower()
+    if any(marker in name for marker in ADR_NAME_MARKERS):
+        return True
+    country = (company.get("country") or "").upper()
+    # An empty country is unknown, not foreign — don't drop a company on missing data.
+    return bool(country) and country not in ALLOWED_COUNTRIES
+
+
+def _universe_exclusion_reason(company):
+    """Why this company is ineligible before any financials are fetched, or None.
+
+    Covers steps 3 and 4 of Greenblatt's DIY screen (drop utilities, financials and
+    foreign companies). Kept separate from the ratio gates because these need no API
+    calls — a company rejected here never costs us two statement requests.
+    """
+    if not company.get("symbol"):
+        return "no_symbol"
+    if company.get("sector") in EXCLUDED_SECTORS:
+        return "excluded_sector"
+    if company.get("isEtf") or company.get("isFund"):
+        return "fund_or_etf"
+    industry = (company.get("industry") or "").lower()
+    # REITs are financial in nature — a REIT has no meaningful "capital employed" in
+    # Greenblatt's sense, so its ROC is distorted (e.g. mortgage-REIT LADR ranking
+    # top-5). Filtering by INDUSTRY rather than the whole "Real Estate" sector keeps
+    # legitimate operating developers and homebuilders in the universe. The same
+    # applies to the banks/insurers/asset managers FMP files outside the excluded
+    # sectors: catching them by industry avoids nuking an entire sector to reach them.
+    if any(kw in industry for kw in EXCLUDED_INDUSTRIES):
+        return "excluded_industry"
+    if EXCLUDE_ADR and is_adr(company):
+        return "foreign_adr"
+    return None
+
+
 def fetch_screener_universe(api_key, min_market_cap, limit):
     """Fetches eligible US common stocks above min_market_cap."""
     print("Fetching pre-filtered stock universe from FMP Screener...")
@@ -122,19 +197,122 @@ def fetch_screener_universe(api_key, min_market_cap, limit):
     data = fmp_get(url, params=params, context="screener universe")
     if not isinstance(data, list):
         raise FMPError(f"screener universe: unexpected response type {type(data).__name__}")
-    # Exclude REITs by industry (mortgage AND equity). They're financial in nature —
-    # a REIT has no meaningful "capital employed" in Greenblatt's sense, so its ROC
-    # is distorted (e.g. mortgage-REIT LADR ranking top-5). Filtering by industry
-    # rather than the whole "Real Estate" sector keeps legitimate operating
-    # developers and homebuilders in the universe.
-    valid_stocks = [
-        item for item in data
-        if item.get("sector") not in EXCLUDED_SECTORS
-        and "reit" not in (item.get("industry") or "").lower()
-        and item.get("symbol")
-    ]
-    print(f"Found {len(valid_stocks)} eligible companies.")
+
+    valid_stocks = []
+    dropped = {}
+    for item in data:
+        reason = _universe_exclusion_reason(item)
+        if reason:
+            dropped[reason] = dropped.get(reason, 0) + 1
+        else:
+            valid_stocks.append(item)
+
+    print(f"Found {len(valid_stocks)} eligible companies (from {len(data)} returned).")
+    if dropped:
+        # Print the breakdown so a mis-tuned exclusion list is visible as a number
+        # rather than as a company quietly missing from the rankings.
+        detail = ", ".join(f"{n} {reason}" for reason, n in sorted(dropped.items()))
+        print(f"  Excluded before fetching financials: {detail}.")
     return valid_stocks
+
+def fetch_recent_earnings_symbols(api_key, days=RECENT_EARNINGS_DAYS, symbols=None):
+    """Symbols that ANNOUNCED earnings within the last `days` days.
+
+    Greenblatt's step-by-step screen drops these: a report published days ago has not
+    been absorbed into the price yet, so the screen would be ranking on figures the
+    market is still digesting.
+
+    Two paths, cheapest first:
+      1. `/stable/earnings-calendar` over the date window — ONE call for the whole
+         market (~1,500 rows for a week). Preferred; the screen only needs "who
+         reported", not the numbers.
+      2. Per-symbol `/stable/earnings` — used only if the calendar endpoint is not
+         available on this plan, and only for the handful of symbols that survived
+         the ratio gates, so the cost is bounded.
+
+    A calendar DATE inside the window is enough to exclude a company; we do not also
+    require `epsActual` to be filled in. Both endpoints carry scheduled dates whose
+    result fields are still null, and FMP backfills them with a lag — so insisting on
+    a posted EPS would keep exactly the company that reported two days ago and hasn't
+    been transcribed yet, which is the case this filter exists to catch. Erring the
+    other way costs us a handful of names out of a ~2,500-company universe.
+
+    Returns (symbols_set, ok). `ok` is False when neither path worked — the caller
+    must then say so out loud rather than let the run pretend the filter was applied.
+    """
+    if not days or days <= 0:
+        return set(), True
+
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=days)
+
+    try:
+        data = fmp_get(
+            "https://financialmodelingprep.com/stable/earnings-calendar",
+            params={"from": start.isoformat(), "to": today.isoformat(), "apikey": api_key},
+            context="earnings calendar",
+        )
+        if isinstance(data, list):
+            # The endpoint is already bounded by from/to, but re-check each row's date
+            # rather than trusting the query: a stray out-of-window row would otherwise
+            # eliminate a company for no reason.
+            recent = set()
+            for row in data:
+                if not isinstance(row, dict) or not row.get("symbol"):
+                    continue
+                try:
+                    d = datetime.fromisoformat(str(row.get("date") or "")[:10]).date()
+                except ValueError:
+                    continue
+                if start <= d <= today:
+                    recent.add(row["symbol"])
+            return recent, True
+        print(f"  Earnings calendar returned {type(data).__name__}, not a list — "
+              f"falling back to per-symbol lookups.")
+    except FMPError as e:
+        print(f"  Earnings calendar unavailable ({e}) — falling back to per-symbol lookups.")
+
+    # --- Fallback: ask each surviving symbol directly ---
+    if not symbols:
+        return set(), False
+
+    recent = set()
+    failures = 0
+    for symbol in symbols:
+        try:
+            rows = fmp_get(
+                "https://financialmodelingprep.com/stable/earnings",
+                params={"symbol": symbol, "limit": 4, "apikey": api_key},
+                context=f"{symbol} earnings dates",
+            )
+        except FMPError:
+            failures += 1
+            continue
+        if not isinstance(rows, list):
+            failures += 1
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            # Same rule as the bulk path above: the date alone decides. This endpoint
+            # also lists UPCOMING dates (with null results), but those fall outside
+            # the trailing window and are filtered by the range check below.
+            date_str = str(row.get("date") or "")[:10]
+            try:
+                d = datetime.fromisoformat(date_str).date()
+            except ValueError:
+                continue
+            if start <= d <= today:
+                recent.add(symbol)
+                break
+        time.sleep(0.15)
+
+    if failures:
+        print(f"  Note: earnings dates could not be read for {failures}/{len(symbols)} "
+              f"symbols; those were kept rather than dropped on missing data.")
+    # The fallback succeeded as long as it wasn't a total washout.
+    return recent, failures < len(symbols)
+
 
 def _is_stale(statement, max_age_days=MAX_STATEMENT_AGE_DAYS):
     """True if a statement's reporting date is older than max_age_days (or unparseable)."""
@@ -219,6 +397,12 @@ def compute_company_metrics_detailed(symbol, live_market_cap, api_key):
                 )
             ebit = sum(ttm_parts)
             ebit_basis = "TTM"
+            # Bottom-line profit over the SAME four quarters, from the SAME payload —
+            # no extra request. Feeds the P/E gate and the net-income view of ROA.
+            # Left as None on a partial set rather than summing three quarters and
+            # calling it a year, which would understate earnings and inflate P/E.
+            ni_parts = [q.get("netIncome") for q in inc_q[:4]]
+            net_income = None if any(v is None for v in ni_parts) else sum(ni_parts)
         else:
             inc_a = fmp_get(inc_url, params={
                 "symbol": symbol, "limit": 1, "apikey": api_key
@@ -232,6 +416,7 @@ def compute_company_metrics_detailed(symbol, live_market_cap, api_key):
             inc_latest = inc_a[0]
             ebit = inc_latest.get("operatingIncome")
             ebit_basis = "Annual"
+            net_income = inc_latest.get("netIncome")
 
         if ebit is None:
             return _skip(
@@ -363,6 +548,55 @@ def compute_company_metrics_detailed(symbol, live_market_cap, api_key):
         roic_incl_goodwill = ebit / invested_capital if invested_capital > 0 else None
         intangibles_share = (goodwill_intangibles / total_assets) if total_assets > 0 else None
 
+        # Why the companion figure is missing, when it is. Invested capital goes
+        # non-positive for companies that have bought back more stock than their
+        # retained earnings cover (BKNG, WINA) — shareholders' equity turns negative
+        # and "return on capital invested" has no denominator left to divide by.
+        #
+        # This matters because the companion is not decoration: it is the ONLY guard
+        # against reading a four-digit Magic Formula ROC as operating efficiency
+        # (spec §2.F). Silently omitting it leaves the headline standing alone on
+        # exactly the companies whose headline is least trustworthy. So the reason is
+        # carried through to the report, and ROA — which divides by every asset
+        # including goodwill, and is always computable — is named as the fallback
+        # counterweight. ROA is NOT ROIC and is never relabelled as such; it is a
+        # more conservative denominator serving the same sanity-check purpose.
+        roic_unavailable_reason = None
+        if roic_incl_goodwill is None:
+            roic_unavailable_reason = (
+                "negative_invested_capital" if invested_capital <= 0 else "not_computable"
+            )
+
+        # --- Return on ASSETS: the proxy Greenblatt's DIY screen filters on ---
+        # ROA is NOT Return on Capital. Same numerator, different denominator: ROC
+        # divides by capital employed (working capital + net fixed assets only), ROA
+        # divides by EVERY asset on the books — including cash, goodwill and acquired
+        # intangibles. So ROA is always the lower, blunter figure, and a company can
+        # look mediocre on ROA while ranking as elite on ROC. Greenblatt uses it in the
+        # step-by-step appendix only because free screeners expose ROA and not ROC,
+        # which is why the hurdle he sets (25%) is high. Ranking still uses ROC.
+        #
+        # Both bases are computed because they answer different questions and neither
+        # costs a request: the EBIT basis keeps one numerator across ROC/EY/ROA, while
+        # the net-income basis is what a retail screener would have shown his readers.
+        roa_ebit = ebit / total_assets if total_assets > 0 else None
+        roa_net_income = (
+            net_income / total_assets
+            if net_income is not None and total_assets > 0
+            else None
+        )
+
+        # P/E on the same TTM window as EBIT. Derived as market cap / net income rather
+        # than price / EPS: identical arithmetic, but it avoids depending on a share
+        # count and a per-share figure that FMP reports inconsistently across filers.
+        # Undefined (None) for loss-makers — a negative P/E is not a low P/E, and the
+        # "P/E below 5" gate must not silently swallow them.
+        pe_ratio = (
+            live_market_cap / net_income
+            if net_income and net_income > 0 and live_market_cap > 0
+            else None
+        )
+
         return {
             "ok": True,
             "Symbol": symbol,
@@ -374,6 +608,14 @@ def compute_company_metrics_detailed(symbol, live_market_cap, api_key):
             "EnterpriseValue": enterprise_value,
             "ROC": roc,
             "EarningsYield": earnings_yield,
+            # Greenblatt's step-by-step proxies. Computed for EVERY company, gated
+            # nowhere in here: main() applies the 25%-ROA / P/E-5 cuts to the screening
+            # universe, while an on-demand single-ticker run still wants to SEE these
+            # figures for a company the screen would have rejected.
+            "NetIncome": net_income,
+            "ROA": roa_ebit,
+            "ROA_NetIncome": roa_net_income,
+            "PE": pe_ratio,
             # Balance-sheet provenance. These are the figures the reconciliation
             # gate in main.py checks agent-written prose against, so they must be
             # the same numbers that fed EV above — not a second lookup.
@@ -384,6 +626,7 @@ def compute_company_metrics_detailed(symbol, live_market_cap, api_key):
             "GoodwillAndIntangibles": goodwill_intangibles,
             "InvestedCapital": invested_capital if invested_capital > 0 else None,
             "ROIC_InclGoodwill": roic_incl_goodwill,
+            "ROIC_Unavailable_Reason": roic_unavailable_reason,
             "IntangiblesShareOfAssets": intangibles_share,
             "BalanceSheetDate": bal.get("date"),
             "IncomeStatementDate": inc_latest.get("date"),
@@ -402,6 +645,41 @@ def compute_company_metrics_detailed(symbol, live_market_cap, api_key):
             "data, so its Magic Formula ratios could not be calculated.",
             detail=str(e),
         )
+
+
+def selected_roa(metrics):
+    """The ROA the 25% hurdle is measured against, per `roa_basis` in config.yaml."""
+    if ROA_BASIS == "net_income":
+        return metrics.get("ROA_NetIncome")
+    return metrics.get("ROA")
+
+
+def ratio_gate_reason(metrics):
+    """Why a company fails Greenblatt's ROA / P/E gates, or None if it passes.
+
+    Steps 1 and 2 of the step-by-step screen. Deliberately applied AFTER the metrics
+    are computed (they need the financials) but BEFORE ranking, so a rejected company
+    never influences the percentile ranks of the ones that survive.
+
+    Missing data is not a failure: a company whose ROA or P/E could not be computed is
+    kept, because dropping it would silently penalise a filer for a provider gap rather
+    than for anything about the business.
+    """
+    if MIN_ROA is not None:
+        roa = selected_roa(metrics)
+        if roa is not None and roa < MIN_ROA:
+            return "roa_below_min"
+
+    if MIN_PE is not None:
+        pe = metrics.get("PE")
+        # Only a POSITIVE P/E below the floor is a rejection. Greenblatt's reason for
+        # this cut is that a P/E that low usually means one-off earnings (an asset sale,
+        # a settlement) rather than a genuine bargain — a loss-maker has no P/E at all
+        # and is already excluded upstream by the negative-EBIT check.
+        if pe is not None and 0 < pe < MIN_PE:
+            return "pe_below_min"
+
+    return None
 
 
 def calculate_company_metrics(symbol, live_market_cap, api_key):
@@ -435,6 +713,7 @@ def main():
     # magicformula site displays, so no extra per-symbol quote calls are needed.
     results = []
     error_count = 0          # symbols skipped due to persistent fetch failures
+    gate_counts = {}         # companies dropped by the ROA / P/E gates, by reason
     ERROR_LOG_LIMIT = 15     # cap the per-symbol error spam; total is summarised below
     print("\nCalculating Magic Formula metrics across universe...")
     for idx, company in enumerate(universe):
@@ -453,14 +732,50 @@ def main():
             metrics = None
 
         if metrics:
-            metrics["Price"] = company.get("price", 0) or 0
-            results.append(metrics)
+            # Steps 1 & 2 of Greenblatt's screen. Dropped BEFORE ranking so a rejected
+            # company cannot shift the percentile ranks of the ones that survive.
+            gate = ratio_gate_reason(metrics)
+            if gate:
+                gate_counts[gate] = gate_counts.get(gate, 0) + 1
+            else:
+                metrics["Price"] = company.get("price", 0) or 0
+                results.append(metrics)
 
         # Pause to easily stay within Starter Limit (300 calls/min = ~5 calls/sec)
         time.sleep(0.15)
 
         if (idx + 1) % 50 == 0:
             print(f"Processed {idx + 1}/{len(universe)} stocks... ({len(results)} valid so far)")
+
+    if gate_counts:
+        roa_label = "net income" if ROA_BASIS == "net_income" else "EBIT"
+        print(
+            f"\nGreenblatt gates: {gate_counts.get('roa_below_min', 0)} dropped for ROA "
+            f"below {MIN_ROA:.0%} ({roa_label} / total assets), "
+            f"{gate_counts.get('pe_below_min', 0)} dropped for a P/E below {MIN_PE:g}."
+        )
+
+    # Step 3: drop anything that reported earnings in the last week. Run over the
+    # SURVIVORS only — the bulk calendar is one call, and the per-symbol fallback then
+    # costs a few dozen requests instead of a few thousand.
+    if RECENT_EARNINGS_DAYS and results:
+        survivors = [m["Symbol"] for m in results]
+        print(f"\nChecking which of the {len(survivors)} survivors reported earnings in "
+              f"the last {RECENT_EARNINGS_DAYS} days...")
+        recent_symbols, ok = fetch_recent_earnings_symbols(
+            API_KEY, RECENT_EARNINGS_DAYS, survivors
+        )
+        if not ok:
+            # Never let a failed lookup masquerade as "nobody reported recently".
+            print("  WARNING: earnings dates could not be retrieved, so this filter was "
+                  "NOT applied. The rankings may include companies that reported in the "
+                  "last week.")
+        else:
+            before = len(results)
+            results = [m for m in results if m["Symbol"] not in recent_symbols]
+            dropped_recent = before - len(results)
+            print(f"  Dropped {dropped_recent} company(ies) that reported within the "
+                  f"window; {len(results)} remain.")
 
     if error_count:
         pct = 100 * error_count / len(universe)
@@ -508,11 +823,23 @@ def main():
     df["ROC_Pct"] = (df["ROC"] * 100).round(2).astype(str) + "%"
     df["EY_Pct"] = (df["EarningsYield"] * 100).round(2).astype(str) + "%"
     df["Live_Price"] = "$" + df["Price"].round(2).astype(str)
+    # ROA and P/E are gate figures, not ranking figures — carried through so a reader
+    # (and the final report) can see WHICH side of Greenblatt's 25% / P/E-5 cuts a
+    # surviving company sits on. Missing values stay blank rather than becoming "nan%".
+    df["ROA_Pct"] = (df["ROA"] * 100).round(2).map(
+        lambda v: f"{v}%" if pd.notna(v) else ""
+    )
+    df["ROA_NetIncome_Pct"] = (df["ROA_NetIncome"] * 100).round(2).map(
+        lambda v: f"{v}%" if pd.notna(v) else ""
+    )
+    df["PE_Ratio"] = df["PE"].round(2)
 
     output_df = df[[
         "Final_Rank", "Symbol", "CompanyName", "Live_Price",
         "LiveMarketCap", "ROC_Pct", "EY_Pct", "EBIT_Basis", "MagicFormula_Score",
         "ROC_Rank", "EY_Rank",
+        # Greenblatt's step-by-step gate figures (see ratio_gate_reason).
+        "ROA_Pct", "ROA_NetIncome_Pct", "PE_Ratio", "NetIncome",
         # Raw component dollar figures, kept alongside the Pct columns so the
         # final report can show the actual EY/ROC formula, not just the result.
         "EBIT", "CapitalEmployed", "EnterpriseValue",
@@ -520,7 +847,8 @@ def main():
         # through to the CSV so a --from-csv run gets the same authoritative figures
         # (and the same reconciliation gate) as an on-demand single-ticker run.
         "TotalDebt", "Cash", "TotalEquity", "TotalAssets", "GoodwillAndIntangibles",
-        "InvestedCapital", "ROIC_InclGoodwill", "IntangiblesShareOfAssets",
+        "InvestedCapital", "ROIC_InclGoodwill", "ROIC_Unavailable_Reason",
+        "IntangiblesShareOfAssets",
         "BalanceSheetDate",
     ]]
 
@@ -531,6 +859,16 @@ def main():
     timestamped_path = os.path.join(HISTORY_DIR, f"magic_formula_rankings_{run_stamp}.csv")
     output_df.to_csv(timestamped_path, index=False)
     output_df.to_csv(OUTPUT_FILENAME, index=False)
+    # Greenblatt's 25% ROA hurdle is severe by design — on a sampled run it clears
+    # roughly 95% of the universe on its own. That is the intent, but Phase B then
+    # analyzes the top 30, so a run that leaves fewer than that is not a stricter
+    # screen, it is a broken one. Say so rather than letting the pipeline quietly
+    # analyze whatever handful survived.
+    if len(output_df) < 30:
+        print(f"\nWARNING: only {len(output_df)} companies cleared the screen, which is "
+              f"fewer than the 30 the analysis phase expects. Consider lowering "
+              f"`min_roa` or raising `universe_limit` in specs/config.yaml.")
+
     print(f"\nSuccess! Processed {len(output_df)} valid candidates.")
     print(f"Archived run : '{timestamped_path}'")
     print(f"Latest (stable): '{OUTPUT_FILENAME}'")

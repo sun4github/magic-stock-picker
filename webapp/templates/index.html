@@ -89,6 +89,17 @@
       border-top: 1px solid var(--border); flex-wrap: wrap;
     }
     .decision:first-child { border-top: none; }
+    /* Group heading for each Buy / Watch / Avoid block in the per-run decisions list. */
+    .decision-group {
+      padding: 9px 16px; border-top: 1px solid var(--border); background: var(--bg);
+      font-size: 0.72rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .06em; color: var(--muted);
+    }
+    .decision-group:first-child { border-top: none; }
+    .decision .rank {
+      font-variant-numeric: tabular-nums; color: var(--muted);
+      font-size: 0.82rem; min-width: 34px; text-align: right;
+    }
     .decision .sym { font-weight: 700; font-size: 0.98rem; min-width: 62px; }
     .decision .co { color: var(--muted); font-size: 0.88rem; flex: 1 1 140px; }
     .decision .badge { flex-shrink: 0; }
@@ -252,7 +263,7 @@
       </div>
       <div id="runList" style="display:none;">
         <div class="run-head">
-          <span class="label">Tickers analyzed in this run (A–Z):</span>
+          <span class="label">Tickers analyzed in this run (Buy first, then by Magic Formula rank):</span>
           <span id="runSummary" class="muted"></span>
           <span class="spacer"></span>
           <a id="downloadCsv" class="btn" href="#">⬇ Download CSV</a>
@@ -528,13 +539,29 @@
       const box = $("decisions");
       box.innerHTML = "";
       const counts = { BUY: 0, WATCH: 0, AVOID: 0 };
+      // The server returns rows already ordered Buy -> Watch -> Avoid, then by Magic
+      // Formula rank. Track the verdict as we go so a divider can be dropped in
+      // wherever the group changes; the order itself is never recomputed here.
+      let lastVerdict = null;
       rows.forEach(r => {
         const v = (r.verdict || "").toUpperCase();
         if (v in counts) counts[v]++;
+        if (v !== lastVerdict) {
+          const head = document.createElement("div");
+          head.className = "decision-group";
+          const labels = { BUY: "Buy", WATCH: "Watch", AVOID: "Avoid" };
+          head.textContent = labels[v] || "Other";
+          box.appendChild(head);
+          lastVerdict = v;
+        }
         const row = document.createElement("div");
         row.className = "decision";
         const co = r.company_name && r.company_name !== r.ticker ? r.company_name : "";
+        // Rank is absent for on-demand runs and for runs recorded before it was
+        // stored; show a dash rather than an empty gap so the column stays aligned.
+        const rank = (r.magic_rank === null || r.magic_rank === undefined) ? "—" : "#" + r.magic_rank;
         row.innerHTML =
+          '<span class="rank" title="Magic Formula rank in the screen that selected this ticker">' + rank + '</span>' +
           '<span class="sym">' + r.ticker + '</span>' +
           '<span class="co">' + co + '</span>' +
           '<span class="' + verdictClass(v) + '">' + (v || "—") + '</span>';
@@ -792,6 +819,9 @@
       'return_on_capital': { title: 'Return on Capital (ROC)', badge: 'Quality Ratio', formula: '(EBIT / Capital Employed) × 100',
         def: 'Greenblatt\'s Magic Formula quality metric measuring efficiency turning tangible capital into profit.',
         example: '($120.00 / $132.00) × 100 = <strong>90.91% ROC</strong> (High ROC = Economic Moat).' },
+      'return_on_assets': { title: 'Return on Assets (ROA)', badge: 'Screening Hurdle — not the ranking', formula: '(EBIT / Total Assets) × 100',
+        def: 'NOT the same as Return on Capital, though the two are constantly confused. Both divide the same operating profit; they differ entirely in the denominator. ROC divides by capital employed — working capital plus net fixed assets, the money actually tied up in trading. ROA divides by every asset on the books, including spare cash and the goodwill from past takeovers. ROA is therefore always the lower and blunter number. Greenblatt uses ROC to RANK companies in the Magic Formula itself; ROA appears only in his step-by-step instructions for building the screen by hand, where the 25% hurdle is set deliberately high to compensate for how rough the measure is. This app follows both: ROA ≥ 25% decides who gets into the list, ROC decides the order.',
+        example: '($120.00 EBIT / $252.00 Total Assets) × 100 = <strong>47.62% ROA</strong> — against <strong>90.91% ROC</strong> on the same profit. The gap is the $40.00 cash and $80.00 goodwill that ROC ignores and ROA counts.' },
       'roic_spent': { title: 'ROIC inc. Goodwill', badge: 'Conservative Quality Ratio', formula: '(EBIT / Total Invested Capital) × 100',
         def: 'Return on capital penalizing the business for high takeover premiums paid in past M&A acquisitions.',
         example: '($120.00 / $212.00) × 100 = <strong>56.60% ROIC</strong>.' },
@@ -1022,6 +1052,10 @@
       const earningsYield = (isProfitable && enterpriseValue > 0) ? (ebit / enterpriseValue) * 100 : null;
       const returnOnCapital = (isProfitable && capitalEmployed > 0) ? (ebit / capitalEmployed) * 100 : null;
       const roicSpent = (isProfitable && totalInvestedCapital > 0) ? (ebit / totalInvestedCapital) * 100 : null;
+      // Greenblatt's step-by-step screening hurdle (ROA >= 25%), shown alongside ROC so
+      // the difference between the two is visible on the same set of numbers: identical
+      // EBIT on top, all assets vs only capital employed underneath.
+      const returnOnAssets = (isProfitable && totalAssets > 0) ? (ebit / totalAssets) * 100 : null;
       const fcfYield = s.marketCap > 0 ? (freeCashFlow / s.marketCap) * 100 : null;
       const rocRoicGap = (returnOnCapital !== null && roicSpent > 0) ? returnOnCapital / roicSpent : null;
 
@@ -1061,6 +1095,7 @@
         { label: 'Earnings Yield (EBIT / EV)', value: earningsYield, isRatio: true, isTotal: true, termKey: 'earnings_yield' },
         { label: 'Return on Capital (ROC: EBIT / Cap Employed)', value: returnOnCapital, isRatio: true, isTotal: true, termKey: 'return_on_capital' },
         { label: 'Return on Capital Spent (inc. Goodwill / M&A)', value: roicSpent, isRatio: true, termKey: 'roic_spent' },
+        { label: 'Return on Assets (ROA: EBIT / Total Assets)', value: returnOnAssets, isRatio: true, termKey: 'return_on_assets' },
         { label: 'Free Cash Flow Yield (FCF / Market Cap)', value: fcfYield, isRatio: true, termKey: 'fcf_yield' },
 
         { label: '--- QUALITY WARNING FLAGS ---', value: null, isHeader: true },

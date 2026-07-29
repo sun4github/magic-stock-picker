@@ -635,12 +635,20 @@ def _prompt_version() -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 
-def _analysis_key(ticker: str, candidate: dict) -> str:
+def _analysis_key(ticker: str, candidate: dict, skip_sale_advisor: bool = False) -> str:
     """Fingerprint of the inputs a report is produced from.
 
     Deliberately built from the BALANCE SHEET DATE rather than today's date: two
     runs a day apart against the same filing are the same analysis. A new filing
     moves the date and forces a fresh run, as does any prompt edit.
+
+    `skip_sale_advisor` is part of the fingerprint because a run without Phase C
+    produces a STRICTLY SMALLER artifact — no SALE_CASE. Without this, a cheap
+    screening run would be reused to satisfy a later full run, and
+    `db_copy_ticker_outputs` would copy a set of outputs missing the sale advisory;
+    the ticker would then appear complete in the web UI with an empty Sale tab, and
+    `--sell-check` would find no conditions to test. Keeping the two variants under
+    different keys means neither can be served in place of the other.
 
     Returns "" when the balance sheet date is unknown, which disables reuse for
     that ticker — better to pay again than to serve a report whose provenance we
@@ -648,7 +656,8 @@ def _analysis_key(ticker: str, candidate: dict) -> str:
     bs_date = (candidate or {}).get("BalanceSheetDate")
     if not bs_date:
         return ""
-    raw = f"{ticker}|{bs_date}|{_prompt_version()}"
+    variant = "|no-phase-c" if skip_sale_advisor else ""
+    raw = f"{ticker}|{bs_date}|{_prompt_version()}{variant}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
@@ -870,7 +879,8 @@ def _finalize_run(run_id: str, usage: dict, run_label: str, status: str = "COMPL
 
 async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
                               sec_data: str, metrics_data: str, screen_context: str,
-                              quarterly_data: str = "", verified_figures: str = ""):
+                              quarterly_data: str = "", verified_figures: str = "",
+                              skip_sale_advisor: bool = False):
     """Run the analysis graph for one ticker. Returns (state, usage).
 
     The four roles are run as SEPARATE runners over ONE shared session rather than
@@ -911,7 +921,12 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
     )
 
     usage = _new_usage()
-    for agent in PIPELINE_AGENTS:
+    # Phase C (the sale advisor) is the last role and nothing downstream in the graph
+    # reads its output, so dropping it is a clean truncation rather than a hole in the
+    # middle. It is ~1/4 of the per-ticker cost.
+    agents = [a for a in PIPELINE_AGENTS if a is not sale_advisor_agent] \
+        if skip_sale_advisor else PIPELINE_AGENTS
+    for agent in agents:
         # Tokens are attributed per ROLE as well as per ticker. Without this split a
         # regression in one agent's prompt is invisible: the ticker total moves and
         # there is nothing to say which of the four roles moved it. It also makes the
@@ -958,7 +973,8 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
 
 def run_pipeline(run_id: str, ticker: str, company_name: str, sec_data: str,
                  metrics_data: str, screen_context: str,
-                 quarterly_data: str = "", verified_figures: str = ""):
+                 quarterly_data: str = "", verified_figures: str = "",
+                 skip_sale_advisor: bool = False):
     """Synchronous wrapper around the Phase-B graph. Returns (state, usage).
 
     Rate-limit retries happen INSIDE `_run_pipeline_async`, per agent — there is
@@ -970,7 +986,7 @@ def run_pipeline(run_id: str, ticker: str, company_name: str, sec_data: str,
     """
     state, usage = asyncio.run(_run_pipeline_async(
         run_id, ticker, company_name, sec_data, metrics_data, screen_context,
-        quarterly_data, verified_figures,
+        quarterly_data, verified_figures, skip_sale_advisor,
     ))
     time.sleep(INTER_CALL_DELAY_SECONDS)  # gentle throttle between tickers
     return state, usage
@@ -1076,7 +1092,8 @@ def _extract_verdict(report_text: str) -> str:
 
 
 def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: str = "",
-                   candidate: dict = None, force: bool = False) -> dict:
+                   candidate: dict = None, force: bool = False,
+                   skip_sale_advisor: bool = False) -> dict:
     """Run the Phase-B agent sequence for one ticker and persist its
     outputs and final report. Returns the ticker's token-usage dict (zero usage
     if the pipeline failed).
@@ -1094,10 +1111,15 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     Assumes the parent pipeline_runs row for `run_id` already exists (the
     agent_outputs/final_reports tables have a FK onto it).
     """
+    # Reconcile the two candidate shapes (screener CSV raw ratios vs single-ticker
+    # percent strings) before anything reads them. Does not touch BalanceSheetDate,
+    # so the reuse fingerprint below is unaffected.
+    candidate = _normalize_candidate(candidate)
+
     # Reuse check FIRST, before any billed work. The fingerprint covers the ticker,
     # the balance-sheet date its figures came from, and the prompt version, so a new
     # filing or any prompt edit forces a fresh analysis.
-    analysis_key = _analysis_key(ticker, candidate)
+    analysis_key = _analysis_key(ticker, candidate, skip_sale_advisor)
     if REUSE_ENABLED and not force and analysis_key:
         try:
             prior = json.loads(db_find_reusable_report(ticker, analysis_key, REUSE_MAX_AGE_HOURS))
@@ -1119,7 +1141,8 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
                 f"{ticker} copy reused outputs",
             )
             _check_db(
-                db_store_ticker_run(run_id, ticker, company_name or ticker, prior["verdict"]),
+                db_store_ticker_run(run_id, ticker, company_name or ticker, prior["verdict"],
+                                    _present((candidate or {}).get("Final_Rank"))),
                 f"{ticker} ticker_run (reused)",
             )
             report_path = os.path.join("reports", f"{ticker}_Final_Report_{prior['verdict'].title()}.md")
@@ -1150,11 +1173,12 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
             f"re-run the screener to regenerate {OUTPUT_FILENAME} with the full columns."
         )
 
-    logger.info(f"[{ticker}] Running bear -> bull -> analyst graph...")
+    graph_desc = "bear -> bull -> analyst" if skip_sale_advisor else "bear -> bull -> analyst -> sale advisor"
+    logger.info(f"[{ticker}] Running {graph_desc} graph...")
     try:
         state, usage = run_pipeline(
             run_id, ticker, company_name, sec_data, metrics_data, screen_context,
-            quarterly_data, verified_figures,
+            quarterly_data, verified_figures, skip_sale_advisor,
         )
     except Exception as e:
         logger.error(f"[{ticker}] Skipping after pipeline failure: {e}")
@@ -1184,6 +1208,11 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
         sale_path = os.path.join("reports", f"{ticker}_Sale_Advisory.md")
         with open(sale_path, "w", encoding='utf-8') as f:
             f.write(sale_stored)
+    elif skip_sale_advisor:
+        # Deliberate omission, not a failure. Said at INFO so a --skip-sale-advisor
+        # run does not fill the log with warnings that look like something broke.
+        logger.info(f"[{ticker}] Phase C skipped (--skip-sale-advisor): no SALE_CASE written. "
+                    f"`--sell-check {ticker}` will have no conditions from this run to test.")
     else:
         logger.warning(f"[{ticker}] Sale advisor produced no output; skipping SALE_CASE persistence.")
 
@@ -1232,8 +1261,13 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     # Store the fingerprint alongside the report so a later run can reuse it.
     _check_db(db_store_final_report(run_id, ticker, verdict, report_stored, analysis_key),
               f"{ticker} final report")
-    # Index this run under the ticker for the web UI.
-    _check_db(db_store_ticker_run(run_id, ticker, company_name or ticker, verdict), f"{ticker} ticker_run")
+    # Index this run under the ticker for the web UI. The screen rank rides along so
+    # the run view can order by conviction; None for on-demand single-ticker runs.
+    _check_db(
+        db_store_ticker_run(run_id, ticker, company_name or ticker, verdict,
+                            _present((candidate or {}).get("Final_Rank"))),
+        f"{ticker} ticker_run",
+    )
 
     report_path = os.path.join("reports", f"{ticker}_Final_Report_{verdict.title()}.md")
     with open(report_path, "w", encoding='utf-8') as f:
@@ -1331,9 +1365,10 @@ def _format_verified_figures(candidate: dict) -> str:
     # Greenblatt ROC alone for an acquisition-built company reliably produces the
     # claim that it is an elite-efficiency business, which the goodwill-inclusive
     # figure usually contradicts by an order of magnitude.
-    roc_pct = candidate.get("ROC_Pct")
-    roic_pct = candidate.get("ROIC_InclGoodwill_Pct")
-    intang_pct = candidate.get("IntangiblesShareOfAssets_Pct")
+    roc_pct = _present(candidate.get("ROC_Pct"))
+    roic_pct = _present(candidate.get("ROIC_InclGoodwill_Pct"))
+    intang_pct = _present(candidate.get("IntangiblesShareOfAssets_Pct"))
+    roa_pct_vf = _present(candidate.get("ROA_Pct"))
     lines += [
         "",
         "Two different return-on-capital measures — cite BOTH, never the first alone:",
@@ -1342,6 +1377,39 @@ def _format_verified_figures(candidate: dict) -> str:
         f"EBIT / (equity + debt - cash)): {roic_pct or 'Not available'}",
         f"- Goodwill and intangibles as a share of total assets: {intang_pct or 'Not available'}",
     ]
+    # When the companion cannot be computed, the mandate above would otherwise leave
+    # the agent with the headline ROC and nothing to weigh it against — on precisely
+    # the companies (negative equity from heavy buybacks) whose headline is most
+    # distorted. Substitute ROA explicitly, labelled as what it is.
+    if not roic_pct:
+        reason = _present(candidate.get("ROIC_Unavailable_Reason"))
+        equity_raw = _present(candidate.get("TotalEquity"))
+        # Same inference as the reader-facing section: the explicit reason is absent
+        # on CSVs written before that column existed, but negative equity is visible.
+        if reason is None and isinstance(equity_raw, (int, float)) and equity_raw < 0:
+            reason = "negative_invested_capital"
+        if reason == "negative_invested_capital":
+            lines.append(
+                "- NOTE: ROIC including goodwill CANNOT be computed for this company. It "
+                "has bought back more stock than its retained earnings cover, so "
+                "shareholders' equity is negative and invested capital (equity + debt - "
+                "cash) is not positive — there is no denominator to divide by. This is "
+                "NOT a data gap and must not be reported as one."
+            )
+        elif reason:
+            lines.append(
+                "- NOTE: ROIC including goodwill could not be computed for this company "
+                "from the available balance-sheet data."
+            )
+        if roa_pct_vf:
+            lines.append(
+                f"- USE INSTEAD as the conservative counterweight — Return on Assets "
+                f"(EBIT / TOTAL assets, which INCLUDES goodwill, intangibles and cash): "
+                f"{roa_pct_vf}. Cite this alongside the Magic Formula ROC. Do not call it "
+                f"ROIC — it is a different, blunter measure — but it serves the same "
+                f"purpose here: the Magic Formula ROC excludes the purchase price of past "
+                f"acquisitions, and this figure does not."
+            )
     if intang_pct:
         lines.append(
             "  A high share here means the company was largely assembled by "
@@ -1654,6 +1722,63 @@ def _format_reconciliation_section(findings: list) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _present(value):
+    """Return `value` if it is a real, displayable figure, else None.
+
+    Candidate dicts reach this module two ways: straight from the screener (missing
+    fields are None) and via pandas in --from-csv mode (missing fields are NaN, which
+    is TRUTHY and formats as the string 'nan'). Everything rendered into a report has
+    to survive both paths, so normalise here rather than at each call site."""
+    if value is None:
+        return None
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    if isinstance(value, str) and value.strip().lower() in ("", "nan", "none"):
+        return None
+    return value
+
+
+# Ratio fields the CSV stores raw, mapped to the percent-string key the report and
+# VERIFIED_FIGURES blocks actually read, with the decimal places each is shown at.
+_RATIO_TO_PCT_FIELD = {
+    "ROIC_InclGoodwill": ("ROIC_InclGoodwill_Pct", 2),
+    "IntangiblesShareOfAssets": ("IntangiblesShareOfAssets_Pct", 1),
+    "ROA": ("ROA_Pct", 2),
+    "ROA_NetIncome": ("ROA_NetIncome_Pct", 2),
+}
+
+
+def _normalize_candidate(candidate: dict) -> dict:
+    """Fill in the `*_Pct` display fields from their raw ratio columns.
+
+    Candidates reach the report two ways and they do NOT agree on key names. The
+    single-ticker path (`compute_ticker_magic_metrics`) emits pre-formatted percent
+    strings like `ROIC_InclGoodwill_Pct`; the screener CSV stores the same figures as
+    raw ratios under `ROIC_InclGoodwill`. Both report formatters only ever read the
+    `_Pct` form.
+
+    The consequence was silent and total: in the full-pipeline and `--from-csv` modes
+    — every batch run — `ROIC_InclGoodwill_Pct` was simply absent, so the
+    goodwill-inclusive companion was skipped in both the reader-facing '## Magic
+    Formula Metrics' section AND the agent-facing VERIFIED_FIGURES block. The §2.F
+    guard that exists specifically to stop a four-digit ROC being read as operating
+    efficiency was therefore doing nothing on batch runs, which is where it matters.
+
+    Normalising here rather than renaming the CSV columns keeps old archived CSVs
+    readable — a `--from-csv` run against a previously archived file still works.
+    """
+    if not candidate:
+        return candidate or {}
+    out = dict(candidate)
+    for raw_key, (pct_key, places) in _RATIO_TO_PCT_FIELD.items():
+        if _present(out.get(pct_key)) is not None:
+            continue  # already supplied in display form
+        raw = _present(out.get(raw_key))
+        if isinstance(raw, (int, float)):
+            out[pct_key] = f"{round(float(raw) * 100, places)}%"
+    return out
+
+
 def _format_magic_formula_section(candidate: dict) -> str:
     """Deterministic '## Magic Formula Metrics' section, injected into every
     final report regardless of what the LLM chooses to restate. Built directly
@@ -1708,8 +1833,8 @@ def _format_magic_formula_section(candidate: dict) -> str:
     # the two figures is the single most misread number in these reports: a very
     # large Magic Formula ROC next to a modest goodwill-inclusive ROIC means the
     # company bought its earnings rather than generating them from a small asset base.
-    roic_pct = candidate.get("ROIC_InclGoodwill_Pct")
-    intangibles_pct = candidate.get("IntangiblesShareOfAssets_Pct")
+    roic_pct = _present(candidate.get("ROIC_InclGoodwill_Pct"))
+    intangibles_pct = _present(candidate.get("IntangiblesShareOfAssets_Pct"))
     invested_capital = format_money(candidate.get("InvestedCapital"))
     if roic_pct:
         lines += [
@@ -1729,6 +1854,115 @@ def _format_magic_formula_section(candidate: dict) -> str:
                 f"between the two figures above, and the more weight the second deserves."
             )
         lines.append("")
+    else:
+        # The companion could not be computed. Say so, say WHY, and put a conservative
+        # figure in its place — otherwise the reader is left with a headline return in
+        # the hundreds or thousands of percent and nothing to weigh it against, on
+        # exactly the companies where that headline is least trustworthy.
+        reason = _present(candidate.get("ROIC_Unavailable_Reason"))
+        roa_for_fallback = _present(candidate.get("ROA_Pct"))
+        equity_raw = _present(candidate.get("TotalEquity"))
+        total_equity_fmt = format_money(equity_raw)
+
+        # The paragraph above ends by promising "the companion figure below". That
+        # promise must be answered EVERY time, even when we cannot say why the figure
+        # is missing — otherwise the section reads as though a number were simply
+        # dropped, and the substitute below becomes an "instead" with no antecedent.
+        lines.append(
+            "- **Return on capital actually spent (including takeover costs):** "
+            "cannot be calculated for this company."
+        )
+        # Infer the cause when the explicit reason is absent — it is missing for CSVs
+        # written before that column existed, and negative equity is visible from the
+        # figures we already carry. Better to explain from evidence than stay silent.
+        if reason is None and isinstance(equity_raw, (int, float)) and equity_raw < 0:
+            reason = "negative_invested_capital"
+
+        if reason == "negative_invested_capital":
+            lines += [
+                f"  - Why: the company has returned more money to shareholders — through "
+                f"share buybacks — than it has accumulated in retained profits, so its "
+                f"balance-sheet equity is negative ({total_equity_fmt}). Once you add its "
+                f"debts and subtract its cash, the total capital invested in it comes out "
+                f"at or below zero, and you cannot work out a return on a negative amount.",
+                "  - This is a fact about how the company is financed, not a gap in the "
+                "data. It is common in mature businesses that buy back stock heavily.",
+            ]
+        else:
+            lines.append(
+                "  - Why: the money invested in this company (shareholders' funds plus "
+                "borrowings, less spare cash) does not come out as a positive figure on "
+                "the latest balance sheet, so there is nothing to divide the profit by. "
+                "This is a feature of how the company is financed, not a missing number."
+            )
+        if roa_for_fallback:
+            lines += [
+                f"  - **Use this instead as the conservative check: return on assets of "
+                f"{roa_for_fallback}** — operating profit measured against *everything* "
+                f"the company owns, including spare cash and the goodwill from past "
+                f"takeovers. It is a blunter measure than the one above and is not the "
+                f"same thing, but it serves the same purpose: the headline return on "
+                f"capital leaves those items out, and this figure does not. Where the two "
+                f"are far apart, trust this one.",
+            ]
+            if intangibles_pct:
+                lines.append(
+                    f"  - Goodwill and acquired intangibles are {intangibles_pct} of this "
+                    f"company's total assets."
+                )
+        lines.append("")
+    # --- Greenblatt's step-by-step gate figures ---
+    # These are NOT the ranking metrics, and the section says so, because "Return on
+    # Assets" and "Return on Capital" are the single easiest pair to conflate in these
+    # reports: same operating profit on top, very different denominators underneath.
+    # `_present` matters here specifically: in --from-csv mode these arrive via
+    # pandas, so an absent value is NaN, and NaN is truthy — a bare `if roa_pct`
+    # would happily print "Return on assets: nan".
+    roa_pct = _present(candidate.get("ROA_Pct"))
+    roa_ni_pct = _present(candidate.get("ROA_NetIncome_Pct"))
+    pe_ratio = _present(candidate.get("PE_Ratio"))
+    if roa_pct or pe_ratio:
+        lines += [
+            "### The screening hurdles this company had to clear",
+            "",
+            "Greenblatt's step-by-step instructions for building the screen by hand use "
+            "two rougher measures as entry conditions, because they are what an ordinary "
+            "stock screener will give you. They decide who gets INTO the list; the two "
+            "ratios above decide the order.",
+            "",
+        ]
+        if roa_pct:
+            lines.append(f"- **Return on assets:** {roa_pct} (operating profit divided by "
+                         f"every asset the company owns).")
+            lines.append(
+                "  - Not the same thing as return on capital above. Both start from the "
+                "same operating profit, but return on capital divides by only the money "
+                "actually tied up in trading — equipment and working funds — while return "
+                "on assets divides by EVERYTHING on the books, including spare cash and "
+                "the goodwill left over from past takeovers. So return on assets is always "
+                "the lower and blunter of the two, and it is the one Greenblatt's manual "
+                "screen filters on purely because a free screener will show it to you. "
+                "The hurdle is deliberately high — 25% — to make up for how rough it is."
+            )
+            if roa_ni_pct:
+                lines.append(
+                    f"  - On the stricter after-tax measure (bottom-line profit divided by "
+                    f"total assets) the same company scores {roa_ni_pct}."
+                )
+        if pe_ratio:
+            lines.append(
+                f"- **Price-to-earnings ratio:** {pe_ratio} (the company's market value "
+                f"divided by its bottom-line profit)."
+            )
+            lines.append(
+                "  - The screen throws out anything below 5. That sounds backwards — a low "
+                "price-to-earnings ratio is supposed to mean cheap — but a ratio that low "
+                "almost always means a one-off event flattered the profit figure, such as "
+                "selling a division or winning a lawsuit. That profit will not repeat, so "
+                "the bargain is an illusion."
+            )
+        lines.append("")
+
     lines += [
         "### The numbers behind the ratios",
         f"- Operating profit (EBIT — earnings before interest and taxes; profit from the "
@@ -1772,7 +2006,8 @@ def _format_magic_formula_section(candidate: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _run_phase_b(top_candidates: list, source_label: str, force: bool = False):
+def _run_phase_b(top_candidates: list, source_label: str, force: bool = False,
+                 skip_sale_advisor: bool = False):
     """Create a pipeline run and analyze each candidate through Phase B.
     Shared by the full-pipeline and CSV modes."""
     run_id = str(uuid.uuid4())
@@ -1806,7 +2041,8 @@ def _run_phase_b(top_candidates: list, source_label: str, force: bool = False):
         logger.info(f"--- Processing {idx+1}/{len(top_candidates)}: {ticker} ({company_name}) ---")
         screen_context = _format_screen_context(candidate)
         _merge_usage(run_usage,
-                     analyze_ticker(run_id, ticker, company_name, screen_context, candidate, force))
+                     analyze_ticker(run_id, ticker, company_name, screen_context, candidate,
+                                    force, skip_sale_advisor))
         completed += 1
 
     if halted:
@@ -1818,7 +2054,7 @@ def _run_phase_b(top_candidates: list, source_label: str, force: bool = False):
                   status="BUDGET_EXCEEDED" if halted else "COMPLETED")
 
 
-def run_orchestrator(force: bool = False):
+def run_orchestrator(force: bool = False, skip_sale_advisor: bool = False):
     """Full pipeline: Phase A screener -> Phase B analysis over the Top N."""
     # Phase A: Screener. We invoke the screener tool directly (deterministic JSON);
     # this also writes the rankings CSV that --from-csv can reuse later.
@@ -1831,10 +2067,57 @@ def run_orchestrator(force: bool = False):
 
     top_candidates = top_candidates[:top_n]
     logger.info(f"Phase A Complete. Retrieved {len(top_candidates)} candidates.")
-    _run_phase_b(top_candidates, "Phase A screener", force)
+    _run_phase_b(top_candidates, "Phase A screener", force, skip_sale_advisor)
 
 
-def run_from_csv(csv_path: str = None, force: bool = False):
+def run_screen_only():
+    """Phase A ONLY: run the screener, write the rankings CSV, and stop.
+
+    The inverse of `--from-csv`. No LLM calls, no database writes, no pipeline_runs
+    row — so nothing appears in the web UI and nothing is billed. FMP is
+    subscription-metered rather than per-call, so this mode costs time and nothing
+    else, which makes it the one to run on a watching cadence: refresh the rankings
+    as often as you like, and pay for Phase B/C only in the periods you actually act
+    on the list (`python main.py --from-csv`).
+    """
+    logger.info("Executing Phase A ONLY (screen-only): no agents, no database writes.")
+    try:
+        candidates = json.loads(run_magic_formula_screener())
+    except Exception as e:
+        logger.error(f"Failed to get screener results: {e}")
+        return
+
+    if not candidates:
+        logger.error("Screener returned no candidates. Nothing written.")
+        return
+
+    logger.info(f"Phase A complete: {len(candidates)} candidates ranked. "
+                f"Rankings CSV: {OUTPUT_FILENAME}")
+    # Phase B analyzes the top N; if the gates left fewer than that, the operator
+    # needs to know BEFORE scheduling a paid run, not after it produces a short list.
+    if len(candidates) < top_n:
+        logger.warning(
+            f"Only {len(candidates)} candidates cleared the screen, fewer than the "
+            f"top_n_candidates={top_n} Phase B expects. Review the eligibility gates "
+            f"under `screening_parameters:` in specs/config.yaml (min_roa is the "
+            f"strictest by a wide margin)."
+        )
+
+    header = f"{'Rank':>4}  {'Symbol':<8} {'ROC':>10} {'EarnYld':>9} {'ROA':>9} {'P/E':>7}"
+    logger.info(f"Top {min(top_n, len(candidates))} candidates:")
+    logger.info(header)
+    for c in candidates[:top_n]:
+        pe = c.get("PE_Ratio")
+        logger.info(
+            f"{str(c.get('Final_Rank', '')):>4}  {str(c.get('Symbol', '')):<8} "
+            f"{str(c.get('ROC_Pct', '')):>10} {str(c.get('EY_Pct', '')):>9} "
+            f"{str(c.get('ROA_Pct', '') or '-'):>9} "
+            f"{(f'{pe:.1f}' if isinstance(pe, (int, float)) else '-'):>7}"
+        )
+    logger.info("Screen-only run finished. To analyze these, run: python main.py --from-csv")
+
+
+def run_from_csv(csv_path: str = None, force: bool = False, skip_sale_advisor: bool = False):
     """Skip Phase A: load the screener's rankings CSV from a previous run and run
     Phase B over the top N. Phase A (the full FMP universe scan) is slow, so this
     reuses its output when you just want to (re)run the analysis."""
@@ -1854,10 +2137,11 @@ def run_from_csv(csv_path: str = None, force: bool = False):
         return
 
     logger.info(f"Loaded top {len(top_candidates)} candidates from CSV.")
-    _run_phase_b(top_candidates, f"CSV '{csv_path}'", force)
+    _run_phase_b(top_candidates, f"CSV '{csv_path}'", force, skip_sale_advisor)
 
 
-def run_single_ticker(ticker: str, company_name: str = None, force: bool = False):
+def run_single_ticker(ticker: str, company_name: str = None, force: bool = False,
+                      skip_sale_advisor: bool = False):
     """On-demand Phase B: run the skeptical analysis for a single arbitrary
     ticker, bypassing Phase A. Logged as its own one-company pipeline run."""
     ticker = ticker.strip().upper()
@@ -1901,7 +2185,8 @@ def run_single_ticker(ticker: str, company_name: str = None, force: bool = False
         candidate.setdefault("CompanyName", company_name)
         screen_context = _format_screen_context(candidate)
 
-    usage = analyze_ticker(run_id, ticker, company_name, screen_context, candidate, force)
+    usage = analyze_ticker(run_id, ticker, company_name, screen_context, candidate, force,
+                           skip_sale_advisor)
 
     _finalize_run(run_id, usage, "On-Demand Run")
 
@@ -1982,11 +2267,21 @@ if __name__ == "__main__":
         epilog=(
             "Modes:\n"
             "  python main.py                     full pipeline (Phase A screener + Phase B + Phase C)\n"
+            "  python main.py --screen-only       Phase A ONLY: refresh the rankings CSV, no agents, no cost\n"
             "  python main.py --from-csv          skip Phase A; run Phase B/C on top N from the rankings CSV\n"
             "  python main.py --from-csv PATH     same, from a specific CSV file\n"
+            "  python main.py --from-csv --top-n 12   analyze only the top 12 (cheaper; ~$0.37/ticker)\n"
             "  python main.py TICKER [Company]    on-demand Phase B/C for one ticker\n"
             "  python main.py --sell-check TICKER [Company]            test if TICKER's latest sale conditions are now met (Sell/Hold)\n"
-            "  python main.py --sell-check TICKER --run RUN_ID         same, but against a SPECIFIC run's conditions (the run you bought under)"
+            "  python main.py --sell-check TICKER --run RUN_ID         same, but against a SPECIFIC run's conditions (the run you bought under)\n"
+            "\n"
+            "Phase A is subscription-metered (time only); Phase B/C is the billed part.\n"
+            "--screen-only and --from-csv are inverses, so the two can run on different\n"
+            "cadences: screen often, analyze only when you intend to act on the list.\n"
+            "--skip-sale-advisor drops Phase C from any Phase B run (~1/4 of the cost).\n"
+            "Re-running --from-csv with a larger --top-n within the reuse window bills\n"
+            "only the NEW tickers: the ones already analyzed are reused for ~$0, so you\n"
+            "can start shallow and deepen without paying twice for the same work."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1995,6 +2290,19 @@ if __name__ == "__main__":
     parser.add_argument(
         "--from-csv", nargs="?", const=OUTPUT_FILENAME, metavar="PATH", default=None,
         help=f"Skip Phase A; read candidates from the screener CSV (default: {OUTPUT_FILENAME}) and run Phase B/C on the top N",
+    )
+    parser.add_argument(
+        "--top-n", type=int, metavar="N", default=None,
+        help=f"How many ranked candidates to analyze this run, overriding "
+             f"agents.screener_agent.top_n_candidates (currently {top_n})",
+    )
+    parser.add_argument(
+        "--screen-only", action="store_true",
+        help="Run Phase A only: refresh the rankings CSV and stop. No agents, no DB writes, no cost",
+    )
+    parser.add_argument(
+        "--skip-sale-advisor", action="store_true",
+        help="Run Phase B without Phase C (no sale advisory / SALE_CASE), saving ~1/4 of the per-ticker cost",
     )
     parser.add_argument(
         "--sell-check", action="store_true",
@@ -2018,16 +2326,47 @@ if __name__ == "__main__":
         BUDGET_ENABLED = False
         logger.warning("Budget guard DISABLED for this run (--no-budget).")
 
+    if args.top_n is not None:
+        if args.top_n < 1:
+            parser.error("--top-n must be at least 1")
+        # Rebinding the module global, matching how --no-budget overrides its config
+        # value above. Depth is the main cost lever (~$0.37/ticker), and it is the one
+        # setting that legitimately changes run to run, so it belongs on the command
+        # line rather than requiring a config edit before every run.
+        top_n = args.top_n
+        logger.info(f"Analyzing the top {top_n} candidates this run (--top-n override).")
+
     if args.run and not args.sell_check:
         parser.error("--run is only valid together with --sell-check")
 
-    if args.sell_check:
+    # --screen-only never reaches Phase B, so any flag that only shapes Phase B is a
+    # sign the command was not the one intended. Fail loudly rather than silently
+    # ignoring it and leaving the operator to think Phase C ran (or didn't).
+    if args.screen_only:
+        conflicting = [
+            name for name, given in (
+                ("--from-csv", args.from_csv), ("--sell-check", args.sell_check),
+                ("--skip-sale-advisor", args.skip_sale_advisor), ("--force", args.force),
+                ("TICKER", args.ticker),
+            ) if given
+        ]
+        if conflicting:
+            parser.error(
+                f"--screen-only runs Phase A alone and cannot be combined with: "
+                f"{', '.join(conflicting)}"
+            )
+
+    if args.screen_only:
+        run_screen_only()
+    elif args.sell_check:
         if not args.ticker:
             parser.error("--sell-check requires a TICKER (e.g. python main.py --sell-check CROX)")
+        if args.skip_sale_advisor:
+            parser.error("--skip-sale-advisor is not valid with --sell-check (it runs no Phase C)")
         run_sell_check(args.ticker, args.company, args.run)
     elif args.from_csv:
-        run_from_csv(args.from_csv, args.force)
+        run_from_csv(args.from_csv, args.force, args.skip_sale_advisor)
     elif args.ticker:
-        run_single_ticker(args.ticker, args.company, args.force)
+        run_single_ticker(args.ticker, args.company, args.force, args.skip_sale_advisor)
     else:
-        run_orchestrator(args.force)
+        run_orchestrator(args.force, args.skip_sale_advisor)
