@@ -23,12 +23,16 @@ It offers **two ways to browse the same reports**, switchable at the top of the 
 1. Pick a **pipeline run** — sorted newest-first, with the run date and ticker
    count shown. Only **multi-ticker** runs appear here (value-discovery screens);
    single-ticker on-demand one-offs are excluded — browse those under "by ticker".
-2. See **every ticker analyzed in that run**, listed A–Z, each with its
-   **Buy / Watch / Avoid** recommendation badge and a summary tally.
+2. See **every ticker analyzed in that run**, grouped **Buy first, then Watch,
+   then Avoid**, and ordered by **Magic Formula rank** within each group (best
+   rank first) — each with its recommendation badge, its rank, and a summary
+   tally. Runs recorded before ranks were stored show `—` and fall back to
+   alphabetical order within their group.
 3. Click **View reports** on any ticker to open its Bear / Bull / Sale Advisory /
    Final reports for that specific run (a "Back to run" link returns to the list).
-4. **Download CSV** — all tickers and their recommendations for the run
-   (`Ticker,Company,Recommendation`) to the viewing device.
+4. **Download CSV** — all tickers, recommendations and ranks for the run
+   (`Ticker,Company,Recommendation,MagicFormulaRank`), in the same order, to the
+   viewing device.
 
 Data comes from the `ticker_runs`, `agent_outputs`, and `final_reports` tables —
 the app is read-only and never modifies the database. The "by pipeline run" view

@@ -9,9 +9,17 @@ names the specific business events that would break the thesis.
 
 ## What it does
 
-**Phase A — Screener.** Scans the FMP stock universe and ranks companies by the
-Magic Formula (Return on Capital × Earnings Yield), producing a ranked candidate
-list (also written to a CSV for reuse).
+**Phase A — Screener.** Scans the FMP stock universe, applies Greenblatt's
+step-by-step eligibility gates — no financials, utilities, funds/REITs or foreign
+(ADR) issuers; **Return on Assets ≥ 25%**; **P/E ≥ 5**; nothing that announced
+earnings in the **last 7 days** — then ranks the survivors by the Magic Formula
+itself (Return on Capital × Earnings Yield), producing a ranked candidate list
+(also written to a CSV for reuse).
+
+Note that Return on **Assets** and Return on **Capital** are different measures and
+both are used deliberately: ROA divides operating profit by *all* assets and only
+decides who enters the list; ROC divides by *capital employed* and decides the
+order. See §2.H of `src/specs/agent_architecture.md`.
 
 **Phase B — Balanced Decomposer Analysis.** For each candidate (or a single
 on-demand ticker):
@@ -99,8 +107,15 @@ See [`src/specs/agent_architecture.md`](src/specs/agent_architecture.md) and
 
 4. **Review `src/specs/config.yaml`** for tunable parameters: how many top
    candidates to analyze (`top_n_candidates`), screener filters (minimum market
-   cap, universe size, excluded sectors), LLM/Tavily pricing used for cost
-   estimates, and rate limits.
+   cap, universe size, excluded sectors and industries), the Greenblatt
+   eligibility gates (`min_roa`, `roa_basis`, `min_pe`,
+   `exclude_recent_earnings_days`, `exclude_adr` — set any to `null` to disable
+   it), LLM/Tavily pricing used for cost estimates, and rate limits.
+
+   The 25% ROA hurdle is severe by design: on a sampled run it eliminated ~95% of
+   the universe on its own. That is Greenblatt's intent, but if it ever leaves
+   fewer than 30 survivors the screener prints a warning, because Phase B expects
+   a top 30 — lower `min_roa` or raise `universe_limit` if you see it.
 
 ## Running
 
@@ -116,12 +131,44 @@ cd src
 python main.py
 ```
 
+**Screen only (Phase A alone)** — refresh the rankings CSV and stop. No agents, no
+database writes, nothing billed. FMP is subscription-metered, so this costs time
+only.
+```bash
+python main.py --screen-only
+```
+
 **Skip the screener, reuse the last rankings CSV** — analyze the top N from a
 previous screener run's output, without re-running Phase A.
 ```bash
 python main.py --from-csv
 python main.py --from-csv path/to/other_rankings.csv   # explicit CSV path
 ```
+
+`--screen-only` and `--from-csv` are exact inverses, so **screening and analysis can
+run on different cadences**: refresh the rankings as often as you like for free, and
+pay for Phase B/C only in the periods you actually intend to act on the list. The two
+together do the same work as a bare `python main.py`.
+
+**Control how deep to analyze** — `--top-n` overrides `top_n_candidates` for one run.
+Depth is the main cost lever, at roughly $0.37/ticker.
+```bash
+python main.py --from-csv --top-n 12
+```
+Because reports are reused within `reuse.max_age_hours` (copying stored embeddings
+rather than regenerating them), **re-running with a larger `--top-n` bills only the
+new tickers** — the already-analyzed ones come back for ~$0. So you can start shallow
+and deepen if a run doesn't surface enough Buy verdicts, without paying twice.
+
+**Drop Phase C** — run the bear/bull/analyst graph without the sale advisor, saving
+roughly a quarter of the per-ticker cost. No `SALE_CASE` is written, so
+`--sell-check` will have no conditions from such a run to test. Combines with any
+Phase B mode.
+```bash
+python main.py --from-csv --skip-sale-advisor
+```
+Reports produced with and without Phase C are fingerprinted separately, so a cheap
+Phase-C-less run is never reused to satisfy a later full one.
 
 **On-demand single ticker** — bypasses the screener entirely. Magic Formula
 ROC/Earnings Yield are computed for just that ticker so the Bull Agent still has
@@ -157,6 +204,109 @@ produced a `SALE_CASE` for the ticker.
 > purchased under — so you evaluate the conditions you actually committed to rather
 > than a fresh `SALE_CASE` anchored to a thesis you never acted on. The `RUN_ID` is
 > shown in the run logs. See [`src/specs/agent_architecture.md`](src/specs/agent_architecture.md) §8.D.
+
+## Running the book's strategy on a 2-month cycle
+
+Greenblatt's method is a **basket** strategy: it works across many positions held for
+about a year, not on any single pick. His stated approach is to buy 5–7 top-ranked
+names every 2–3 months, building to 20–30 positions over 9–12 months, then roll each
+holding at the one-year mark. The schedule below applies that to this tool.
+
+> Nothing here is investment advice. It is the book's method expressed as a run
+> schedule; position sizing, and every buy and sell decision, is yours.
+
+### Why 2 months, and not monthly
+
+The ranking has two halves that move at very different speeds:
+
+- **ROC rank** comes from filings, so it changes **once a quarter**. Between filings
+  this half of the score is frozen.
+- **EY rank** is EBIT ÷ enterprise value, and EV moves with the share price, so it
+  drifts **daily**.
+
+Run monthly and two runs in three show you a list whose quality half has not moved —
+you would be picking from essentially one quarter's ordering three times over, which
+concentrates you into whatever ranked highest at that single filing date. Two months
+is the shortest interval where each list has had a fresh filing wave at least partly
+flow through.
+
+### When in the calendar
+
+Time runs to the **back half** of each quarter's filing cycle. Filings cluster in the
+4–6 weeks after each quarter end, and the earnings-blackout gate drops anything that
+reported in the last 7 days — so running at the peak costs you candidates. Measured on
+the 2026-07-28 run, at peak Q2 season that gate removed **28% of survivors** (16 of
+58). Mid-quarter it removes far fewer.
+
+A workable schedule — six runs, each clear of the filing peak:
+
+| Run | Timing | Why |
+| :--- | :--- | :--- |
+| 1 | late **February** | Q4/annual filings absorbed |
+| 2 | late **April** | after the Q1 wave |
+| 3 | late **June** | quiet stretch before Q2 reporting |
+| 4 | late **August** | after the Q2 wave |
+| 5 | late **October** | after the Q3 wave |
+| 6 | late **December** | quiet stretch before Q4 reporting |
+
+### The 36-stock math
+
+**6 names per run × 6 runs = 36 positions** by the end of year one. Greenblatt's own
+figure is 5–7 per run and 20–30 in total; 6 per run reaches the higher end of that
+range and matches the once-a-year roll — each purchase hits its one-year mark in the
+same slot two years running, so the cycle self-perpetuates:
+
+```
+Year 1   build:  Feb +6  Apr +6  Jun +6  Aug +6  Oct +6  Dec +6   -> 36 held
+Year 2+  roll :  each run, the batch bought 12 months earlier reaches one year,
+                 and a new batch of 6 replaces it                 -> ~36 steady state
+```
+
+Analyzing 30 candidates per run gives room to find 6 Buy verdicts. Buy rates on past
+runs of this pipeline have ranged widely (7%–50%, ~31% average), so 30 is a deliberate
+cushion rather than a precise fit — at 31% it yields ~9 Buys.
+
+### What to run, each time
+
+```bash
+cd src
+python main.py
+```
+
+That is Phase A + B + C: roughly 55 minutes and about **$11** (6 runs ≈ $66/year).
+Then read the results:
+
+```bash
+cd ../webapp
+python app.py     # http://localhost:8000
+```
+
+Open **By pipeline run** → newest run. Buy verdicts are grouped first and sorted by
+Magic Formula rank, so your candidates are the top rows. Work down them, read each
+final report, and take 6.
+
+Split the run if you would rather see the shortlist before spending anything:
+
+```bash
+python main.py --screen-only     # free, ~25 min — refreshes the rankings CSV
+python main.py --from-csv        # ~$11, ~30 min — analyzes the top 30
+```
+
+Between buying runs, `python main.py --screen-only` costs nothing and keeps the
+rankings current if you want to watch how names move.
+
+### Rolling positions after year one
+
+Each run, the batch bought 12 months earlier comes due. For any holding you are
+weighing, `--sell-check` tests the sell conditions that were written **at the time you
+bought** — pin the run you purchased under:
+
+```bash
+python main.py --sell-check TICKER --run <RUN_ID>
+```
+
+Using the latest `SALE_CASE` instead would test a thesis you never acted on. This tool
+tracks no positions and no purchase dates; keep those wherever you already do.
 
 ## Web UI (report viewer)
 

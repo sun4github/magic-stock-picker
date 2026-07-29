@@ -14,6 +14,41 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     And the "Magic Formula Screener Agent" filters and selects exactly the Top 30 ranked companies
     And hands off the list of Top 30 companies to the Orchestrator Agent for Phase B analysis
 
+  Scenario: Run Phase A without paying for Phase B or Phase C
+    Given the investor wants a refreshed ranking but does not intend to act on it yet
+    When they run the screener in screen-only mode
+    Then the rankings CSV is refreshed and the top candidates are logged with their ROC, Earnings Yield, ROA and P/E
+    And no agent is invoked and no LLM cost is incurred
+    And no pipeline run, ticker run or report record is written, so nothing appears in the web UI
+    And it warns when fewer candidates cleared the gates than the analysis phase expects
+    And combining screen-only with any Phase B or Phase C option is rejected rather than silently ignored
+
+  Scenario: Run Phase B without Phase C
+    Given the investor wants the bear, bull and analyst reasoning but not the sale advisory
+    When they run any Phase B mode with the sale advisor skipped
+    Then the bear, bull and analyst agents run and the sale advisor does not
+    And no SALE_CASE is stored for that run, so a later sell-condition check has no conditions from it to test
+    And the omission is reported as deliberate rather than logged as a failure
+    And a report produced without Phase C is fingerprinted separately, so it is never reused to satisfy a later full run
+
+  Scenario: Apply Greenblatt's step-by-step eligibility gates before ranking
+    Given the screener has fetched the stock universe from FMP
+    Then it eliminates financial stocks, including banks, insurers, asset managers and mutual-fund-like vehicles
+    And it eliminates utilities
+    And it eliminates foreign companies, identified by a depositary-receipt name (ADR/ADS) or a non-US country
+    And it eliminates every company whose Return on Assets is below 25 percent
+    And it eliminates every company whose price-to-earnings ratio is below 5, a company with no positive earnings having no P/E to test
+    And it asks FMP which of the remaining companies announced earnings in the last 7 days, and eliminates those
+    And it applies all of these before ranking, so an eliminated company cannot affect the ranks of the survivors
+    And it ranks the survivors on Return on Capital and Earnings Yield, which the gates do not replace
+    And it warns when fewer than 30 companies survive, since Phase B expects a Top 30
+
+  Scenario: Report both return figures without conflating them
+    Given a final report is generated for a candidate
+    Then the "Magic Formula Metrics" section states Return on Capital as the ranking metric
+    And it states Return on Assets as a screening hurdle, explaining that it divides by all assets rather than capital employed
+    And it states the price-to-earnings ratio and why a ratio below 5 is a rejection rather than a bargain
+
   Scenario: Execute Phase B Balanced Analysis on Candidates
     Given the Orchestrator has received the candidates (or a single on-demand ticker)
     When it processes each company sequentially

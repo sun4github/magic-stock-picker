@@ -130,13 +130,33 @@ def api_pipeline_runs():
     return jsonify(out)
 
 
+# Reading order for a run's decisions: the actionable names first, the rejects last.
+# Anything outside the Buy/Watch/Avoid vocabulary (legacy HOLD/SELL rows, or a NULL
+# verdict from an interrupted run) sorts after all three rather than silently landing
+# among the Buys.
+_VERDICT_ORDER_SQL = """
+    CASE UPPER(COALESCE(verdict, ''))
+        WHEN 'BUY'   THEN 1
+        WHEN 'WATCH' THEN 2
+        WHEN 'AVOID' THEN 3
+        ELSE 4
+    END
+"""
+
+
 def _fetch_run_tickers(run_id: str):
-    """Return every ticker in one pipeline run, alphabetical, with its verdict."""
+    """Return every ticker in one pipeline run, ordered for reading, with its verdict.
+
+    Buy first, then Watch, then Avoid; within each group by Magic Formula rank
+    (1 = best). Runs recorded before the rank was stored have NULL magic_rank — those
+    sort last within their group and fall back to alphabetical, so an older run still
+    reads sensibly instead of coming back in arbitrary order."""
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        """SELECT ticker, company_name, verdict, run_date
-           FROM ticker_runs WHERE run_id = %s ORDER BY ticker""",
+        f"""SELECT ticker, company_name, verdict, run_date, magic_rank
+            FROM ticker_runs WHERE run_id = %s
+            ORDER BY {_VERDICT_ORDER_SQL}, magic_rank ASC NULLS LAST, ticker""",
         (run_id,),
     )
     rows = cur.fetchall()
@@ -172,10 +192,13 @@ def download_run():
         abort(404)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["Ticker", "Company", "Recommendation"])
+    # Rows come out of _fetch_run_tickers already in Buy/Watch/Avoid then rank order,
+    # so the download reads the same way the on-screen list does.
+    writer.writerow(["Ticker", "Company", "Recommendation", "MagicFormulaRank"])
     for r in rows:
         writer.writerow(
-            [r["ticker"], r["company_name"] or "", (r["verdict"] or "").upper()]
+            [r["ticker"], r["company_name"] or "", (r["verdict"] or "").upper(),
+             r["magic_rank"] if r["magic_rank"] is not None else ""]
         )
     run_date = rows[0]["run_date"]
     stamp = run_date.strftime("%Y%m%d") if run_date else "run"

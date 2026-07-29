@@ -20,7 +20,25 @@ Background:
   Scenario: Browse purchase decisions in the web UI (report viewer) for a single pipeline run involving multiple stocks
     Given the web app is running and connected to the database via its own ".env"
     When a user selects a pipeline run (sorted by date, most latest first) with more than a single ticker is analyzed
-    Then the app lists all the stock tickers in that pipeline run in a alphabetical order
+    Then the app lists all the stock tickers in that pipeline run grouped by recommendation, Buy first, then Watch, then Avoid
+    And within each group the tickers are ordered by their Magic Formula rank, best (lowest) rank first
+    And a ticker with no recorded rank sorts last within its group and falls back to alphabetical order
     And it shows the Buy/Watch/Avoid recommendation for each ticker from that run next to the ticker symbol
+	And it shows the Magic Formula rank next to each ticker, or a dash when that run predates rank recording
 	And it shows a link to the screen showing reports for that stock ticker from that specific pipeline run
-    And it offers a download of all stock tickers and their recommendations as a CSV file to the viewing device
+    And it offers a download of all stock tickers, their recommendations and ranks as a CSV file to the viewing device, in the same order
+
+  Scenario: Learn the terms without leaving the app
+    Given the web app is running
+    When a user opens the "Learn the terms" mode
+    Then an interactive lemonade-stand simulator is shown with sliders that flow a change through the income statement, cash flow, balance sheet and the Magic Formula ratios
+    And every line item and ratio offers a hover or tap definition with its formula and a worked example
+    And Return on Assets is shown alongside Return on Capital, with its definition stating that the two are different measures and how
+    And every definition is reachable and fully populated, since a term with no matching entry shows nothing at all rather than reporting an error
+    And the figures shown match the downloadable cheat sheet exactly, which is the authoritative source for them
+
+  Scenario: Rank is recorded per ticker per run
+    Given a pipeline run analyzes candidates selected by the Phase A screener
+    Then each ticker's "Final_Rank" from that screen is stored on its "ticker_runs" row as "magic_rank"
+    And an on-demand single-ticker run stores no rank, because it never went through a ranking
+    And runs recorded before this column existed keep a null rank rather than a fabricated one

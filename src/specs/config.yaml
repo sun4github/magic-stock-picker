@@ -106,7 +106,13 @@ context_cache:
 #   warn  - log loudly and keep going
 budget:
   enabled: true
-  per_run_usd: 15.00        # one pipeline run (~30 tickers at ~$0.37 each)
+  # One pipeline run (~30 tickers at ~$0.37 each ≈ $11). Set to 20 rather than 15 to
+  # leave headroom: at 15 a modest drift in per-ticker cost would trip the ceiling
+  # PART-WAY through a 30-ticker run, and `on_exceed: halt` would then stop cleanly
+  # with a partial candidate list — the run is not wasted, but it is short, which is
+  # a worse outcome than the overspend it prevented. Still well below the ~$22 a
+  # doubled per-ticker cost would reach, so a genuine runaway is still caught.
+  per_run_usd: 20.00
   per_day_usd: 25.00        # rolling window below, not calendar day
   day_window_hours: 24
   on_exceed: "halt"
@@ -220,8 +226,68 @@ rate_limits:
 screening_parameters:
   min_market_cap: 100000000  # $100 Million minimum
   universe_limit: 2500        # Max companies to pull from the FMP screener universe (raise to capture more mid/small caps)
+
+  # --- Greenblatt's step-by-step screen ---------------------------------------
+  # "The Little Book That Still Beats the Market", step-by-step appendix. These are
+  # ELIGIBILITY GATES, not the ranking: ranking stays on the real Magic Formula
+  # (Return on Capital + Earnings Yield). The book's DIY steps use Return on ASSETS
+  # and a plain P/E because those are what a free screener gives you; they are
+  # coarser proxies, so they are applied here as filters over the same universe.
+  #
+  # Set any of these to null to disable that gate.
+
+  # Step 1: "screen for ROA of at least 25%".
+  min_roa: 0.25
+  # Which ROA the 25% hurdle is measured against:
+  #   "ebit"       - EBIT / Total Assets. Pre-tax, pre-interest: the same numerator
+  #                  as ROC and Earnings Yield, so the whole pipeline stays on one
+  #                  basis and ROA vs ROC is an apples-to-apples comparison of
+  #                  denominators (all assets vs only capital employed).
+  #   "net_income" - Net Income / Total Assets. What a retail screener reports, and
+  #                  what Greenblatt's readers would have typed 25% into. Materially
+  #                  stricter than "ebit" (tax and interest come out of the numerator).
+  # Both are computed and written to the CSV either way; this only picks the gate.
+  roa_basis: "ebit"
+
+  # Step 2: "eliminate all companies that have P/E ratios less than 5".
+  # NOTE the direction: a P/E BELOW 5 is an earnings yield ABOVE 1/5 (20%). Greenblatt
+  # drops these not because they are expensive but because a P/E that low is usually a
+  # data error or a one-off event (an asset sale, a legal settlement) inflating a single
+  # year's earnings — not repeatable profit. Companies with no positive earnings have no
+  # meaningful P/E and are not dropped by this gate (they are already gone: negative EBIT
+  # is rejected earlier).
+  min_pe: 5.0
+
+  # Step 3: "eliminate companies that have announced earnings in the last week".
+  # A fresh report has not been absorbed into the price yet, so the screen would be
+  # ranking on figures the market is still digesting. Checked against FMP's earnings
+  # calendar. Set to null (or 0) to skip the check entirely.
+  exclude_recent_earnings_days: 7
+
+  # Step 4: "eliminate all utilities and financial stocks" and "eliminate all foreign
+  # companies (ADRs)". Sector is the coarse cut; industry catches the financials that
+  # FMP files under other sectors (and REITs, already handled separately).
   excluded_sectors:
     - "Financial Services"
     - "Financial"
     - "Utilities"
     - "Banking"
+  # Matched as case-insensitive substrings against the FMP `industry` field.
+  excluded_industries:
+    - "bank"                  # Banks - Regional / Diversified
+    - "insurance"             # Insurance - Life / Property & Casualty / Brokers
+    - "asset management"
+    - "capital markets"
+    - "financial conglomerate"
+    - "financial data"
+    - "shell companies"       # SPACs: no operating business to measure
+    - "mortgage"
+    - "closed-end fund"       # mutual-fund-like vehicles
+    - "exchange traded fund"
+    - "reit"                  # also filtered explicitly; listed here for completeness
+  # Foreign issuers. `country` already restricts the FMP screener query to US, but ADRs
+  # of foreign operating companies can still slip through with a US-registered profile,
+  # so the company NAME is checked for the depositary-receipt markers too.
+  exclude_adr: true
+  allowed_countries:
+    - "US"

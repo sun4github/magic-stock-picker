@@ -18,7 +18,8 @@ The application must execute a strict 4-stage sequential workflow managed by a p
 1. **Phase A: Magic Formula Screening**
    - **Agent:** `MagicFormulaScreenerAgent`
    - **Action:** Triggers the MCP Tool wrapping `magic_formulae_screener.py`.
-   - **Output:** Identifies and ranks valid candidates, extracting exactly the **Top 30 ranked companies**.
+   - **Eligibility gates** (Greenblatt's step-by-step screen — see §2.H): drop financials, utilities, funds/REITs and foreign issuers (ADRs); drop **ROA below 25%**; drop **P/E below 5**; drop anything that **announced earnings in the last 7 days**.
+   - **Output:** Ranks the survivors on the Magic Formula itself (ROC + Earnings Yield), extracting exactly the **Top 30 ranked companies**.
 2. **Phase B: Balanced Decomposer Analysis** (per ticker)
 
    **Data gathering — direct tool calls (no LLM):**
@@ -243,6 +244,38 @@ So `compute_company_metrics_detailed` now also returns `ROIC_InclGoodwill`
 - The ranking itself is **unchanged** — Greenblatt's ROC remains the sort key.
   This is a disclosure fix, not a methodology change.
 
+**When the companion cannot be computed.** Invested capital (equity + debt − cash)
+goes non-positive for companies that have bought back more stock than their retained
+earnings cover — shareholders' equity turns negative and there is no denominator
+left. On the 2026-07-28 run this hit **3 of 42 survivors (BKNG, GRND, WINA)**, two of
+them inside the top 10, carrying headline ROCs of 1,210%, 2,346% and 2,024%.
+
+That is the worst possible place to lose the guard: the companies whose headline is
+least trustworthy would be the ones reported without a counterweight. So:
+
+- `ROIC_Unavailable_Reason` is carried alongside the null (`negative_invested_capital`
+  or `not_computable`) and written to the CSV, so the omission can be explained rather
+  than rendered as a bare "Not available". When that column is absent — CSVs archived
+  before it existed — the cause is **inferred from negative `TotalEquity`** rather than
+  left blank, and only from that evidence: a company with positive equity is never
+  given the buyback explanation.
+- The "cannot be calculated" statement is emitted **unconditionally** whenever the
+  figure is missing. The paragraph above it promises "the companion figure below", so
+  an unanswered promise reads as a dropped number and turns the substitute into an
+  "instead" with no antecedent. The first cut of this feature emitted the substitute
+  only when a reason was known and was caught by reading a real generated report, not
+  by a test — hence the legacy-CSV cases now in `test_screen_gates.py`.
+- **ROA stands in as the fallback counterweight.** It divides by *total assets* —
+  which includes goodwill, intangibles and cash — so it is an even more conservative
+  denominator than invested capital, and it is always computable. Both
+  `VERIFIED_FIGURES` and the reader-facing report substitute it explicitly.
+- ROA is **never relabelled as ROIC**. Both blocks state that it is a different,
+  blunter measure serving the same sanity-check purpose. Fabricating a ROIC from a
+  different denominator would defeat the point of having a second opinion at all.
+- The agent mandate is correspondingly redirected: instead of "cite both", which is
+  impossible here, it instructs the agent to cite ROC alongside ROA and states that
+  the missing ROIC is a financing fact, **not** a data gap to be reported as one.
+
 ### G. Verdict semantics — a screen pass, not a stock tip
 
 The Magic Formula is a **basket** strategy. Greenblatt's method buys 20–30 screened
@@ -274,6 +307,111 @@ Requirements:
 'AVOID','HOLD','SELL'))` constraint, `_extract_verdict()`, the report filenames,
 and the web UI's counts all continue to use the bare tokens. The reframing is in
 the **rendered prose**, so no stored verdict or historical run is invalidated.
+
+### H. Screening eligibility gates — Greenblatt's step-by-step screen
+
+Separate from the ranking, and applied before it. *The Little Book That Still Beats
+the Market* gives step-by-step instructions for building the screen by hand on a free
+stock screener; those steps are eligibility conditions, not the formula. The formula
+(ROC + Earnings Yield) still decides the **order**; these decide who is **in the list
+at all**. All are configurable under `screening_parameters:` in `config.yaml`, and any
+can be disabled by setting it to `null`.
+
+**Return on Assets is not Return on Capital.** They share a numerator (EBIT) and
+differ entirely in the denominator:
+
+| | Denominator | Effect |
+| :--- | :--- | :--- |
+| **ROC** (ranks the list) | Net working capital + net fixed assets | Excludes cash and goodwill — measures the return on the next dollar put into the business |
+| **ROA** (gates the list) | **Total assets** | Includes cash and goodwill, so it is always the lower, blunter figure |
+
+Greenblatt uses ROA in the DIY steps only because a free screener exposes ROA and not
+ROC. The 25% hurdle is set high precisely to compensate for how rough the measure is.
+Conflating the two is the second-easiest error in these reports after the ROC/ROIC gap
+in §F, so the report section names the difference explicitly rather than printing two
+similar-looking percentages side by side.
+
+The gates, in the order they are applied:
+
+1. **Universe exclusions** (`_universe_exclusion_reason`) — no API cost, applied to the
+   screener response before any statements are fetched. Drops excluded **sectors**
+   (Financial Services, Utilities), excluded **industries** (banks, insurers, asset
+   managers, capital markets, mortgage lenders, closed-end funds, SPAC shells, and
+   REITs), rows flagged `isEtf`/`isFund`, and **foreign issuers**. Financials and
+   utilities are excluded because their balance sheets make "capital employed"
+   meaningless; REITs are cut by *industry* rather than by sector so that operating
+   developers and homebuilders survive.
+   *ADR detection:* the screener payload has no `isAdr` flag, so this uses the two
+   signals it does carry — depositary-receipt wording in `companyName` ("ADR", "ADS",
+   "American Depositary…") and a non-US `country`. A **blank** country is treated as
+   unknown, not foreign; a company is never dropped on missing data.
+2. **ROA ≥ 25%** (`ratio_gate_reason`) — needs the financials, so it runs after the
+   metrics are computed but **before ranking**, so a rejected company cannot shift the
+   percentile ranks of the survivors. `roa_basis` selects the denominator's numerator:
+   `ebit` (default; keeps one numerator across ROC/EY/ROA) or `net_income` (what a
+   retail screener shows, materially stricter). Both are always computed and written
+   to the CSV; the setting only chooses which one the hurdle tests.
+3. **P/E ≥ 5** — computed as market cap ÷ TTM net income (identical to price ÷ EPS,
+   but without depending on a share count FMP reports inconsistently). **Note the
+   direction**: Greenblatt drops the *low* ratios. A P/E under 5 nearly always means a
+   one-off event (an asset sale, a settlement) inflated a single year's earnings, so
+   the "bargain" will not repeat. Loss-makers have **no** P/E and are not caught by
+   this gate — they are already gone via the negative-EBIT check.
+4. **No earnings announcement in the last 7 days** (`fetch_recent_earnings_symbols`) —
+   a fresh report has not been absorbed into the price yet. Applied **only to the
+   survivors** of gates 1–3, via one bulk `/stable/earnings-calendar` call over the
+   trailing window, falling back to per-symbol `/stable/earnings` if that endpoint is
+   unavailable. A calendar **date** in the window is sufficient; `epsActual` is not
+   required, because FMP backfills results with a lag and requiring it would keep
+   exactly the company that reported two days ago. If neither path works the function
+   returns `ok=False` and the run **says the filter was not applied** rather than
+   reporting an empty result as success.
+
+**Severity.** On a sampled run the ROA gate alone eliminated ~95% of the universe
+(the 90th percentile of EBIT-basis ROA is ≈19%), leaving ~70 candidates from a 1,773
+company universe. That is Greenblatt's intent, but Phase B analyzes the top 30, so the
+screener prints a **warning when fewer than 30 companies survive** — at that point the
+screen is not stricter, it is broken.
+
+### I. The two candidate shapes — a standing source of silent failure
+
+A "candidate" reaches the report layer by two routes that **do not agree on key names
+or value types**, and every mismatch between them fails silently — a section simply
+does not render, and nothing errors:
+
+| | Screener CSV (`--from-csv`, full pipeline) | Single ticker (`compute_ticker_magic_metrics`) |
+| :--- | :--- | :--- |
+| Ratio fields | raw floats: `ROIC_InclGoodwill` | percent strings: `ROIC_InclGoodwill_Pct` |
+| Missing value | `NaN` (via pandas) — **truthy** | `None` — falsy |
+
+Three defects came from this one seam:
+
+1. **The ROC/ROIC companion never rendered on batch runs.** Both formatters read only
+   the `_Pct` form, which the CSV does not contain. So on every full-pipeline and
+   `--from-csv` run the goodwill-inclusive companion was skipped — in the report AND
+   in `VERIFIED_FIGURES`. The §F guard, written specifically to stop a four-digit ROC
+   being read as elite efficiency, was inert on precisely the runs it existed for.
+2. **`NaN` is truthy**, so `if roa_pct:` passed on a missing value and would have
+   printed `nan` into a report.
+3. A substitute figure rendered with its explanation missing, because the branch that
+   explained it keyed off a column absent from older CSVs.
+
+The countermeasures are structural, not spot fixes:
+
+- **`_normalize_candidate()`** derives the `_Pct` fields from their raw ratio columns
+  before anything reads them. Normalising (rather than renaming CSV columns) keeps
+  previously archived CSVs readable by `--from-csv`.
+- **`_present()`** collapses `None`, `NaN`, `""` and the strings `"nan"`/`"none"` to a
+  single falsy value, and every report field goes through it.
+- Any statement the report *promises* (e.g. "the companion figure below") must be
+  answered **unconditionally**, with the explanation degrading rather than the whole
+  block disappearing.
+- `test_screen_gates.py` asserts all three against both candidate shapes, including a
+  legacy CSV missing the newer columns.
+
+**When adding a field to the screener output, add it to BOTH paths and to
+`_RATIO_TO_PCT_FIELD` if it is a ratio.** A field added to only one path will be
+missing from half of all runs and will not raise.
 
 ---
 
@@ -631,8 +769,8 @@ The coding agent must strictly separate sensitive credentials and runtime parame
 4. **Template:** Generate a `.env.example` file populated with the required keys (but empty values) so the user knows what to fill out. Ensure `.env` is added to the `.gitignore` file.
 
 ### B. Configuration Parameterization (config.yaml)
-1. **Dynamic Logic:** The MCP tool wrapping `magic_formula_starter_screener.py` must be modified to read its algorithmic variables (e.g., `MIN_MARKET_CAP`, `EXCLUDED_SECTORS`) directly from `specs/config.yaml`.
-2. **Agent Limits:** The orchestrator agent must dynamically read `top_n_candidates` (e.g., 30) from `config.yaml` to determine how many companies to process in Phase B.
+1. **Dynamic Logic:** The MCP tool wrapping `magic_formula_starter_screener.py` must be modified to read its algorithmic variables (e.g., `MIN_MARKET_CAP`, `EXCLUDED_SECTORS`) directly from `specs/config.yaml`. This includes every eligibility gate in §2.H — `min_roa`, `roa_basis`, `min_pe`, `exclude_recent_earnings_days`, `excluded_industries`, `exclude_adr`, `allowed_countries` — each of which can be set to `null` to disable that gate without touching code.
+2. **Agent Limits:** The orchestrator agent must dynamically read `top_n_candidates` (e.g., 30) from `config.yaml` to determine how many companies to process in Phase B. `--top-n N` overrides it for a single invocation — depth is the dominant cost lever (~$0.37/ticker) and is the one setting that legitimately varies run to run, so it belongs on the command line rather than requiring a config edit before each run. The override also moves the screen-only short-list warning threshold, so the warning tracks what THIS run will actually analyze.
 
 ## 8. ORCHESTRATOR & WORKFLOW
 
@@ -695,6 +833,24 @@ the screener's universe loop, which only needs success/failure.
 The three modes above create a `pipeline_runs` row and produce records that are
 structurally identical and fully queryable by `run_id`.
 
+3a. **Screen-only run** (`run_screen_only`) — Phase A ALONE
+   - The exact inverse of `--from-csv`: runs the screener, writes the rankings CSV,
+     logs the top N with their ROC/EY/ROA/PE, and stops. **No agents, no
+     `pipeline_runs` row, no database writes, nothing billed** — so it never appears
+     in the web UI.
+   - This exists because the two halves have completely different cost profiles: FMP
+     is subscription-metered (Phase A costs time only), while Phase B/C is the billed
+     LLM work at roughly $11 per 30-ticker run. Welding them together forced anyone
+     who wanted a fresh ranking to pay for an analysis they had not asked for.
+     Screening and analysis can therefore run on **different cadences**: refresh the
+     list as often as useful, and pay only in the periods you intend to act on it.
+   - Warns when fewer candidates cleared the gates than `top_n_candidates`, so that
+     is discovered before a paid run is scheduled rather than after it produces a
+     short list.
+   - Rejects combination with any Phase B/C flag (`--from-csv`, `TICKER`,
+     `--sell-check`, `--skip-sale-advisor`, `--force`) rather than silently ignoring
+     it.
+
 4. **On-demand sell-condition check** (`run_sell_check`)
    - A separate single-stock flow (Phase C follow-up). Loads a stored `SALE_CASE`
      — a **specific run's** when `run_id` is passed (the run you bought under),
@@ -707,16 +863,34 @@ structurally identical and fully queryable by `run_id`.
 
 ```
 python main.py                       # full pipeline (Phase A screener + Phase B + Phase C)
+python main.py --screen-only         # Phase A ONLY: refresh the rankings CSV; no agents, no cost
 python main.py --from-csv            # skip Phase A; Phase B/C on top N from the rankings CSV
 python main.py --from-csv PATH       # same, from a specific CSV file
 python main.py TICKER                # on-demand Phase B/C for one ticker
 python main.py TICKER "Company"      # on-demand with an explicit company name
 python main.py --sell-check TICKER            # test if TICKER's latest sale conditions are now met (Sell/Hold)
 python main.py --sell-check TICKER --run RUN_ID  # ...against a SPECIFIC run's conditions (the run you bought under)
+
+# Phase C is optional on ANY Phase B mode (~1/4 of the per-ticker cost):
+python main.py --from-csv --skip-sale-advisor    # bear -> bull -> analyst, no sale advisor
+python main.py --from-csv --top-n 12             # analyze only the top 12 this run
 ```
 
-`run_from_csv(path)`, `run_single_ticker(ticker, company_name)`, and
-`run_sell_check(ticker, company_name, run_id)` are also directly importable for
+**Phase separation.** `--screen-only` (A alone) and `--from-csv` (B/C alone) are
+inverses and together do the work of a bare `python main.py`. `--skip-sale-advisor`
+separates C from B: the sale advisor is the LAST role in `PIPELINE_AGENTS` and
+nothing downstream reads its output, so dropping it truncates the graph cleanly
+rather than leaving a hole.
+
+**Reuse safety.** `skip_sale_advisor` is folded into `_analysis_key`. Without it a
+cheap Phase-C-less report would satisfy the reuse check for a later full run, and
+`db_copy_ticker_outputs` would copy a set of outputs with no `SALE_CASE` — the ticker
+would look complete in the web UI with an empty Sale tab, and `--sell-check` would
+find no conditions to test. The two variants therefore live under different
+fingerprints and neither can be served in place of the other.
+
+`run_screen_only()`, `run_from_csv(path)`, `run_single_ticker(ticker, company_name)`,
+and `run_sell_check(ticker, company_name, run_id)` are also directly importable for
 driving these modes from a service endpoint or notebook.
 
 ### C. Ordering Constraint
@@ -795,10 +969,16 @@ and `final_reports`:
   `run_date`, `ticker_count`, and a Buy/Watch/Avoid breakdown (`GROUP BY run_id`
   over `ticker_runs`, `HAVING COUNT(*) > 1`). Single-ticker on-demand one-offs
   are excluded — this view is for value-discovery screens.
-- `GET /api/pipeline-run?run_id=` → all tickers in that run, alphabetical, each
-  with `company_name` + `verdict`.
+- `GET /api/pipeline-run?run_id=` → all tickers in that run, each with
+  `company_name`, `verdict` and `magic_rank`, ordered **Buy → Watch → Avoid, then
+  by rank** (`magic_rank ASC NULLS LAST`, ties and unranked rows alphabetical).
+  Verdicts outside that vocabulary (legacy `HOLD`/`SELL`, or a null from an
+  interrupted run) sort after all three rather than among the Buys. The ordering
+  lives in SQL, not in the browser, so the CSV download and the on-screen list
+  cannot drift apart.
 - `GET /download-run?run_id=` → the run's tickers + recommendations as a
-  `.csv` attachment (`Ticker,Company,Recommendation`).
+  `.csv` attachment (`Ticker,Company,Recommendation,MagicFormulaRank`), in that
+  same order.
 
 **Shared (report drill-down + download)**
 - `GET /api/report?ticker=&run_id=` → server-rendered HTML for the bear, bull, sale and
@@ -812,7 +992,43 @@ and `final_reports`:
   rendered markdown with the Buy/Watch/Avoid recommendation badge → optionally
   download any report.
 - **By pipeline run:** pick a run (sorted by date, newest first, ticker count
-  shown) → see every analyzed ticker A–Z with its Buy/Watch/Avoid badge and a
+  shown) → see every analyzed ticker under a Buy / Watch / Avoid group heading,
+  ordered by Magic Formula rank within each group, with its verdict badge, its
+  rank (or `—` for runs predating rank recording) and a
   "View reports" link into that ticker's reports **for that run** → optionally
   download the whole run's decisions as CSV. The report drill-down reuses the
   shared viewer (a "Back to run" control returns to the decisions list).
+- **Learn the terms:** an embedded lemonade-stand simulator with sliders that flow a
+  change through the income statement, cash flow, balance sheet and the Magic Formula
+  ratios, plus a hover/tap glossary on every line item.
+
+### D. The Learn tab and its numeric contract
+
+`webapp/static/learn/lemonade-cheat-sheet.html` is a standalone, downloadable page and
+is the **authoritative source of the worked figures**. The simulator in
+`templates/index.html` must reproduce them exactly at default slider positions:
+
+| Figure | Value |
+| :--- | ---: |
+| EBIT | $120.00 |
+| Capital employed | $132.00 |
+| Total invested capital | $212.00 |
+| Total assets | $252.00 |
+| Enterprise value | $460.00 |
+| Earnings yield | 26.09% |
+| Return on capital | 90.91% |
+| ROIC including goodwill | 56.60% |
+| **Return on assets** | **47.62%** |
+
+Rules for keeping the two in step:
+
+- A term added to the simulator must also be added to the cheat sheet in **all three**
+  places it appears there — the terms section, the ratios table, and the formula index
+  — or the downloadable page silently disagrees with the live one.
+- Every table row carries a `termKey`, and `showPopover()` **returns silently** when
+  the key has no glossary entry — an orphan key is an invisible dead tooltip, not an
+  error. Both directions must be checked: no key without an entry, no entry unreached.
+- ROA and ROC are the pair most easily confused (see §2.H), so the ROA glossary entry
+  and cheat-sheet term both lead with the distinction and show both figures computed
+  off the same $120.00 of profit — 47.62% against 90.91% — with the gap attributed to
+  the $40.00 cash and $80.00 goodwill that ROC excludes and ROA counts.

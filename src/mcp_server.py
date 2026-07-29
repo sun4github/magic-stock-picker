@@ -95,11 +95,23 @@ def compute_ticker_magic_metrics(ticker: str) -> str:
             })
         roic = metrics.get("ROIC_InclGoodwill")
         intang_share = metrics.get("IntangiblesShareOfAssets")
+        roa = metrics.get("ROA")
+        roa_ni = metrics.get("ROA_NetIncome")
+        pe = metrics.get("PE")
         return json.dumps({
             "Symbol": ticker,
             "CompanyName": metrics.get("CompanyName", ticker),
             "ROC_Pct": f"{round(metrics['ROC'] * 100, 2)}%",
             "EY_Pct": f"{round(metrics['EarningsYield'] * 100, 2)}%",
+            # Greenblatt's step-by-step gate figures. Reported, never enforced here:
+            # an on-demand run is asking about ONE named company, so refusing to
+            # compute its ratios because the screen would have rejected it would
+            # answer a question nobody asked. The report says which side of the
+            # 25% / P/E-5 cuts it falls on and lets the reader weigh that.
+            "ROA_Pct": f"{round(roa * 100, 2)}%" if roa is not None else None,
+            "ROA_NetIncome_Pct": f"{round(roa_ni * 100, 2)}%" if roa_ni is not None else None,
+            "PE_Ratio": round(pe, 2) if pe is not None else None,
+            "NetIncome": metrics.get("NetIncome"),
             "EBIT_Basis": metrics.get("EBIT_Basis"),
             "EBIT": metrics.get("EBIT"),
             "CapitalEmployed": metrics.get("CapitalEmployed"),
@@ -117,6 +129,9 @@ def compute_ticker_magic_metrics(ticker: str) -> str:
             "GoodwillAndIntangibles": metrics.get("GoodwillAndIntangibles"),
             "InvestedCapital": metrics.get("InvestedCapital"),
             "ROIC_InclGoodwill_Pct": f"{round(roic * 100, 2)}%" if roic is not None else None,
+            # Why the companion is missing, so the report can say so instead of
+            # printing a bare "Not available" next to a four-digit ROC.
+            "ROIC_Unavailable_Reason": metrics.get("ROIC_Unavailable_Reason"),
             "IntangiblesShareOfAssets_Pct": f"{round(intang_share * 100, 1)}%" if intang_share is not None else None,
             "BalanceSheetDate": metrics.get("BalanceSheetDate"),
         })
@@ -664,9 +679,14 @@ def initialize_database():
                 company_name TEXT,
                 verdict VARCHAR(10),
                 run_date TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                magic_rank INTEGER,
                 UNIQUE (ticker, run_id)
             )
         ''')
+        # Idempotent add for tables created before the rank was recorded. Existing
+        # rows keep NULL: the screener CSV those runs came from has long since been
+        # overwritten, so their rank is genuinely unknown rather than zero.
+        cur.execute("ALTER TABLE ticker_runs ADD COLUMN IF NOT EXISTS magic_rank INTEGER")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ticker_runs_ticker ON ticker_runs(ticker)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ticker_runs_date ON ticker_runs(run_date DESC)")
 
@@ -1003,21 +1023,34 @@ def db_store_final_report(run_id: str, ticker: str, verdict: str, markdown_repor
         return f"Error storing final report: {str(e)}"
 
 @mcp.tool()
-def db_store_ticker_run(run_id: str, ticker: str, company_name: str, verdict: str) -> str:
+def db_store_ticker_run(run_id: str, ticker: str, company_name: str, verdict: str,
+                        magic_rank: Optional[int] = None) -> str:
     """
     Records a per-ticker index row in ticker_runs (ticker -> run + verdict + date).
     This drives the web UI's ticker picker and run list. Idempotent per (ticker, run_id).
+
+    `magic_rank` is the ticker's Final_Rank in the screen that selected it (1 = best),
+    used by the UI to order a run's decisions within each Buy/Watch/Avoid group. Pass
+    None for on-demand single-ticker runs, which never went through a ranking.
     """
     try:
         normalized = (verdict or "").strip().upper()
+        # Guard the cast: --from-csv hands this through pandas, so the rank can arrive
+        # as a numpy int, a float, or NaN, none of which psycopg2 binds to an INTEGER.
+        try:
+            rank = int(magic_rank) if magic_rank is not None and magic_rank == magic_rank else None
+        except (TypeError, ValueError):
+            rank = None
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute('''
-            INSERT INTO ticker_runs (ticker, run_id, company_name, verdict)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO ticker_runs (ticker, run_id, company_name, verdict, magic_rank)
+            VALUES (%s, %s, %s, %s, %s)
             ON CONFLICT (ticker, run_id)
-            DO UPDATE SET company_name = EXCLUDED.company_name, verdict = EXCLUDED.verdict
-        ''', (ticker, run_id, company_name, normalized))
+            DO UPDATE SET company_name = EXCLUDED.company_name,
+                          verdict = EXCLUDED.verdict,
+                          magic_rank = EXCLUDED.magic_rank
+        ''', (ticker, run_id, company_name, normalized, rank))
         conn.commit()
         cur.close()
         conn.close()
