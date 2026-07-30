@@ -71,6 +71,14 @@ See [`src/specs/agent_architecture.md`](src/specs/agent_architecture.md) and
 walkthrough with file/line references into `main.py`, `mcp_server.py`, the
 screener, and the web viewer.
 
+This project follows **Spec-Driven Development**: the architecture and behavior
+specs in [`src/specs/`](src/specs/) were written before the corresponding code and
+used to generate the initial implementation, rather than written after the fact to
+document it. They remain the source of truth as the system evolves — kept current
+alongside the code, with any point where the shipped implementation diverges from
+the original spec called out explicitly in the spec itself rather than left to go
+stale silently.
+
 ## The book and the formula, briefly
 
 This project automates the strategy from Joel Greenblatt's *The Little Book That
