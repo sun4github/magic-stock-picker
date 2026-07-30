@@ -9,6 +9,14 @@ names the specific business events that would break the thesis.
 
 ## What it does
 
+```mermaid
+flowchart LR
+    A["Phase A — Screener<br/>Scans the FMP universe, applies<br/>Greenblatt's eligibility gates, and<br/>ranks survivors by the Magic Formula"]
+    B["Phase B — Decomposer Analysis<br/>Bear and Bull agents argue the case;<br/>a neutral Analyst Agent weighs both<br/>and issues Buy / Watch / Avoid"]
+    C["Phase C — Sale Advisory<br/>Assumes the stock is already owned;<br/>names 3 measurable events that would<br/>break the original investment thesis"]
+    A --> B --> C
+```
+
 **Phase A — Screener.** Scans the FMP stock universe, applies Greenblatt's
 step-by-step eligibility gates — no financials, utilities, funds/REITs or foreign
 (ADR) issuers; **Return on Assets ≥ 25%**; **P/E ≥ 5**; nothing that announced
@@ -62,6 +70,38 @@ See [`src/specs/agent_architecture.md`](src/specs/agent_architecture.md) and
 (with diagrams), and [`docs/`](docs/README.md) for a developer-facing code
 walkthrough with file/line references into `main.py`, `mcp_server.py`, the
 screener, and the web viewer.
+
+## The book and the formula, briefly
+
+This project automates the strategy from Joel Greenblatt's *The Little Book That
+Beats the Market* (2005). Greenblatt — a hedge fund manager and Columbia Business
+School professor — argued that you don't need complex models to beat the market:
+you just need to systematically buy **good businesses at cheap prices**, and let a
+formula (not your emotions) decide which stocks qualify.
+
+The **Magic Formula** ranks every stock in the universe on two measures, then
+combines the two ranks:
+
+- **Return on Capital (ROC)** = EBIT ÷ (Net Working Capital + Net Fixed Assets) —
+  how efficiently the business turns the capital it employs into profit. This is
+  the "good business" half of the formula.
+- **Earnings Yield (EY)** = EBIT ÷ Enterprise Value — how much operating profit
+  you get for the total price of the business (market value of equity, plus debt,
+  minus cash). This is the "cheap price" half.
+
+A stock ranked 5th on ROC and 12th on EY across the universe gets a combined rank
+of 17; sort every stock by that combined score, and the names at the top are
+simultaneously good *and* cheap. Greenblatt's own backtests showed this simple,
+mechanical combination beating the vast majority of professional fund managers
+over long periods — largely because it forces you to buy unpopular, temporarily
+out-of-favor companies instead of the popular, expensive ones everyone already
+wants.
+
+This project doesn't stop at the ranking. **Phase A** reproduces Greenblatt's
+formula and eligibility rules exactly (see above); **Phases B and C** add an LLM
+research layer that argues both sides of each candidate and flags the specific
+events that would prove the thesis wrong — so you have more to go on than the
+ranking alone before deciding whether to act on a name.
 
 ## Requirements
 
@@ -237,9 +277,9 @@ flow through.
 
 Time runs to the **back half** of each quarter's filing cycle. Filings cluster in the
 4–6 weeks after each quarter end, and the earnings-blackout gate drops anything that
-reported in the last 7 days — so running at the peak costs you candidates. Measured on
-the 2026-07-28 run, at peak Q2 season that gate removed **28% of survivors** (16 of
-58). Mid-quarter it removes far fewer.
+reported in the last 7 days — so running at the peak costs you candidates. For example,
+in a sample run timed at the peak of Q2 filing season, this gate alone removed **28% of
+survivors** (16 of 58); a mid-quarter run sees far less falloff.
 
 A workable schedule — six runs, each clear of the filing peak:
 
