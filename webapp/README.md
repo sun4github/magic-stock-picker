@@ -39,6 +39,61 @@ the app is read-only and never modifies the database. The "by pipeline run" view
 is `ticker_runs` grouped by `run_id`; the per-ticker view is `ticker_runs`
 filtered by `ticker`.
 
+## 🍋 Learn the terms — investing lessons via a lemonade stand
+
+Reading a real 10-K for fun is a niche hobby. So there's a third mode in the top
+nav — **🍋 Learn the terms** — that teaches the exact same formulas the screener
+runs on actual companies, except the "company" here is a kid's lemonade stand
+with a folding table and a hand-painted sign, and nobody's life savings are on
+the line while you figure it out.
+
+**Drag the sliders, watch the whole business wobble.** Cups sold, price per
+cup, ingredients (lemons + ice) cost, operating expenses, the cost of the stand
+itself, debt, cash, goodwill (yes, even lemonade stands can overpay for
+acquisitions), market cap, and tax rate — ten knobs, and every one of them
+updates a live income statement, balance sheet, cash flow statement, and the two
+numbers Greenblatt actually built the Magic Formula around: **Return on
+Capital** and **Earnings Yield**. Hover any line item for a popover with its
+formula, a plain-English definition, and a worked lemonade-stand example — no
+finance degree, or even a summer job running a stand, required.
+
+**Six scenarios, one stand, wildly different fortunes.** Rather than making you
+stumble onto the "aha" yourself, six preset buttons hand it to you on a
+napkin:
+
+| Preset | What it teaches |
+| :--- | :--- |
+| 📄 Cheat-sheet example | The baseline numbers — matches the downloadable cheat sheet exactly |
+| ✅ Cheap & high quality | The actual sweet spot the Magic Formula goes hunting for |
+| 💎 Great business, priced for perfection | Great lemonade, terrible price — quality alone doesn't make it cheap |
+| ⚠️ Cheap but mediocre | Rock-bottom price, and the lemonade explains why |
+| 🕳️ Value trap | Looks cheap, is drowning in debt, and quietly getting worse by the cup |
+| 🎭 Goodwill rollup (the ROC mirage) | The stand "bought" a few rival stands, and its ROC now flatters it for reasons that have nothing to do with lemonade |
+
+Click through them and watch the same ten numbers rearrange into every corner
+of the cheap-vs-quality grid the Magic Formula grades stocks on — including the
+one corner where the formula itself can be fooled by goodwill, which is exactly
+the trap [§2.F of the architecture spec](../src/specs/agent_architecture.md)
+warns the real screener about. Turns out a lemonade stand can teach you to
+distrust an inflated ROC just as well as a real balance sheet can.
+
+**An "illustrative screen" badge** applies the same cheap-and-good logic as the
+real Phase A screener (Earnings Yield ≥ 10%, Return on Capital ≥ 25%) so a
+Buy/Watch/Avoid-style badge reacts to your sliders in real time. It's a teaching
+simplification, not this app's actual verdict — the real one only shows up after
+the bear, bull, and sale-advisor agents have fought it out over an actual 10-K,
+not a lemonade stand's napkin math. Think of the Learn tab as training wheels
+for [`src/magic_formula_starter_screener.py`](../src/magic_formula_starter_screener.py),
+running the same eligibility logic on a business simple enough to hold in your
+head.
+
+**Take the stand home with you.** The **📄 Open cheat sheet** / **⬇ Download**
+buttons hand you a print-ready reference sheet
+(`static/learn/lemonade-cheat-sheet.html`) with every formula, every
+definition, and the same baseline numbers as the "Cheat-sheet example" preset —
+print it, save it as a PDF, or just keep it open in another tab while you poke
+at the sliders. Same stand, same numbers, no matter which one you open.
+
 ## Requirements
 
 - Python 3.10+
