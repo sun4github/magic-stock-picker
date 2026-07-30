@@ -7,6 +7,14 @@ spec in [`src/specs/agent_architecture.md`](../src/specs/agent_architecture.md)
 (the "why," with diagrams) and the root [`README.md`](../README.md) (the
 "how to run it," for end users).
 
+That spec, together with [`src/specs/workflow.feature`](../src/specs/workflow.feature)
+(behavior, in Gherkin) and [`src/specs/config.yaml`](../src/specs/config.yaml)
+(tunable parameters), is a **Spec-Driven Development** artifact set: it was
+authored first and used to generate the implementation, not written afterward
+to describe it. Both spec files are living documents, revised as the system
+changed — `agent_architecture.md` §4 is a worked example, explicitly marked as
+superseded scaffolding rather than silently left to contradict the shipped code.
+
 Read [`../README.md`](../README.md) first if you just want to run the tool.
 Come here once you need to change or extend the code.
 
