@@ -58,7 +58,10 @@ saved locally to `src/reports/<TICKER>_Final_Report_<Buy|Watch|Avoid>.md` and
 `src/reports/<TICKER>_Sale_Advisory.md`.
 
 See [`src/specs/agent_architecture.md`](src/specs/agent_architecture.md) and
-[`src/specs/workflow.feature`](src/specs/workflow.feature) for the full design spec.
+[`src/specs/workflow.feature`](src/specs/workflow.feature) for the full design spec
+(with diagrams), and [`docs/`](docs/README.md) for a developer-facing code
+walkthrough with file/line references into `main.py`, `mcp_server.py`, the
+screener, and the web viewer.
 
 ## Requirements
 

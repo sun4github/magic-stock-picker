@@ -26,11 +26,15 @@ agents:
   screener_agent:
     name: "Magic_Formula_Screener"
     top_n_candidates: 30
-    script_path: "magic_formulae_screener.py"
+    # Informational only — not read by any code path. The actual wrapped script is
+    # magic_formula_starter_screener.py (see mcp_server.py's run_magic_formula_screener).
+    script_path: "magic_formula_starter_screener.py"
 
   # NOTE: SEC 10-K and FMP metrics are gathered by DIRECT tool calls (no LLM) for
-  # 100% fidelity; there are no sec/metrics LLM agents. Phase B reasoning is a
-  # SequentialAgent of three roles: bear -> bull -> neutral analyst.
+  # 100% fidelity; there are no sec/metrics LLM agents. Phase B reasoning is three
+  # roles run in sequence over one shared session (bear -> bull -> neutral analyst),
+  # implemented as a plain list of LlmAgents (not ADK's SequentialAgent class) so a
+  # 429 can be retried at just the failed role. See agent_architecture.md §1 and §5B.
 
   bear_agent:
     name: "Bear_Agent"

@@ -9,7 +9,7 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
 
   Scenario: Execute Phase A Magic Formula Screening
     Given the "Magic Formula Screener Agent" receives a request to screen the market
-    When it executes the MCP tool "run_magic_formula_screener" wrapping "magic_formulae_screener.py"
+    When it executes the MCP tool "run_magic_formula_screener" wrapping "magic_formula_starter_screener.py"
     Then the tool should return a ranked list of valid stock candidates using real-time price inputs
     And the "Magic Formula Screener Agent" filters and selects exactly the Top 30 ranked companies
     And hands off the list of Top 30 companies to the Orchestrator Agent for Phase B analysis
@@ -54,7 +54,7 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     When it processes each company sequentially
     Then it gathers evidence via direct tool calls (SEC 10-K, FMP metrics) and the Magic Formula value/quality signal (ROC/Earnings Yield)
     And for an on-demand single ticker it computes ROC/Earnings Yield on the fly since the screener did not run
-    And it runs a SequentialAgent of two advocates and a neutral judge:
+    And it runs three roles in sequence over one shared session -- two advocates and a neutral judge -- as a plain ordered list of LlmAgents (not ADK's SequentialAgent class), so a mid-graph rate limit can retry just the failed role:
       | Agent Name    | Instruction / Tools                                  | Objective                                                       |
       | Bear Agent    | research-instructions.md + fmp_stock_news + Tavily   | Build the skeptical BEAR case (bear_data)                       |
       | Bull Agent    | bullish-research-instructions.md + fmp_stock_news + Tavily | Build the BULL case (bull_data); Section 4 refutes the bear case |

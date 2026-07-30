@@ -6,18 +6,61 @@ This specification guides the Coding Agent in implementing a multi-agent investm
 
 ## 1. System Overview & Sequence Workflow
 
-The application supports two execution modes (see Section 8 for details):
+The application supports five execution modes (see §8.A for the full list —
+full pipeline, screen-only, from-CSV, on-demand single-ticker, and sell-check):
 
-- **Full pipeline run** — Phase A screener feeds the Top N candidates into Phase B.
-- **On-demand single-ticker run** — Phase B runs directly on one user-supplied
+- **Full pipeline run** — Phase A screener feeds the Top N candidates into Phase B/C.
+- **Screen-only run** — Phase A alone; refreshes the rankings CSV and stops (no cost).
+- **CSV run** — skips Phase A, reusing a previous rankings CSV, then runs Phase B/C.
+- **On-demand single-ticker run** — Phase B/C runs directly on one user-supplied
   ticker, bypassing Phase A. It is still recorded as its own `pipeline_runs`
   entry (containing just that one ticker) for full traceability.
+- **Sell-condition check** — a Phase C follow-up for a single already-owned
+  ticker; does not create a `pipeline_runs` row.
 
-The application must execute a strict 4-stage sequential workflow managed by a primary **Google ADK Workflow/Orchestrator Agent**:
+The application executes up to a 4-stage workflow (screening, then three
+per-ticker phases) managed by `main.py`'s orchestration functions (there is no
+single top-level "Orchestrator Agent" object — `run_orchestrator`,
+`run_from_csv`, `run_single_ticker`, etc. each drive the same shared
+`analyze_ticker` per-ticker logic; see §8):
+
+```mermaid
+flowchart TD
+    Start(["python main.py ..."]) --> Mode{"Execution mode"}
+
+    Mode -->|"bare / --from-csv"| PhaseA["Phase A: Screener\n(run_magic_formula_screener)"]
+    Mode -->|"--screen-only"| ScreenOnly["Phase A only\nwrite rankings CSV, stop"]
+    Mode -->|"TICKER"| OnDemand["On-demand single ticker\ncompute_ticker_magic_metrics"]
+    Mode -->|"--sell-check TICKER"| SellCheck["Sell-Condition Check\n(standalone, Phase C follow-up)"]
+
+    PhaseA --> TopN["Top N candidates\n(config top_n_candidates / --top-n)"]
+    TopN --> PhaseB
+    OnDemand --> PhaseB
+
+    subgraph PerTicker["Phase B + C — per ticker (analyze_ticker)"]
+        direction TB
+        Gather["Direct tool calls (no LLM):\nSEC 10-K, FMP metrics,\nquarterly trends, verified figures"]
+        Gather --> Bear["Bear Agent\n(research-instructions.md)"]
+        Bear -->|bear_data| Bull["Bull Agent\n(bullish-research-instructions.md)"]
+        Bull -->|bull_data| Analyst["Analyst Agent\n(neutral judge)"]
+        Analyst -->|final_report| SaleAdvisor["Sale Advisor Agent\n(sale-advisor-instructions.md)\nskippable: --skip-sale-advisor"]
+    end
+
+    PhaseB --> PerTicker
+    PerTicker --> Persist["Persist to Postgres:\nagent_outputs, final_reports,\nticker_runs"]
+    Persist --> Reports["Write reports/*.md"]
+
+    SellCheck --> LoadCase["Load stored SALE_CASE\n(db_get_sale_case)"]
+    LoadCase --> Evaluate["Sell Check Agent\ncompares current data vs conditions"]
+    Evaluate --> SellReport["reports/TICKER_Sell_Check.md\n(SELL / HOLD)"]
+
+    ScreenOnly --> CSVFile[("magic_formula_rankings_live.csv")]
+    CSVFile -.->|"--from-csv reads this later"| PhaseA
+```
 
 1. **Phase A: Magic Formula Screening**
    - **Agent:** `MagicFormulaScreenerAgent`
-   - **Action:** Triggers the MCP Tool wrapping `magic_formulae_screener.py`.
+   - **Action:** Triggers the MCP Tool wrapping `magic_formula_starter_screener.py`.
    - **Eligibility gates** (Greenblatt's step-by-step screen — see §2.H): drop financials, utilities, funds/REITs and foreign issuers (ADRs); drop **ROA below 25%**; drop **P/E below 5**; drop anything that **announced earnings in the last 7 days**.
    - **Output:** Ranks the survivors on the Magic Formula itself (ROC + Earnings Yield), extracting exactly the **Top 30 ranked companies**.
 2. **Phase B: Balanced Decomposer Analysis** (per ticker)
@@ -31,7 +74,7 @@ The application must execute a strict 4-stage sequential workflow managed by a p
 
    These are gathered once and seeded into session state (`sec_data`, `metrics_data`, `quarterly_data`, `verified_figures`, `screen_context`) for the three reasoning agents below.
 
-   **Reasoning — a `SequentialAgent` of two advocates and a neutral judge:**
+   **Reasoning — three roles run in sequence over one shared session (bear, then bull, then the neutral judge):** implemented as a plain ordered list of `LlmAgent`s run one after another against the same ADK session (`output_key` handoff), not ADK's `SequentialAgent` class — see §5B "Per-agent retry" for why: it lets a mid-graph 429 retry only the role that failed instead of re-running (and re-paying for) every role before it.
    - **Agent 1: Bear Agent** — instruction = `research-instructions.md` (skeptical). Uses `fmp_stock_news` + `web_search_tool` (Tavily, bear queries) plus the SEC/metrics data to build the **bear case** → `state['bear_data']`.
    - **Agent 2: Bull Agent** — instruction = `bullish-research-instructions.md`. Runs **after** the bear agent (its Section 4 directly refutes the bear case). Uses `fmp_stock_news` + `web_search_tool` (Tavily, bull queries) plus SEC/metrics/`screen_context` to build the **bull case** → `state['bull_data']`.
    - **Agent 3: Analyst Agent (Neutral Judge)** — carries **no** skeptical prompt. Weighs `bear_data` vs `bull_data` (plus `screen_context`, `quarterly_data`, `verified_figures`) and emits a combined Markdown report with `## Recent Quarter Check`, `## Bull Case`, `## Bear Case`, `## Final Verdict`, and `## What Would Make This Wrong` sections.
@@ -42,6 +85,38 @@ The application must execute a strict 4-stage sequential workflow managed by a p
         - **What Would Make This Wrong:** every report, whatever the verdict, names the single most likely way it is wrong as a specific observable development, and what a reader would see in a future earnings report if it were happening.
         - **Balance:** skepticism lives in the Bear Agent, balanced by an equal Bull Agent; the judge itself is neutral. This removes the structural bear bias. The anti-over-caution guidance in the verdict stance is paired with an equal anti-optimism constraint — the two failure directions are symmetric and both are guarded.
         - **Output:** written to `reports/{Ticker}_Skeptical_Analysis.md`; `bear_data`/`bull_data` are also persisted separately as `agent_outputs` (BEAR_CASE / BULL_CASE) for drill-down.
+
+   **Handoff sequence.** Each role runs as its own `Runner` call over the same
+   ADK session, so a rate-limit retry only re-runs the role that failed (see
+   §5B). The `output_key` on each `LlmAgent` writes into shared session state,
+   which the next agent's instruction template reads:
+
+   ```mermaid
+   sequenceDiagram
+       participant O as analyze_ticker
+       participant S as Shared ADK session
+       participant Bear as Bear Agent
+       participant Bull as Bull Agent
+       participant Judge as Analyst Agent
+       participant Sale as Sale Advisor Agent
+
+       O->>S: seed ticker, company_name, sec_data,<br/>metrics_data, quarterly_data,<br/>verified_figures, screen_context
+       O->>Bear: run (reads sec_data/metrics_data/screen_context)
+       Bear->>Bear: fmp_stock_news + web_search_tool (bear framing)
+       Bear->>S: write bear_data
+       O->>Bull: run (reads bear_data + sec_data/metrics_data/screen_context)
+       Bull->>Bull: fmp_stock_news + web_search_tool (bull framing)
+       Bull->>S: write bull_data
+       O->>Judge: run (reads bear_data + bull_data + verified_figures)
+       Judge->>S: write final_report (verdict: Buy/Watch/Avoid)
+       alt not --skip-sale-advisor
+           O->>Sale: run (reads final_report + verified_figures)
+           Sale->>Sale: fmp_stock_news + web_search_tool (adverse events)
+           Sale->>S: write sale_data
+       end
+       O->>S: read final state (bear_data, bull_data,<br/>final_report, sale_data)
+       O->>O: reconciliation gate + persist to Postgres
+   ```
 
    **Post-generation — reconciliation gate (no LLM):** after the graph completes, every agent-written section is checked against `verified_figures`; contradictions are logged and surfaced in the report. See §2.E.
 
@@ -66,7 +141,7 @@ the feeds and deterministic checks that constrain what the reasoning agents are
 able to claim. Each one exists because of a specific observed failure, recorded
 inline so the constraint is not later removed as redundant.
 
-### A. Screener MCP Tool (`magic_formulae_screener.py`)
+### A. Screener MCP Tool (`magic_formula_starter_screener.py`)
 - Create an MCP server/tool wrapper `run_magic_formula_screener` around `magic_formula_starter_screener.py`.
 - The tool must execute the script, read the resulting `magic_formula_rankings_live.csv`, extract the Top 30 ranked companies, and return them in JSON format to the `MagicFormulaScreenerAgent`.
 
@@ -333,6 +408,20 @@ similar-looking percentages side by side.
 
 The gates, in the order they are applied:
 
+```mermaid
+flowchart TD
+    U["FMP screener universe\n(up to universe_limit companies)"] --> G1{"1. Universe exclusions\nsector/industry/ETF/fund/ADR"}
+    G1 -->|excluded| Drop1[["dropped\n(no API cost)"]]
+    G1 -->|survives| G2{"2. ROA >= min_roa\n(25% default)"}
+    G2 -->|below| Drop2[["dropped"]]
+    G2 -->|survives| G3{"3. P/E >= min_pe\n(5 default; loss-makers exempt)"}
+    G3 -->|below| Drop3[["dropped"]]
+    G3 -->|survives| G4{"4. Earnings in last\nexclude_recent_earnings_days?"}
+    G4 -->|"reported recently"| Drop4[["dropped"]]
+    G4 -->|survives| Rank["Rank survivors:\nROC_Rank + EY_Rank = MagicFormula_Score\n(lower score = better Final_Rank)"]
+    Rank --> Top["Top N candidates\n(warns if fewer than top_n_candidates survive)"]
+```
+
 1. **Universe exclusions** (`_universe_exclusion_reason`) — no API cost, applied to the
    screener response before any statements are fetched. Drops excluded **sectors**
    (Financial Services, Utilities), excluded **industries** (banks, insurers, asset
@@ -433,6 +522,18 @@ The system must log all execution steps, tool invocations, and agent handoffs:
 
 The coding agent should construct the main program using `google-adk` as follows:
 
+> **This section is the original scaffolding sketch and does not match the shipped
+> implementation.** It predates the decision (§2, §8) to gather SEC/metrics data via
+> direct tool calls with no LLM in the loop, so `sec_agent`, `metrics_agent`, and
+> `search_agent` below were never built — there is no LLM agent wrapping SEC/FMP
+> data gathering in `main.py`. `screener_agent` was also never built as an `Agent`;
+> the screener runs as a direct call to `run_magic_formula_screener()` inside
+> `run_orchestrator`/`run_screen_only`. The actual reasoning agents are `bear_agent`,
+> `bull_agent`, `analyst_agent`, `sale_advisor_agent`, and `sell_check_agent`,
+> defined in `main.py` (see [`docs/02-agents-and-prompts.md`](../../docs/02-agents-and-prompts.md)
+> for the real definitions with line references). Kept here only as historical
+> context for the original design intent.
+
 ```python
 import os
 import logging
@@ -498,12 +599,55 @@ The system stores all intermediate outputs and final reports in a PostgreSQL dat
 ### A. Tables
 1. `pipeline_runs` — one row per run: status, tickers, and aggregated token/search usage + estimated cost.
 2. `agent_outputs` — raw per-step outputs, keyed by `(run_id, ticker, agent_type)`; `agent_type` ∈ `SEC_DATA`, `QUANT_METRICS`, `BEAR_CASE`, `BULL_CASE`, `SALE_CASE`. Optional `embedding vector(768)`.
-3. `final_reports` — the neutral analyst's combined report + `verdict` (`BUY`/`WATCH`/`AVOID`; legacy `HOLD`/`SELL` still valid) + embedding.
-4. `ticker_runs` — a lean per-ticker index of runs (`ticker`, `run_id`, `company_name`, `verdict`, `run_date`), **built to drive the web UI**. No report text is duplicated here; the UI joins back to `agent_outputs`/`final_reports` on `run_id`. `initialize_database()` backfills it from existing `final_reports`.
+3. `final_reports` — the neutral analyst's combined report + `verdict` (`BUY`/`WATCH`/`AVOID`; legacy `HOLD`/`SELL` still valid) + embedding + `analysis_key` (the reuse fingerprint).
+4. `ticker_runs` — a lean per-ticker index of runs (`ticker`, `run_id`, `company_name`, `verdict`, `run_date`, `magic_rank`), **built to drive the web UI**. No report text is duplicated here; the UI joins back to `agent_outputs`/`final_reports` on `run_id`. `initialize_database()` backfills it from existing `final_reports`.
+
+```mermaid
+erDiagram
+    pipeline_runs ||--o{ agent_outputs : "run_id"
+    pipeline_runs ||--o{ final_reports : "run_id"
+    pipeline_runs ||--o{ ticker_runs : "run_id"
+
+    pipeline_runs {
+        uuid run_id PK
+        text status
+        text[] top_30_tickers
+        int model_requests
+        bigint total_tokens
+        numeric total_cost_usd
+    }
+    agent_outputs {
+        uuid output_id PK
+        uuid run_id FK
+        varchar ticker
+        varchar agent_type "SEC_DATA / QUANT_METRICS / BEAR_CASE / BULL_CASE / SALE_CASE"
+        text raw_content
+        jsonb metadata
+        vector embedding "768 dims, zero-vector on failure"
+    }
+    final_reports {
+        uuid report_id PK
+        uuid run_id FK
+        varchar ticker
+        varchar verdict "BUY / WATCH / AVOID (legacy HOLD/SELL)"
+        text markdown_report
+        vector embedding
+        text analysis_key "sha256(ticker | balance-sheet date | prompt version)"
+    }
+    ticker_runs {
+        uuid id PK
+        varchar ticker
+        uuid run_id FK
+        text company_name
+        varchar verdict
+        timestamptz run_date
+        int magic_rank "NULL for on-demand runs"
+    }
+```
 
 ### B. Database MCP Tools
 1. `db_store_agent_output(run_id, ticker, agent_type, raw_content, metadata_json, embed=True)`:
-   - Inserts into `agent_outputs`. When `embed=True`, generates a `text-embedding-004` vector on `raw_content`. **SEC/metrics are stored with `embed=False`** (raw provenance, low search value); **bear/bull cases are embedded** for semantic search.
+   - Inserts into `agent_outputs`. When `embed=True`, generates a `gemini-embedding-001` vector (pinned to 768 dims) on `raw_content`. **SEC/metrics are stored with `embed=False`** (raw provenance, low search value); **bear/bull/sale cases are embedded** for semantic search.
 2. `db_store_final_report(run_id, ticker, verdict, markdown_report)`:
    - Normalizes the verdict to `BUY`/`WATCH`/`AVOID` (default `WATCH`), embeds the report, and inserts into `final_reports`.
 3. `db_store_ticker_run(run_id, ticker, company_name, verdict)`:
@@ -781,14 +925,22 @@ Phase B distinguishes **data-relay** steps from **reasoning** steps:
   deterministic tools, so `analyze_ticker` calls them **directly** and seeds
   their raw output into session state as `sec_data` / `metrics_data`. This gives
   100% data fidelity (no LLM summarization) and costs zero tokens.
-- **Reasoning — an ADK `SequentialAgent` graph of three roles:** `bear_agent`
-  (`research-instructions.md`, → `bear_data`) → `bull_agent`
-  (`bullish-research-instructions.md`, → `bull_data`; runs after bear so §4 can
-  refute it) → `analyst_agent` (neutral judge → `final_report`). Both advocates
-  read `{sec_data}` / `{metrics_data}` / `{screen_context}`; the bull agent also
-  reads `{bear_data}`; the judge reads `{bear_data}` / `{bull_data}`. `ticker`,
-  `company_name`, `sec_data`, `metrics_data`, and `screen_context` are seeded
-  into session state before the graph runs.
+- **Reasoning — an ordered list of four `LlmAgent` roles run over one shared
+  ADK session (`PIPELINE_AGENTS` in `main.py`), not ADK's `SequentialAgent`
+  class:** `bear_agent` (`research-instructions.md`, → `bear_data`) →
+  `bull_agent` (`bullish-research-instructions.md`, → `bull_data`; runs after
+  bear so §4 can refute it) → `analyst_agent` (neutral judge → `final_report`)
+  → `sale_advisor_agent` (Phase C, → `sale_data`). Both advocates read
+  `{sec_data}` / `{metrics_data}` / `{screen_context}`; the bull agent also
+  reads `{bear_data}`; the judge reads `{bear_data}` / `{bull_data}`; the sale
+  advisor reads `{final_report}`. `ticker`, `company_name`, `sec_data`,
+  `metrics_data`, and `screen_context` are seeded into session state before the
+  graph runs. Handoff between roles works exactly as `SequentialAgent` would
+  (each agent's `output_key` writes into the shared session state the next
+  agent templates), but running the roles as separate `Runner` calls instead
+  of one `SequentialAgent` lets `_run_pipeline_async` retry only the role that
+  hit a 429 rather than discarding and re-paying for every earlier role — see
+  §5B "Per-agent retry".
 
 Phase C makes predictive analysis and uses **reasoning**:
 (`sale-advisor-instructions.md` + FMP news search + Web search) -> `SALE_CASE`; runs after Phase B is complete and `analyst_agent`
@@ -959,6 +1111,24 @@ The UI is driven by the `ticker_runs` index table (which carries both the
 per-ticker and per-run views — no report text is duplicated there); report
 bodies are fetched on demand from `agent_outputs` (`BEAR_CASE` / `BULL_CASE` / `SALE_CASE`)
 and `final_reports`:
+
+```mermaid
+flowchart LR
+    Browser["Browser\n(templates/index.html)"] -->|"GET /api/tickers"| App["Flask app\n(webapp/app.py)"]
+    Browser -->|"GET /api/runs?ticker="| App
+    Browser -->|"GET /api/pipeline-runs"| App
+    Browser -->|"GET /api/pipeline-run?run_id="| App
+    Browser -->|"GET /api/report?ticker=&run_id="| App
+    Browser -->|"GET /download, /download-run"| App
+
+    App -->|"SELECT ... FROM ticker_runs"| DB[("PostgreSQL\n(same DB the agent writes to)")]
+    App -->|"SELECT ... FROM agent_outputs\nWHERE agent_type IN (BEAR_CASE, BULL_CASE, SALE_CASE)"| DB
+    App -->|"SELECT ... FROM final_reports"| DB
+    App -->|"markdown.markdown(...)\nserver-side render"| Browser
+```
+
+The webapp never writes to the database — it is strictly read-only, and it
+reads its own `webapp/.env` (`DATABASE_URL`, `PORT`) rather than the pipeline's.
 
 **By ticker**
 - `GET /api/tickers` → distinct tickers (alphabetical; optional `?q=` substring).
