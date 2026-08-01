@@ -31,6 +31,7 @@ from magic_formula_starter_screener import (
     main as run_screener_main,
     OUTPUT_FILENAME,
     compute_company_metrics_detailed,
+    attach_growth_metrics,
     fmp_get,
     FMPError,
 )
@@ -93,11 +94,18 @@ def compute_ticker_magic_metrics(ticker: str) -> str:
                 "CapitalEmployed": metrics.get("CapitalEmployed"),
                 "LiveMarketCap": live_cap,
             })
+        # Lynch's growth figures. Costs one extra request, spent unconditionally here
+        # (the screener spends it only on gate survivors) because an on-demand run is
+        # asking about ONE named company and the PEG is part of the answer.
+        attach_growth_metrics(ticker, metrics, api_key)
+
         roic = metrics.get("ROIC_InclGoodwill")
         intang_share = metrics.get("IntangiblesShareOfAssets")
         roa = metrics.get("ROA")
         roa_ni = metrics.get("ROA_NetIncome")
         pe = metrics.get("PE")
+        growth = metrics.get("EPSGrowth")
+        peg = metrics.get("PEG")
         return json.dumps({
             "Symbol": ticker,
             "CompanyName": metrics.get("CompanyName", ticker),
@@ -111,6 +119,38 @@ def compute_ticker_magic_metrics(ticker: str) -> str:
             "ROA_Pct": f"{round(roa * 100, 2)}%" if roa is not None else None,
             "ROA_NetIncome_Pct": f"{round(roa_ni * 100, 2)}%" if roa_ni is not None else None,
             "PE_Ratio": round(pe, 2) if pe is not None else None,
+            # Lynch's PEG test. Reported, never enforced here, for the same reason as
+            # the two gate figures above: the report says which side of the "PEG at or
+            # below 1.2, and growing at all" cuts this company falls on. Both the raw
+            # ratio and the display string go out, because the batch and single-ticker
+            # candidate shapes must agree (agent_architecture.md §2.I).
+            "EPSGrowth": growth,
+            "EPSGrowth_Pct": f"{round(growth * 100, 2)}%" if growth is not None else None,
+            # What the PEG was actually divided by: the same rate unless the
+            # sustainability cap bit (see MAX_GROWTH_FOR_PEG in the screener).
+            "EPSGrowth_ForPEG": metrics.get("EPSGrowth_ForPEG"),
+            "EPSGrowth_Capped": metrics.get("EPSGrowth_Capped"),
+            "PEG": peg,
+            "PEG_Ratio": round(peg, 2) if peg is not None else None,
+            "EPS_Current": metrics.get("EPS_Current"),
+            "EPS_Base": metrics.get("EPS_Base"),
+            "EPS_Current_Date": metrics.get("EPS_Current_Date"),
+            "EPS_Base_Date": metrics.get("EPS_Base_Date"),
+            "EPS_Basis": metrics.get("EPS_Basis"),
+            # Which window the growth was measured over ("sums" = N-year totals vs
+            # the prior N years; "endpoint" = the two-point CAGR), and whether the
+            # base window was a real trading period or a breakeven one.
+            "EPS_Window": metrics.get("EPS_Window"),
+            "EPS_Window_Years": metrics.get("EPS_Window_Years"),
+            "BaseNetMargin": metrics.get("BaseNetMargin"),
+            "BaseNetMargin_Pct": (
+                f"{round(metrics['BaseNetMargin'] * 100, 2)}%"
+                if metrics.get("BaseNetMargin") is not None else None
+            ),
+            "EPSGrowth_Years": metrics.get("EPSGrowth_Years"),
+            # Why the growth rate is missing, when it is, so the report can explain it
+            # instead of printing a bare "Not available" (see ROIC_Unavailable_Reason).
+            "EPSGrowth_Unavailable_Reason": metrics.get("EPSGrowth_Unavailable_Reason"),
             "NetIncome": metrics.get("NetIncome"),
             "EBIT_Basis": metrics.get("EBIT_Basis"),
             "EBIT": metrics.get("EBIT"),
@@ -119,6 +159,7 @@ def compute_ticker_magic_metrics(ticker: str) -> str:
             "LiveMarketCap": live_cap,
             "Final_Rank": None,
             "MagicFormula_Score": None,
+            "Composite_Score": None,
             # Authoritative balance-sheet figures + goodwill-inclusive ROIC. These
             # are what the reconciliation gate checks agent prose against, and what
             # keeps a rollup's headline ROC from being read as operating efficiency.

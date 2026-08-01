@@ -144,6 +144,9 @@ inline so the constraint is not later removed as redundant.
 ### A. Screener MCP Tool (`magic_formula_starter_screener.py`)
 - Create an MCP server/tool wrapper `run_magic_formula_screener` around `magic_formula_starter_screener.py`.
 - The tool must execute the script, read the resulting `magic_formula_rankings_live.csv`, extract the Top 30 ranked companies, and return them in JSON format to the `MagicFormulaScreenerAgent`.
+- Ranking is **three** factors, not two: Greenblatt's ROC and earnings yield plus
+  Lynch's `1/PEG` (§10). `compute_ticker_magic_metrics` computes the same figures for a
+  single ticker on demand, and per §2.I both paths must always emit the same fields.
 
 ### B. SEC EDGAR MCP Tool (`sec_edgar_extractor`)
 - Create a Python script utilizing the `edgar-tools` or `sec-edgar-downloader` library.
@@ -387,10 +390,15 @@ the **rendered prose**, so no stored verdict or historical run is invalidated.
 
 Separate from the ranking, and applied before it. *The Little Book That Still Beats
 the Market* gives step-by-step instructions for building the screen by hand on a free
-stock screener; those steps are eligibility conditions, not the formula. The formula
-(ROC + Earnings Yield) still decides the **order**; these decide who is **in the list
-at all**. All are configurable under `screening_parameters:` in `config.yaml`, and any
-can be disabled by setting it to `null`.
+stock screener; those steps are eligibility conditions, not the formula. The ranking
+formula decides the **order**; these decide who is **in the list at all**. All are
+configurable under `screening_parameters:` in `config.yaml`, and any can be disabled by
+setting it to `null`.
+
+Gate 4 below (**PEG / EPS growth**) is *not* Greenblatt's — it is Peter Lynch's, added
+here because his two ratios say nothing about growth. It is documented in full in
+**§10**, it is the only gate that feeds the ranking as well as the list, and it is
+the only one whose thresholds were set by measurement rather than by the book (§10.I).
 
 **Return on Assets is not Return on Capital.** They share a numerator (EBIT) and
 differ entirely in the denominator:
@@ -416,9 +424,11 @@ flowchart TD
     G2 -->|below| Drop2[["dropped"]]
     G2 -->|survives| G3{"3. P/E >= min_pe\n(5 default; loss-makers exempt)"}
     G3 -->|below| Drop3[["dropped"]]
-    G3 -->|survives| G4{"4. Earnings in last\nexclude_recent_earnings_days?"}
+    G3 -->|survives| G5{"4. EPS growth > 0\nAND base margin >= 3%\nAND PEG <= 1.5\n(§10; costs 1 extra call)"}
+    G5 -->|"flat/shrinking,\nbreakeven base,\nPEG too high,\nor not computable"| Drop5[["dropped"]]
+    G5 -->|survives| G4{"5. Earnings in last\nexclude_recent_earnings_days?"}
     G4 -->|"reported recently"| Drop4[["dropped"]]
-    G4 -->|survives| Rank["Rank survivors:\nROC_Rank + EY_Rank = MagicFormula_Score\n(lower score = better Final_Rank)"]
+    G4 -->|survives| Rank["Rank survivors:\nROC_Rank + EY_Rank + PEG_Rank\n= Composite_Score\n(lower score = better Final_Rank)"]
     Rank --> Top["Top N candidates\n(warns if fewer than top_n_candidates survive)"]
 ```
 
@@ -446,7 +456,16 @@ flowchart TD
    one-off event (an asset sale, a settlement) inflated a single year's earnings, so
    the "bargain" will not repeat. Loss-makers have **no** P/E and are not caught by
    this gate — they are already gone via the negative-EBIT check.
-4. **No earnings announcement in the last 7 days** (`fetch_recent_earnings_symbols`) —
+4. **EPS growth above zero, a base window above 3% net margin, and PEG ≤ 1.5**
+   (`growth_gate_reason`) — **not Greenblatt's**; Peter Lynch's test, added because
+   gates 2 and 3 are blind to a shrinking business. Costs one extra request per
+   company, so it is spent only on what survives the gates above. Unlike every other
+   gate here, **missing data is a rejection** — `1/PEG` is a ranking input, so a
+   survivor without one cannot be ranked. Fully documented in **§10**: the growth
+   rate is measured as multi-year TOTALS rather than two endpoint years (§10.C), the
+   base window must have been a real trading period rather than a breakeven one
+   (§10.D), and each threshold was set from a 189-company study (§10.I).
+5. **No earnings announcement in the last 7 days** (`fetch_recent_earnings_symbols`) —
    a fresh report has not been absorbed into the price yet. Applied **only to the
    survivors** of gates 1–3, via one bulk `/stable/earnings-calendar` call over the
    trailing window, falling back to per-symbol `/stable/earnings` if that endpoint is
@@ -458,9 +477,13 @@ flowchart TD
 
 **Severity.** On a sampled run the ROA gate alone eliminated ~95% of the universe
 (the 90th percentile of EBIT-basis ROA is ≈19%), leaving ~70 candidates from a 1,773
-company universe. That is Greenblatt's intent, but Phase B analyzes the top 30, so the
-screener prints a **warning when fewer than 30 companies survive** — at that point the
-screen is not stricter, it is broken.
+company universe. The PEG gate then removes a large share of *those* — on the
+2026-07-31 run at the original thresholds, 62 survivors became 13 (see §10.L for the
+full funnel and the tuning advice). That is Greenblatt's intent
+compounded with Lynch's, but Phase B analyzes the top 30, so the screener prints a
+**warning when fewer than 30 companies survive** — at that point the screen is not
+stricter, it is mistuned. That warning fired on the first run with both gates
+active, at 11 survivors.
 
 ### I. The two candidate shapes — a standing source of silent failure
 
@@ -1202,3 +1225,498 @@ Rules for keeping the two in step:
   and cheat-sheet term both lead with the distinction and show both figures computed
   off the same $120.00 of profit — 47.62% against 90.91% — with the gap attributed to
   the $40.00 cash and $80.00 goodwill that ROC excludes and ROA counts.
+
+---
+
+## 10. The PEG ratio — Peter Lynch's growth test
+
+Introduced from *One Up on Wall Street*. It is the **third** ranking factor, added
+alongside Greenblatt's two, and simultaneously a Phase A eligibility gate.
+
+Three thresholds govern it, and each was set from measurement rather than taste. The
+study behind them is in §10.I; each threshold's own subsection states what it does,
+what happens if it is wrong in either direction, and the evidence for the number:
+
+| Setting | Value | What it constrains |
+| :--- | :--- | :--- |
+| `max_peg` | **1.5** | how expensive, relative to growth, a company may be (§10.E) |
+| `min_base_net_margin` | **3%** | whether the starting period was a real trading period (§10.D) |
+| `max_growth_rate_for_peg` | **60%** | the largest growth rate the PEG may divide by (§10.F) |
+| `eps_growth_method` | **"sums"** | how the growth rate itself is measured (§10.C) |
+
+### A. Why it was added
+
+Greenblatt's two ratios ask whether a company is **cheap** (earnings yield) and
+whether it is a **good business** (return on capital). Neither asks whether it is
+**growing**, and a company whose profits are shrinking gets *cheaper on paper every
+year* — the earnings yield rises as the earnings fall away. That is the value trap the
+Magic Formula buys by design and leaves the basket to average out.
+
+Not hypothetical here. On the screen immediately before this change the **#1 ranked
+company was IRWD**, on a 20.14% earnings yield and a 1,673% ROC — with earnings per
+share that had gone from $3.21 (FY2021) to $0.15 (FY2025), through a $945M write-off
+in between.
+
+**A caution about the mechanism, because it is easy to state backwards.** Falling
+earnings do not *raise* the earnings yield — they shrink its numerator. IRWD ranked
+first because its **price fell far further than its profit did**:
+
+| | End 2022 | Now | Change |
+| :--- | ---: | ---: | ---: |
+| Operating profit (EBIT) | $250.34M | $201.84M (TTM) | −19% |
+| Market value | $1.90B | $0.61B | −68% |
+| EBIT ÷ market value | 13.2% | 33.1% | 2.5× higher |
+
+The screen's cheapness measure is a snapshot — profit now over price now — and it
+cannot distinguish *cheap because the market is wrong* from *cheap because the
+profits are going away*. Lynch's ratio divides the P/E by the growth rate, so a
+company counts as cheap only relative to how fast it is compounding.
+
+### B. The PEG formula
+
+$$\text{PEG} = \frac{\text{P/E}}{\text{growth rate expressed in PERCENTAGE POINTS}}$$
+
+**The unit of the denominator is the single easiest thing here to get wrong.** Lynch's
+rule is that a fairly priced company's P/E equals its growth rate, so a P/E of 20
+against 20% growth is a PEG of exactly 1.0 — the denominator is `20`, not `0.20`.
+Dividing by the decimal gives a PEG a hundred times too large and the ceiling would
+reject the entire market. `test_screen_gates.py` asserts the `20 / 20% = 1.0` identity
+for exactly this reason.
+
+`compute_peg` returns **None**, never a number, when either input is missing or
+non-positive. A negative P/E or a shrinking EPS produces a *negative* PEG, and a
+negative sorts as the cheapest thing on the list — the precise inversion this ratio
+exists to expose. On IRWD the naive arithmetic would have been
+`6.81 ÷ (−46.14) = −0.15`, ranking the worst business best.
+
+| | Source | Period |
+| :--- | :--- | :--- |
+| P/E | market cap ÷ net income (already computed for gate 3) | **TTM** (annual fallback) |
+| Growth rate | annual `/stable/income-statement` EPS, §10.C | fiscal years |
+
+The growth figure therefore lags the P/E it is divided by. That is **stated in the
+report, not hidden**: `EPS_Current_Date` and `EPS_Base_Date` are carried through to
+the CSV and both report blocks so the span is always visible.
+
+### C. How the growth rate is measured — `eps_growth_method`
+
+**Default `"sums"`: the CAGR of the last N years' TOTAL EPS against the prior N
+years' total.**
+
+$$\text{Growth Rate} = \left( \frac{\sum_{i=0}^{N-1} \text{EPS}_{\text{FY}-i}}{\sum_{i=N}^{2N-1} \text{EPS}_{\text{FY}-i}} \right)^{\frac{1}{N}} - 1$$
+
+The alternative, `"endpoint"`, is the original two-point form
+$(\text{EPS}_{\text{now}} / \text{EPS}_{N\ \text{ago}})^{1/N} - 1$ and remains
+selectable in `config.yaml`.
+
+**Why the change.** A two-point CAGR is decided entirely by which two years the
+calendar happens to pick, and it steps straight over everything in between. That is
+wrong in *both* directions, and the same defect produced both of the outliers that
+drove this design:
+
+- **GRND** read `$0.0054 → $0.49` as **+349% a year**, ignoring that it lost money in
+  two of those three years.
+- **IRWD** read `$0.96 → $0.15` as **−46% a year**, a window that happened to bracket
+  a one-off $945M write-off while the trailing twelve months were recovering ~4×.
+
+Totalling whole windows fixes both, because a loss year is counted at its real
+negative value instead of being skipped:
+
+```
+GRND   recent 3 years:  0.49 + (−0.74) + (−0.32)  =  −$0.5700
+       base   3 years:  0.0054 + 0.0331 + (−0.60) =  −$0.5615
+```
+
+Both totals negative → no growth rate, no PEG, excluded. Note that the *blind*
+arithmetic here would have produced `(−0.57)/(−0.5615) = 1.0151 → +0.5% growth`: two
+losses dividing into apparent growth. The non-positive-base guard fires first
+precisely so that cannot happen.
+
+**Units.** The two sums are dollars, so the division cancels them and leaves a plain
+multiple; the Nth root turns "multiple over N years" into "multiple per year"; and
+subtracting 1 turns a multiple into a rate. NVDA end to end:
+
+| Step | Calculation | Result | What it is |
+| ---: | :--- | ---: | :--- |
+| 1 | recent 3 = 4.90 + 2.94 + 1.19 | $9.03 | dollars |
+| 2 | base 3 = 0.17 + 0.38 + 0.17 | $0.72 | dollars |
+| 3 | 9.03 ÷ 0.72 | 12.54 | unitless multiple |
+| 4 | 12.54 ^ (1/3) | 2.32 | multiple **per year** |
+| 5 | 2.32 − 1 | **132%** | growth **rate** |
+| 6 | cap: 132% > 60% (§10.F) | 60 | denominator used |
+| 7 | P/E 30.6 ÷ 60 | **0.51** | PEG |
+
+**Measured effect** (189-company sample, §10.I): among companies the endpoint form
+called >50% growers, the median fell from 66.1% to 41.8% — AU 111%→17%, IBM 84%→21%,
+WLKP 67%→25% — while genuine compounders stayed high (NVDA 207%→132%). It is also
+*more* generous where the endpoint form was unfair: `no_eps_growth` rejections fell
+from 56 to 42, because one weak endpoint year no longer condemns a company.
+
+**Cost.** `"sums"` needs `2N` annual filings rather than `N+1`, so it excludes more
+recently listed companies. That is the trade-off accepted for the robustness above.
+
+Other implementation decisions, all in `fetch_eps_growth`:
+
+- **Diluted EPS preferred**, and *every* year used must come from the same measure —
+  mixing a diluted numerator with a basic base would read the dilution itself as a
+  change in earnings power.
+- The window length comes from the two `date` fields, not the row index. A span within
+  0.2 of a whole number is snapped to it so the published figure is exactly the formula
+  above and can be hand-checked; a genuinely irregular span (a changed fiscal year end)
+  keeps its real length.
+- **`MAX_ANNUAL_HISTORY_AGE_DAYS = 640`**, far looser than the 200-day
+  `MAX_STATEMENT_AGE_DAYS` used for quarterly data. An annual `date` is a fiscal *year
+  end*, published only after the filing lag, so a current filer legitimately shows a
+  period end up to ~15 months old.
+
+### D. The base window must be real — `min_base_net_margin` (3%)
+
+A compound rate is only as meaningful as what it starts from, and a base near zero
+blows it up while saying nothing about the business. GRND's base year earned **$852K
+on $195M of revenue — a 0.4% net margin**: technically profitable, economically
+breakeven, and a denominator that turns any recovery into a three-digit rate.
+
+**An absolute dollar floor on EPS cannot express this.** Ten cents of EPS is nothing
+for a $500 stock and enormous for a $2 stock; the same number means different things
+in different sectors and at different price levels. So the test is **net margin over
+the base window** — scale-free, and comparable across the whole universe:
+
+| Base-window net margin | |
+| :--- | ---: |
+| p25 | 4.3% |
+| **p50** | **10.5%** |
+| p90 | 28.1% |
+| GRND | **0.4%** |
+| NVDA | 16.2% |
+| LLY | 21.9% |
+
+3% sits below the ordinary range while clearing genuine compounders comfortably.
+
+**A rejected alternative, recorded so it is not re-proposed.** "Base EPS as a share of
+the company's own peak EPS" looks like the natural measure and is actively harmful: it
+scores **NVDA at 3.5%**, because NVDA's base year *was* its trough. That rule would
+have excluded the single best compounder in the sample. Any base-quality test must
+measure the *quality of the year*, not its size relative to what came later — growing
+a long way from a low base is the thing we are trying to find, not the thing we are
+trying to exclude.
+
+### E. The valuation ceiling — `max_peg` (1.5)
+
+Lynch's fair-value line is PEG 1.0. **Raised from 1.2 to 1.5 on evidence.** Every
+company in the sample sitting in the 1.2–1.5 band:
+
+| | Sector | P/E | Growth | PEG | Loss years in window |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| NMRK | Real Estate | 18.6 | 14.8% | 1.26 | 0 |
+| JNJ | Healthcare | 23.0 | 17.9% | 1.29 | 0 |
+| VMC | Basic Materials | 32.2 | 23.5% | 1.37 | 0 |
+| KDP | Consumer Defensive | 20.4 | 14.8% | 1.37 | 0 |
+| MCK | Healthcare | 21.1 | 15.3% | 1.38 | 0 |
+| MPLX | Energy | 12.1 | 8.7% | 1.38 | 0 |
+| OKE | Energy | 16.9 | 12.2% | 1.38 | 0 |
+| CMG | Consumer Cyclical | 31.1 | 21.2% | 1.47 | 0 |
+| ISRG | Healthcare | 43.7 | 29.2% | 1.50 | 0 |
+
+Steady growth of 8.7–29.2%, **zero loss years**, and **not one of them there because
+its growth had been capped**. The speculative high-growth cohort does not live in that
+band at all: a capped denominator plus a low multiple already puts it well under 1.2.
+
+So 1.2 was excluding **quality, not risk** — the opposite of its intent. On the live
+screen the same effect is visible in ADBE (PEG 1.42) and LLY (1.48), both admitted at
+1.5 and both rejected at 1.2.
+
+**Why this does not open the door to the "P/E 150 on 100% growth" case.** It cannot:
+that company's PEG is `150 ÷ 60 = 2.5` once the cap in §10.F applies. **The cap, not
+`max_peg`, is what blocks an extreme multiple** — see the implied-P/E-ceiling note
+below.
+
+### F. The growth cap — `max_growth_rate_for_peg` (60%)
+
+A ceiling on the growth rate the PEG **divides by**. It does not touch the rate that
+is *reported*, and it does not touch the "is it growing at all" gate; both use the
+measured figure. Mechanically it substitutes one input:
+
+```python
+if growth_rate > MAX_GROWTH_FOR_PEG:
+    return MAX_GROWTH_FOR_PEG, True     # denominator becomes 60
+return growth_rate, False               # otherwise untouched
+```
+
+**Grounded in measured persistence, not in a guess about what is "sustainable".** For
+every company with 7+ years of filings, §10.I compares the growth it had recorded as
+of three years ago against what it *actually went on to deliver*:
+
+| Growth 3 years ago | n | Median next 3 years | Went negative |
+| :--- | ---: | ---: | ---: |
+| shrinking | 32 | **+23.7%** | 16% |
+| 0–10% | 31 | +7.3% | 29% |
+| 10–25% | 37 | +7.5% | 32% |
+| 25–50% | 23 | +2.8% | 48% |
+| 50–100% | 11 | **−20.4%** | **73%** |
+| >100% | 4 | **−26.3%** | **75%** |
+
+Growth does not merely fail to persist — it **inverts**, and the fastest growers are
+the worst subsequent performers. The >50% cohort was dominated by cyclicals at a cycle
+peak (FANG, CVX, VLO, XOM, MPC, NUE, STLD, CF, CRS). Meanwhile the 95th percentile of
+*actually realised* 3-year EPS CAGR is 63%. A denominator much above 60 is therefore
+pricing in growth the data says almost never arrives.
+
+Three properties make the cap safe:
+
+1. It caps the **denominator only**.
+2. Capping can only ever **raise** a PEG, never lower it, so it cannot flatter a
+   company into the list.
+3. When it bites, **both report blocks say so** — otherwise a reader checking
+   `PEG = P/E ÷ growth` would find the arithmetic does not work and assume an error.
+
+**Implied P/E ceiling — the consequence to keep in view.** Work `max_peg` backwards
+through a capped denominator:
+
+```
+capped PEG = P/E ÷ 60
+pass needs   PEG ≤ 1.5   ⟹   P/E ≤ 1.5 × 60 = 90
+```
+
+and an uncapped company (growth ≤ 60%) needs `P/E ≤ 1.5 × growth ≤ 90` as well. So
+**no company can enter the list with a P/E above `max_peg × max_growth_rate_for_peg ×
+100`** — 90 at the defaults — however fast it grows. This is a larger effect than the
+artifact the cap was first introduced for, and it is the reason to review the two
+knobs **together** rather than either alone.
+
+**The cap is now a backstop, not the main defence.** Once `"sums"` (§10.C) and the
+base-margin rule (§10.D) are in place, the cap changed **no pass/fail outcome at all**
+on the sample — 36 companies passed with it and 36 without. It still affects
+*ranking*, which is why it is retained: without it NVDA's PEG would be ~0.23 rather
+than 0.51 and it would rank far higher on a rate the persistence table says will not
+hold.
+
+`EPSGrowth` (measured) and `EPSGrowth_ForPEG` (used) are both carried;
+`EPSGrowth_Capped` is the flag the report renders off.
+
+### G. The gate
+
+`growth_gate_reason()`, applied **after** `ratio_gate_reason()` because it costs one
+extra request — the ROA/PE gates clear ~95% of the universe first, turning ~2,500
+extra calls into roughly a hundred. Checks run in this order, and the order matters:
+
+| Reason | Meaning |
+| :--- | :--- |
+| `growth_unavailable` | no growth rate could be computed (cause in `EPSGrowth_Unavailable_Reason`) |
+| `no_eps_growth` | growth ≤ `min_eps_growth` (default 0) — flat or shrinking |
+| `base_year_breakeven` | base window below `min_base_net_margin` |
+| `base_margin_unavailable` | the base window's margin could not be measured |
+| `peg_unavailable` | growing, but no P/E to divide (loss-making on a TTM basis) |
+| `peg_above_max` | PEG > `max_peg` |
+
+The growth test deliberately precedes the base-window test, so a *shrinking* company
+is reported as no-growth rather than misattributed to a margin problem.
+
+**Missing data is a REJECTION here — a deliberate departure from the rule everywhere
+else in the screener**, where a company is never dropped for a provider gap. Two
+reasons: `1/PEG` is a ranking input, so a survivor without one cannot be ranked
+against the others; and the gate asks a company to *demonstrate* growth, which one
+without a computable rate has not done. To keep that from silently thinning the list,
+every rejection carries its own reason and the run prints the split:
+
+```
+Lynch PEG gate (sums growth over 3 years): 12 dropped for no EPS growth, 8 dropped
+for a base window below 3% net margin, 21 dropped for a PEG above 1.5, 14 dropped
+because a growth rate, margin or PEG could not be computed.
+```
+
+`EPSGrowth_Unavailable_Reason` narrows `growth_unavailable` further —
+`non_positive_base_eps`, `non_positive_current_eps`, `insufficient_history`,
+`stale_eps_history`, `no_eps_reported`, `no_period_dates`, `period_too_short`,
+`fetch_failed` — and `_no_peg_reason()` in `main.py` renders each as plain English in
+both report blocks. Most are **facts about the company, not data outages**. It also
+covers the two cases where the growth rate is perfectly well measured and the PEG
+still cannot exist — a **negative** rate, and a grower with no P/E — because
+conflating those with a data gap misinforms in opposite directions.
+
+### H. Ranking
+
+```mermaid
+flowchart LR
+    ROC["ROC_Rank\n(desc)"] --> MF["MagicFormula_Score\n= ROC_Rank + EY_Rank"]
+    EY["EY_Rank\n(desc)"] --> MF
+    PEG["PEG_Rank\nfrom 1/PEG (desc)"] --> C["Composite_Score\n= MagicFormula_Score + PEG_Rank"]
+    MF --> C
+    C --> F["Final_Rank\n(lower is better)"]
+```
+
+`MagicFormula_Score` keeps its original meaning — Greenblatt's two ranks — so the pure
+formula stays visible in the CSV next to the composite the list is actually ordered by.
+
+The growth factor enters as **1/PEG** rather than PEG so that all three inputs point
+the same way (higher is better) and one `ascending=False` ranks them all. Ranking
+1/PEG descending is arithmetically the same order as PEG ascending; the column reads
+as a score rather than as a cost, which is what a score should add up from.
+
+`PEG_Rank` uses `na_option="bottom"`. The gate already drops every company without a
+PEG, but if that gate is disabled in `config.yaml` a missing PEG must rank **last**
+rather than turn the composite into `NaN` and take `Final_Rank` down with it.
+
+### I. The study behind the thresholds
+
+Reproducible by running **`tools/analyze_growth_persistence.py`** (in `tools/`, not
+`src/` — it is an offline instrument, not part of the pipeline), which is the study
+itself, committed so a threshold is never changed by feel. It re-derives every table
+below from live data and prints each configured value next to what the fresh sample
+implies. **189 companies**, stratified across all 9 eligible sectors (largest by
+market cap within each), 8 fiscal years each; one screener call plus one annual
+`/stable/income-statement` call per company, no LLM calls and no writes.
+
+- **Persistence** (§10.F table): 138 companies with 7+ years and positive-EPS
+  endpoints. Past growth = CAGR(FY-6 → FY-3); realised growth = CAGR(FY-3 → FY0). No
+  forecast required — both windows are historical.
+- **Realised-growth distribution**, which is what a cap should be set against:
+  p50 7.7%, p75 21.2%, p90 39.0%, **p95 63.3%**, p99 111.3%.
+- **Formula comparison** (§10.C): endpoint vs sums on the same companies.
+- **Base-window margin distribution** (§10.D), and the rejected base-vs-peak measure.
+- **Design simulation**, whole gate end to end over the same 189:
+
+| Design | Passing |
+| :--- | ---: |
+| shipped at the time (endpoint, cap 50%, peg 1.2, no base rule) | 27 |
+| + `max_peg` 1.5 only | 36 |
+| + `"sums"` formula | 44 |
+| + base margin ≥ 2% | 39 |
+| **current (sums, cap 60%, peg 1.5, margin 3%)** | **36** |
+| same but with no cap at all | 36 |
+
+The last two rows are the evidence for §10.F's "backstop, not main defence" claim.
+
+**Caveats.** One sample, one point in time, US large/mid-cap, ~21 companies per
+sector; the persistence buckets above 50% hold only 11 and 4 companies respectively,
+so treat their *direction* as established and their exact medians as indicative. Run
+`tools/analyze_growth_persistence.py` before moving any threshold, and periodically
+regardless — a threshold tuned to one market should not persist silently into a
+different one. The README carries the operator-facing version of these instructions.
+
+### J. Where the figures surface
+
+Per §2.I, every field goes out on **both** candidate paths — the screener CSV (raw
+ratios) and `compute_ticker_magic_metrics` (percent strings) — and `EPSGrowth` /
+`BaseNetMargin` are registered in `_RATIO_TO_PCT_FIELD` so `_normalize_candidate`
+derives the display form from the CSV. `PEG` is not in that map: it is a plain
+multiple, not a percentage, and both paths already emit it as `PEG_Ratio`.
+
+| Surface | Content |
+| :--- | :--- |
+| Rankings CSV | `EPSGrowth`, `EPSGrowth_Pct`, `PEG`, `PEG_Ratio`, `InversePEG`, `PEG_Rank`, `Composite_Score`, `EPSGrowth_ForPEG`, `EPSGrowth_Capped`, `EPS_Current`, `EPS_Base`, `EPS_Current_Date`, `EPS_Base_Date`, `EPS_Basis`, `EPS_Window`, `EPS_Window_Years`, `BaseNetMargin`, `EPSGrowth_Years`, `EPSGrowth_Unavailable_Reason` |
+| `VERIFIED_FIGURES` (every agent) | P/E, growth rate, PEG, the EPS totals behind them, the base-window margin, and any cap or unavailability note. Covered by `VERIFIED_FIGURES_MANDATE`, so an agent may not contradict them |
+| `MAGIC_FORMULA_CONTEXT` | growth rate and PEG as the third leg of the bull signal, plus `Composite_Score` |
+| `## Magic Formula Metrics` (report) | growth and PEG as first-class ranking figures with full workings, in the plain-English house style |
+| Analyst instruction | the Final Verdict **must** state the PEG and growth rate and what they mean, or say why they could not be computed |
+
+Two wording rules the report code enforces, because both would otherwise be plain
+misstatements of what was divided:
+
+- Under `"sums"` the figures are **multi-year totals**, so `_eps_window_phrase()`
+  describes them as totals across N years — never as "earnings per share in the year
+  ended X".
+- When the cap bites, the reported growth rate and the PEG **do not divide into each
+  other**. Both blocks say so explicitly and give the rate actually used.
+
+The analyst is also told that the PEG is **backward-looking**: where the most recent
+quarter contradicts the multi-year growth, the quarter is the present-tense evidence
+and the PEG is the stale one. Without that, a low PEG would vouch for a business that
+is currently shrinking — the same failure §2.D's recency mandate exists to prevent.
+
+### K. Verification
+
+**Formula, against hand computation.** Every figure below was cross-checked against a
+hand computation from the raw FMP annual filings; `compute_peg` and `fetch_eps_growth`
+agreed to 1e-9 in every case.
+
+| Ticker | Endpoint growth | Sums growth | Base margin | PEG | Outcome |
+| :--- | ---: | ---: | ---: | ---: | :--- |
+| NVDA | 206.6% | 132.3% | 26.1% | 0.51 | passes (capped) |
+| EXEL | 70.6% | 47.1% | 13.0% | 0.34 | passes |
+| WLKP | 67.0% | 24.9% | 5.6% | 0.24 | passes |
+| BKNG | 29.4% | 62.6% | 12.3% | 0.40 | passes (capped) |
+| DECK | 29.5% | 30.5% | 14.5% | 0.43 | passes |
+| HRB | 10.9% | 25.2% | 11.5% | 0.30 | passes |
+| ADBE | 18.3% | 9.7% | 32.1% | 1.42 | passes at 1.5, **rejected at 1.2** |
+| LLY | 51.7% | 28.9% | 22.1% | 1.48 | passes at 1.5, **rejected at 1.2** |
+| GRND | +349.4% | **−$0.57 total** | −1.6% | — | `growth_unavailable` |
+| IRWD | −46.1% | **−$6.29 total** | 66.7% | — | `growth_unavailable` |
+| HALO | 21.1% | — | — | 1.33 | passed 1.5, rejected at 1.2 |
+| CROX | — | — | — | — | `growth_unavailable` (loss-making) |
+
+**Full pipeline**, three companies through the complete bear → bull → analyst → sale
+advisor graph (EXEL, WLKP, GRND under the earlier thresholds): 11 model calls each,
+$1.43 total, $0.48/ticker. Every PEG printed in the reports reproduced
+`P/E ÷ min(growth, cap) × 100` exactly, the reconciliation gate passed on two of
+three, and both report blocks disclosed the cap where it bit.
+
+Notably, **WLKP's bear agent independently raised the base-year objection** —
+"reflects a rebound from a low earnings baseline rather than fundamental business
+growth, meaning the low 0.12 PEG ratio overstates actual expansion potential" — which
+is the §10.D disclosure doing its job through the reasoning layer rather than only in
+the footnotes. Under `"sums"` that same company's growth rate falls from 67% to 25%,
+so the objection is now priced into the figure itself.
+
+### L. Severity, and the standing tuning question
+
+**Current settings** (sums, cap 60%, `max_peg` 1.5, margin 3%), full run 2026-08-01:
+
+```
+1,769 eligible universe
+−1,221  ROA below 25%
+    −0  P/E below 5
+    −9  no EPS growth
+    −0  base window below 3% net margin
+   −24  PEG above 1.5
+   −13  growth rate / margin / PEG not computable
+    −4  reported earnings this week
+    ————
+    12  final
+```
+
+Ranked list: HRB, BKNG, WLKP, BSM, EXEL, DECK, ADBE, NVDA, MEDP, APPF, NVR, LLY.
+**ADBE (PEG 1.42) and LLY (1.48) are admitted here and would have been rejected at
+1.2** — the §10.E effect, live. GRND and IRWD are both gone. Only 2 of the 12 had
+their growth capped (BKNG 62.6%, NVDA 132.3%), confirming §10.F's "backstop, not main
+defence".
+
+**`base_year_breakeven` fired zero times, and that is expected rather than
+disappointing.** The `"sums"` formula reaches the same companies first: a breakeven
+base year is almost always adjacent to loss years, so the base *window* totals to a
+non-positive figure and the company exits at `non_positive_base_eps` (inside the 13
+"not computable") before the margin test is consulted. GRND is exactly this case. The
+margin rule earns its place as the guard for the case sums does **not** catch — a
+company that was thinly but consistently profitable across the whole base window — and
+as an explicit, named reason when it does fire. It should not be removed on the
+strength of a zero count.
+
+**Earlier run for comparison** (endpoint formula, cap 50%, `max_peg` 1.2):
+
+```
+1,769 eligible universe
+  −486  not scorable (negative EBIT, no capital employed, stale, fetch errors)
+1,283 scored
+−1,221  ROA below 25%              →  62 left
+    −0  P/E below 5                →  62 left
+   −49  PEG gate                   →  13 left
+    −2  reported earnings this week →  11 final
+```
+
+**The PEG gate is the second most severe cut in the screen.** At the original settings
+it took the list from ~60 to 11; at the current ones, to 12.
+
+**A short list does not break anything.** `top_n_candidates` is a CEILING, not a
+quota: `run_from_csv` takes `df.head(top_n)` and `run_orchestrator` takes
+`candidates[:top_n]`, both of which return all 12 rows of a 12-row list. Phase B
+analyses whatever survived. The screener's short-list message is therefore a NOTE, not
+a warning, and says so — it exists because a short list usually means a gate is
+mistuned, and because Greenblatt's method assumes a 20-30 name basket whose
+diversification a very short list weakens.
+
+**If the list is short, `min_roa` is the lever to reach for first.** It alone
+eliminates 95% of the scored universe (1,221 of 1,283), an order of magnitude more
+than every other gate combined. `max_peg` has already been loosened on evidence and
+loosening it further would start admitting the mean-reverting cohort in §10.F;
+`universe_limit` is the other clean lever. Note also that raising `max_peg` without
+revisiting `max_growth_rate_for_peg` moves the implied hard P/E ceiling (§10.F) — at
+1.5 × 60 it currently sits at 90.

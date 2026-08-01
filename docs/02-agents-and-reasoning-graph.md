@@ -44,7 +44,7 @@ rather than duplicated:
 | `RECENCY_MANDATE` | `main.py:142` | Forces every reasoning role to read `QUARTERLY_DATA` and state whether the latest quarter confirms/contradicts the annual trend, before concluding anything. |
 | `REFERENCE_DATA_BLOCKS` | `main.py:180` | The `<MAGIC_FORMULA_CONTEXT>` / `<VERIFIED_FIGURES>` / `<QUARTERLY_DATA>` XML-ish blocks, given to every reasoning agent. |
 | `RESEARCH_SOURCE_BLOCKS` | `main.py:190` | The `<METRICS_DATA>` / `<SEC_DATA>` blocks, given **only** to the two advocates (bear/bull) — the judge and sale advisor work from the advocates' arguments plus verified figures, not the raw filing dump, to save ~10k tokens/turn. |
-| `VERIFIED_FIGURES_MANDATE` | `main.py:195` | Forbids any agent from stating a debt/cash/market-cap/EV figure that contradicts the deterministically-computed `VERIFIED_FIGURES` block. |
+| `VERIFIED_FIGURES_MANDATE` | `main.py:195` | Forbids any agent from stating a debt/cash/market-cap/EV/P-E/growth/PEG figure that contradicts the deterministically-computed `VERIFIED_FIGURES` block. |
 
 `PIPELINE_INCLUDE_CONTENTS = "none"` (`main.py:241`) is set on every reasoning
 agent's `include_contents`, so each agent only sees the current turn (its own

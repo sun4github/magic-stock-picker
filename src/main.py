@@ -41,7 +41,7 @@ from mcp_server import (
 )
 # The screener's CSV output path (default source for --from-csv mode) and the
 # shared dollar formatter, so amounts read identically in reports and logs.
-from magic_formula_starter_screener import OUTPUT_FILENAME, format_money
+from magic_formula_starter_screener import OUTPUT_FILENAME, format_money, MAX_PEG
 
 load_dotenv()
 
@@ -198,7 +198,8 @@ VERIFIED_FIGURES_MANDATE = (
     "this pipeline, not by a language model. They override any conflicting number "
     "you find in news, web search, or your own recollection.\n"
     "- You MUST NOT state a total debt, cash, market capitalisation, enterprise "
-    "value, or shares-outstanding figure that contradicts VERIFIED_FIGURES.\n"
+    "value, shares-outstanding, price-to-earnings, earnings-growth or PEG figure "
+    "that contradicts VERIFIED_FIGURES.\n"
     "- If a source you cite disagrees with a verified figure, use the verified "
     "figure and note the discrepancy rather than silently preferring the source.\n"
     "- Do not confuse market capitalisation with total debt: they are different "
@@ -275,7 +276,8 @@ bull_agent = LlmAgent(
         bullish_instructions
         + "\n\n## How to run this research\n"
         "You are building the BULL case for {company_name} ({ticker}). The required "
-        "inputs — Earnings Yield and ROC — are in MAGIC_FORMULA_CONTEXT below, and the "
+        "inputs — Earnings Yield, ROC, and the PEG growth test — are in "
+        "MAGIC_FORMULA_CONTEXT below, and the "
         "Bear Case Research Output is in BEAR_CASE below. Use your tools: call "
         "fmp_stock_news for positive catalysts, and web_search_tool for bull-thesis "
         "evidence (moat/pricing power, growth catalysts, historical resilience). Answer "
@@ -361,7 +363,19 @@ analyst_agent = LlmAgent(
         "headline figure very large while saying nothing about the return earned on the "
         "purchase price. Where VERIFIED_FIGURES reports a goodwill-inclusive ROIC "
         "alongside it, cite BOTH, and do not describe the business as exceptionally "
-        "capital-efficient on the strength of the screen figure alone.\n\n"
+        "capital-efficient on the strength of the screen figure alone.\n"
+        "- This screen is Greenblatt's two ratios PLUS Peter Lynch's PEG test, and the "
+        "ranking uses all three. In the Final Verdict you MUST state the company's PEG "
+        "ratio and its earnings-per-share growth rate (both are in VERIFIED_FIGURES) "
+        "and say in one plain sentence what they mean: a PEG at or below 1.0 means the "
+        "price paid for each dollar of profit is no higher than the rate that profit is "
+        "growing, and this screen admits nothing above the configured ceiling. If the PEG could not be "
+        "computed, say so and say why rather than passing over it.\n"
+        "- The PEG is backward-looking: it measures growth already delivered over the "
+        "last few fiscal years and assumes nothing about the future. Where the recent "
+        "quarter contradicts that multi-year growth, the QUARTER is the present-tense "
+        "evidence and the PEG is the stale one — say so plainly rather than letting a "
+        "low PEG vouch for a business that is currently shrinking.\n\n"
         "## Verdict stance\n"
         "Assume your reader is a middle-class, mid-career professional investing "
         "their own hard-earned savings — not a millionaire, billionaire, or "
@@ -1283,22 +1297,25 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
 # --- 4. ORCHESTRATOR WORKFLOWS ---
 def _format_screen_context(candidate: dict) -> str:
     """Turn a Magic Formula candidate row (or single-ticker computed metrics) into
-    the value/quality bull context that the agents weigh against the bear case."""
+    the value/quality/growth bull context that the agents weigh against the bear case."""
     rank = candidate.get("Final_Rank")
     if rank is not None:
         header = (
             "This stock was surfaced by a Magic Formula screen (Joel Greenblatt's value "
-            "+ quality strategy). A high rank means it is statistically BOTH cheap (high "
-            "earnings yield) AND high-quality (high return on capital)."
+            "+ quality strategy) extended with Peter Lynch's PEG growth test. A high "
+            "rank means it is statistically cheap (high earnings yield), high-quality "
+            "(high return on capital), AND growing at a rate its price does not yet "
+            "reflect (low PEG)."
         )
-        rank_line = f"- Magic Formula rank: #{rank} (lower is better)\n"
+        rank_line = f"- Screen rank: #{rank} (lower is better)\n"
     else:
         header = (
-            "Magic Formula value/quality metrics were computed on demand for this ticker "
-            "(it was not ranked against a screen universe). A high ROC + high earnings "
-            "yield means it is statistically BOTH cheap AND high-quality."
+            "Magic Formula value/quality metrics and the PEG growth test were computed "
+            "on demand for this ticker (it was not ranked against a screen universe). A "
+            "high ROC + high earnings yield + a low PEG means it is statistically cheap, "
+            "high-quality, and growing."
         )
-        rank_line = "- Magic Formula rank: n/a (single-ticker run)\n"
+        rank_line = "- Screen rank: n/a (single-ticker run)\n"
     ctx = (
         header
         + " This is the bullish starting point that must be weighed against the bear case.\n"
@@ -1306,8 +1323,26 @@ def _format_screen_context(candidate: dict) -> str:
         + f"- Return on Capital (quality signal): {candidate.get('ROC_Pct')}\n"
         + f"- Earnings Yield (cheapness signal): {candidate.get('EY_Pct')}"
     )
+    # Lynch's growth signal. Stated as the third leg of the ranking rather than as a
+    # footnote, because it is the one that answers the objection the other two invite:
+    # a high earnings yield on shrinking earnings is a value trap, not a bargain.
+    growth_pct = _present(candidate.get("EPSGrowth_Pct"))
+    peg_ratio = _present(candidate.get("PEG_Ratio"))
+    if growth_pct or peg_ratio:
+        ctx += (
+            f"\n- Earnings-per-share growth, compound annual over the last "
+            f"{_growth_window(candidate)} fiscal years "
+            f"(growth signal): {growth_pct or 'Not available'}"
+            f"\n- PEG ratio (P/E divided by that growth rate in percentage points; "
+            f"below 1.0 is Lynch's fair-value line, and the screen requires "
+            f"{MAX_PEG:g} or better): "
+            f"{peg_ratio if peg_ratio is not None else 'Not available'}"
+        )
     if candidate.get("MagicFormula_Score") is not None:
-        ctx += f"\n- Combined Magic Formula score: {candidate.get('MagicFormula_Score')}"
+        ctx += f"\n- Combined Magic Formula score (ROC + earnings yield ranks): {candidate.get('MagicFormula_Score')}"
+    if _present(candidate.get("Composite_Score")) is not None:
+        ctx += (f"\n- Composite screen score (those two ranks plus the 1/PEG rank): "
+                f"{candidate.get('Composite_Score')}")
     return ctx
 
 
@@ -1415,6 +1450,87 @@ def _format_verified_figures(candidate: dict) -> str:
             "  A high share here means the company was largely assembled by "
             "acquisition, so the Magic Formula ROC is a screening artifact of "
             "excluding the purchase price — not evidence of operating efficiency."
+        )
+
+    # --- Growth and the PEG test ---------------------------------------------
+    # The screen's third leg, and the answer to the objection the first two invite:
+    # a high earnings yield on shrinking earnings is a value trap, not a bargain.
+    # Included here (rather than only in the reader-facing section) so an agent
+    # arguing "the market has not priced in growth" has to argue against the actual
+    # measured rate, and so a bear case citing a growth figure can be checked.
+    pe_ratio = _present(candidate.get("PE_Ratio"))
+    growth_pct = _present(candidate.get("EPSGrowth_Pct"))
+    peg_ratio = _present(candidate.get("PEG_Ratio"))
+    growth_years = _growth_window(candidate)
+    eps_now = _present(candidate.get("EPS_Current"))
+    eps_base = _present(candidate.get("EPS_Base"))
+    lines += [
+        "",
+        "Growth and valuation (Peter Lynch's PEG test — the screen's third ranking "
+        "factor alongside the two returns above):",
+        f"- Price-to-earnings ratio (market capitalisation / trailing twelve-month net "
+        f"income): {pe_ratio if pe_ratio is not None else 'Not available'}",
+        f"- Earnings-per-share growth rate (compound annual over {growth_years} fiscal "
+        f"years): {growth_pct or 'Not available'}",
+        f"- PEG ratio (the P/E divided by that growth rate in PERCENTAGE POINTS, so a "
+        f"P/E of 20 on 20% growth is 1.0): "
+        f"{peg_ratio if peg_ratio is not None else 'Not available'}",
+    ]
+    if candidate.get("EPSGrowth_Capped") and _present(candidate.get("EPSGrowth_ForPEG")) is not None:
+        lines.append(
+            f"- NOTE: the PEG above was computed against a growth rate capped at "
+            f"{round(float(candidate['EPSGrowth_ForPEG']) * 100, 2)}% a year. Measured "
+            f"persistence, not opinion: companies growing faster than 50% a year went "
+            f"on to a MEDIAN of -20% over the next three years, and the 95th "
+            f"percentile of realised 3-year growth is 63%. The two figures above "
+            f"therefore do not divide into each other — this is deliberate, not an "
+            f"error, and the cap only ever makes the PEG larger."
+        )
+    if eps_now is not None and eps_base is not None:
+        # Name the actual measure. `fetch_eps_growth` prefers diluted but falls back to
+        # basic when a filer reports only that, and labelling basic figures as diluted
+        # would be exactly the kind of small false claim VERIFIED_FIGURES exists to
+        # stop the agents from making.
+        window = _present(candidate.get("EPS_Window"))
+        span = _present(candidate.get("EPS_Window_Years")) or 3
+        label = (f"TOTAL {_present(candidate.get('EPS_Basis')) or 'reported'} earnings "
+                 f"per share over {span} fiscal years"
+                 if window == "sums"
+                 else f"{_present(candidate.get('EPS_Basis')) or 'reported'} earnings "
+                      f"per share")
+        lines.append(
+            f"- The growth rate was computed from {label}: {eps_base} for the window "
+            f"ending {_present(candidate.get('EPS_Base_Date')) or 'not stated'}, "
+            f"against {eps_now} for the window ending "
+            f"{_present(candidate.get('EPS_Current_Date')) or 'not stated'}."
+        )
+        if window == "sums":
+            lines.append(
+                "  Measured as multi-year TOTALS rather than two endpoint years, so a "
+                "loss year inside the window is counted at its real negative value "
+                "and a one-off spike is diluted rather than annualised. Do not "
+                "recompute this rate from two single-year EPS figures and report a "
+                "different answer."
+            )
+    base_margin = _present(candidate.get("BaseNetMargin_Pct"))
+    if base_margin:
+        lines.append(
+            f"- Net profit margin over the BASE window: {base_margin}. This is the "
+            f"check that the starting point was a real trading period rather than a "
+            f"breakeven one — a near-zero base turns any recovery into a three-digit "
+            f"growth rate that says nothing about the business."
+        )
+    if peg_ratio is None:
+        # Say what is missing and why, rather than leaving an agent to fill the gap
+        # with a PEG it recalled or invented — the failure mode this whole block exists
+        # to prevent. The cause is a fact about the company far more often than it is
+        # a data outage, and a shrinking-earnings cause is itself bear evidence.
+        lines.append(
+            f"- NOTE: a PEG ratio could NOT be computed for this company, because "
+            f"{_no_peg_reason(candidate)}. Do not substitute a PEG from any other "
+            f"source, and do not treat its absence as evidence either way about "
+            f"growth — say plainly that the screen's growth test could not be applied "
+            f"here, and why."
         )
     return "\n".join(lines)
 
@@ -1745,6 +1861,10 @@ _RATIO_TO_PCT_FIELD = {
     "IntangiblesShareOfAssets": ("IntangiblesShareOfAssets_Pct", 1),
     "ROA": ("ROA_Pct", 2),
     "ROA_NetIncome": ("ROA_NetIncome_Pct", 2),
+    # Lynch's EPS growth rate. PEG itself is NOT here: it is a plain multiple, not a
+    # percentage, and both paths already emit it as `PEG_Ratio`.
+    "EPSGrowth": ("EPSGrowth_Pct", 2),
+    "BaseNetMargin": ("BaseNetMargin_Pct", 2),
 }
 
 
@@ -1779,6 +1899,87 @@ def _normalize_candidate(candidate: dict) -> dict:
     return out
 
 
+def _eps_window_phrase(candidate: dict) -> str:
+    """Plain-English description of the two figures the growth rate came from.
+
+    The wording has to follow the measurement. Under the "sums" method the figures
+    are MULTI-YEAR TOTALS, and describing them as "earnings per share in the year
+    ended X" would be a plain misstatement of what was divided — the exact class of
+    small false claim the verified-figures block exists to prevent."""
+    candidate = candidate or {}
+    base = _present(candidate.get("EPS_Base"))
+    cur = _present(candidate.get("EPS_Current"))
+    base_date = _present(candidate.get("EPS_Base_Date")) or "not available"
+    cur_date = _present(candidate.get("EPS_Current_Date")) or "not available"
+    base_s = base if base is not None else "not available"
+    cur_s = cur if cur is not None else "not available"
+    if _present(candidate.get("EPS_Window")) == "sums":
+        span = _present(candidate.get("EPS_Window_Years")) or 3
+        return (f"total earnings per share of {base_s} across the {span} years up to "
+                f"{base_date}, compared with {cur_s} across the {span} years up to "
+                f"{cur_date}. Adding up whole periods rather than picking two single "
+                f"years means a bad year in the middle is counted, not skipped over")
+    return (f"earnings per share of {base_s} in the year ended {base_date}, compared "
+            f"with {cur_s} in the year ended {cur_date}")
+
+
+def _growth_window(candidate: dict):
+    """The growth window's length, formatted for prose ('3', not '3.0').
+
+    A whole number of fiscal years is the normal case and must read as one; a company
+    that changed its fiscal year end genuinely has a fractional window and keeps it."""
+    years = _present((candidate or {}).get("EPSGrowth_Years"))
+    if not isinstance(years, (int, float)):
+        return "3"
+    return str(int(years)) if float(years).is_integer() else f"{float(years):.2f}"
+
+
+def _no_peg_reason(candidate: dict) -> str:
+    """Plain-English cause when no PEG could be computed, or "" if one was.
+
+    Three distinct causes, and conflating them misinforms in opposite directions. The
+    growth rate may be MISSING (its own set of reasons, carried on the candidate), or
+    it may be perfectly well measured and NEGATIVE — a fact about the business, not a
+    gap — or the company may have no P/E because it is loss-making on a trailing
+    twelve-month basis even though its annual EPS grew."""
+    candidate = candidate or {}
+    if _present(candidate.get("PEG_Ratio")) is not None:
+        return ""
+    growth = _present(candidate.get("EPSGrowth"))
+    if isinstance(growth, (int, float)) and growth <= 0:
+        return ("its profit per share has been shrinking rather than growing, and this "
+                "ratio only means anything for a company whose profits are rising — "
+                "dividing by a negative growth rate would produce a negative figure "
+                "that sorts as the cheapest thing on the list, which is the exact "
+                "trap the ratio exists to expose")
+    if isinstance(growth, (int, float)) and _present(candidate.get("PE_Ratio")) is None:
+        return ("the company has no price-to-earnings ratio to divide: it is "
+                "loss-making over the last twelve months, even though its annual "
+                "earnings per share grew over the longer window")
+    return {
+        "non_positive_base_eps":
+            "the company was losing money in the earlier year, so there is no positive "
+            "starting profit to measure growth from. That is a fact about its history, "
+            "not a gap in the data",
+        "non_positive_current_eps":
+            "the company lost money in its most recent full year, so there is no growth "
+            "rate to work out",
+        "insufficient_history":
+            "the company has not published enough years of annual results to cover the "
+            "whole growth window — usually a recent listing",
+        "stale_eps_history":
+            "its most recent annual report is too old for a growth rate drawn from it to "
+            "describe the company as it is today",
+        "no_eps_reported":
+            "the data provider did not report an earnings-per-share figure for this company",
+        "fetch_failed":
+            "the annual accounts could not be retrieved from the data provider",
+    }.get(
+        _present(candidate.get("EPSGrowth_Unavailable_Reason")),
+        "a growth rate could not be worked out from the available annual accounts",
+    )
+
+
 def _format_magic_formula_section(candidate: dict) -> str:
     """Deterministic '## Magic Formula Metrics' section, injected into every
     final report regardless of what the LLM chooses to restate. Built directly
@@ -1806,9 +2007,11 @@ def _format_magic_formula_section(candidate: dict) -> str:
     lines = [
         "## Magic Formula Metrics",
         "",
-        "These are the two numbers Joel Greenblatt's Magic Formula ranks companies on: "
-        "one asks whether the business is cheap, the other whether it is any good. "
-        "The workings are shown so you can check them yourself.",
+        "These are the numbers this screen ranks companies on. The first two are Joel "
+        "Greenblatt's Magic Formula: one asks whether the business is cheap, the other "
+        "whether it is any good. The third is Peter Lynch's PEG ratio, which asks "
+        "whether it is growing — because a company can look cheap simply because its "
+        "profits are shrinking. The workings are shown so you can check them yourself.",
         "",
         f"- **Earnings Yield (is it cheap?):** {ey_pct or 'Not available'}",
         f"  - How it is worked out: operating profit ({ebit}) divided by enterprise "
@@ -1911,6 +2114,69 @@ def _format_magic_formula_section(candidate: dict) -> str:
                     f"company's total assets."
                 )
         lines.append("")
+    # --- Lynch's growth test -------------------------------------------------
+    # Rendered as a first-class ranking figure, next to ROC and earnings yield,
+    # because it now IS one: survivors are ordered on 1/PEG alongside the other two.
+    # Written out in full (rate, ratio, and the two EPS figures behind them) because
+    # the PEG is the one ratio here whose UNITS are routinely got wrong — a reader who
+    # cannot see that the denominator is "24.8", not "0.248", has no way to check it.
+    growth_pct = _present(candidate.get("EPSGrowth_Pct"))
+    peg_ratio = _present(candidate.get("PEG_Ratio"))
+    growth_years = _growth_window(candidate)
+    eps_now = _present(candidate.get("EPS_Current"))
+    eps_base = _present(candidate.get("EPS_Base"))
+    pe_for_peg = _present(candidate.get("PE_Ratio"))
+    lines += [
+        f"- **Profit growth (is it getting bigger?):** {growth_pct or 'Not available'} "
+        f"a year",
+        f"  - How it is worked out: {_eps_window_phrase(candidate)} — the "
+        f"steady yearly rate that would take you from the first figure to the second "
+        f"over {growth_years} years."
+        # Only said when it applies. A standing "a minus sign means..." legend beside
+        # a healthy positive rate is noise; beside a negative one it is the point.
+        + (" The rate is negative, which means profit per share FELL over the period."
+           if isinstance(_present(candidate.get("EPSGrowth")), (int, float))
+           and candidate["EPSGrowth"] < 0 else ""),
+        "  - In plain English: how fast the profit belonging to each share you own has "
+        "actually grown. Per share matters: a company can grow its total profit while "
+        "issuing so many new shares that your slice does not grow at all.",
+        f"- **PEG ratio (is the growth already in the price?):** "
+        f"{peg_ratio if peg_ratio is not None else 'Not available'}",
+        f"  - How it is worked out: the price-to-earnings ratio "
+        f"({pe_for_peg if pe_for_peg is not None else 'not available'}) divided by the "
+        f"growth rate above written as a plain number — so 20% growth becomes 20, not "
+        f"0.20.",
+    ]
+    # When the sustainability cap bit, the two figures above no longer divide into
+    # each other and a reader checking the arithmetic would think one of them wrong.
+    # Say what was actually divided by, and why, rather than quietly publishing a sum
+    # that does not add up.
+    if candidate.get("EPSGrowth_Capped") and _present(candidate.get("EPSGrowth_ForPEG")) is not None:
+        capped_at = round(float(candidate["EPSGrowth_ForPEG"]) * 100, 2)
+        lines.append(
+            f"  - Note: the growth rate used for this calculation was held down to "
+            f"{capped_at}% a year, rather than the higher figure above. Very fast "
+            f"growth almost never continues: of the companies in our sample that had "
+            f"been growing faster than 50% a year, nearly three quarters went on to "
+            f"SHRINKING profits over the following three years, and only about one "
+            f"company in twenty ever sustains more than 63%. Paying for growth above "
+            f"that rate means paying for something that usually does not arrive. "
+            f"Holding the figure down makes this ratio less flattering, never more."
+        )
+    lines += [
+        "  - In plain English: Peter Lynch's test of whether you are paying a fair "
+        "price for growth. At 1.0 the price you pay for each dollar of profit is "
+        "exactly matched by how fast that profit is rising; below 1.0 you are getting "
+        f"the growth cheaply; above it you are paying up front for growth that has not "
+        f"happened yet. This screen only lets a company through at {MAX_PEG:g} or lower.",
+        "  - Its limit: it takes the last few years' growth as a guide to the future, "
+        "which is exactly what fails when a business turns. Treat it as one reading "
+        "among several, not a forecast.",
+    ]
+    if peg_ratio is None:
+        lines.append(f"  - Why this is missing: {_no_peg_reason(candidate)}.")
+    lines.append("")
+
     # --- Greenblatt's step-by-step gate figures ---
     # These are NOT the ranking metrics, and the section says so, because "Return on
     # Assets" and "Return on Capital" are the single easiest pair to conflate in these
@@ -1960,6 +2226,24 @@ def _format_magic_formula_section(candidate: dict) -> str:
                 "almost always means a one-off event flattered the profit figure, such as "
                 "selling a division or winning a lawsuit. That profit will not repeat, so "
                 "the bargain is an illusion."
+            )
+        # The growth hurdle is listed with the others because it is applied the same
+        # way — as an entry condition — even though the same figure ALSO feeds the
+        # ranking above. Saying so here keeps a reader from thinking the PEG shown
+        # earlier was decorative.
+        if peg_ratio is not None or growth_pct:
+            lines.append(
+                "- **Growth and the PEG ratio:** this screen adds a hurdle of its own, "
+                "which is not part of Greenblatt's original method. A company must be "
+                f"growing its profit per share at all over the last few years, that "
+                f"growth must have started from a genuinely profitable period rather "
+                f"than a break-even one, and its PEG ratio must be {MAX_PEG:g} or "
+                f"lower. The reason is that the two ratios above "
+                "are blind to a shrinking business: a company whose profits are falling "
+                "gets cheaper on paper every year, which is what makes it look like a "
+                "bargain right up until the profits are gone. The same PEG figure is "
+                "then used again in the ranking, so a cheap, well-run company that is "
+                "also growing quickly ranks above one that is merely cheap and well-run."
             )
         lines.append("")
 
@@ -2093,26 +2377,33 @@ def run_screen_only():
 
     logger.info(f"Phase A complete: {len(candidates)} candidates ranked. "
                 f"Rankings CSV: {OUTPUT_FILENAME}")
-    # Phase B analyzes the top N; if the gates left fewer than that, the operator
-    # needs to know BEFORE scheduling a paid run, not after it produces a short list.
+    # Informational, not a warning. `--from-csv` uses `df.head(top_n)`, so a short list
+    # is analysed IN FULL rather than failing — top_n is a ceiling, never a quota. The
+    # operator still wants to know before scheduling a paid run, because a short list
+    # usually means a gate is mistuned.
     if len(candidates) < top_n:
-        logger.warning(
-            f"Only {len(candidates)} candidates cleared the screen, fewer than the "
-            f"top_n_candidates={top_n} Phase B expects. Review the eligibility gates "
-            f"under `screening_parameters:` in specs/config.yaml (min_roa is the "
-            f"strictest by a wide margin)."
+        logger.info(
+            f"{len(candidates)} candidates cleared the screen, fewer than the "
+            f"top_n_candidates={top_n} Phase B would analyse. That is fine — Phase B "
+            f"will analyse all {len(candidates)}. If you expected more, review the "
+            f"eligibility gates under `screening_parameters:` in specs/config.yaml "
+            f"(min_roa is the strictest by a wide margin)."
         )
 
-    header = f"{'Rank':>4}  {'Symbol':<8} {'ROC':>10} {'EarnYld':>9} {'ROA':>9} {'P/E':>7}"
+    header = (f"{'Rank':>4}  {'Symbol':<8} {'ROC':>10} {'EarnYld':>9} {'ROA':>9} "
+              f"{'P/E':>7} {'EPS gr':>9} {'PEG':>6}")
     logger.info(f"Top {min(top_n, len(candidates))} candidates:")
     logger.info(header)
     for c in candidates[:top_n]:
         pe = c.get("PE_Ratio")
+        peg = c.get("PEG_Ratio")
         logger.info(
             f"{str(c.get('Final_Rank', '')):>4}  {str(c.get('Symbol', '')):<8} "
             f"{str(c.get('ROC_Pct', '')):>10} {str(c.get('EY_Pct', '')):>9} "
             f"{str(c.get('ROA_Pct', '') or '-'):>9} "
-            f"{(f'{pe:.1f}' if isinstance(pe, (int, float)) else '-'):>7}"
+            f"{(f'{pe:.1f}' if isinstance(pe, (int, float)) else '-'):>7} "
+            f"{str(c.get('EPSGrowth_Pct', '') or '-'):>9} "
+            f"{(f'{peg:.2f}' if isinstance(peg, (int, float)) else '-'):>6}"
         )
     logger.info("Screen-only run finished. To analyze these, run: python main.py --from-csv")
 

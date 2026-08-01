@@ -1,9 +1,10 @@
 # magic-stock-picker
 
 A multi-agent stock research pipeline built on the Google Agent Development Kit (ADK).
-It combines Joel Greenblatt's **Magic Formula** (a quantitative value + quality
-screen) with an LLM research pipeline that argues **both sides** of the investment
-case — a Bear Agent and a Bull Agent — before a neutral Analyst Agent weighs them
+It combines Joel Greenblatt's **Magic Formula** with Peter Lynch's **PEG ratio**
+(a quantitative value + quality + growth screen) and an LLM research pipeline that
+argues **both sides** of the investment case — a Bear Agent and a Bull Agent — before
+a neutral Analyst Agent weighs them
 and issues a verdict, followed by a Sale Advisor that (assuming you own the stock)
 names the specific business events that would break the thesis.
 
@@ -11,7 +12,7 @@ names the specific business events that would break the thesis.
 
 ```mermaid
 flowchart LR
-    A["Phase A — Screener<br/>Scans the FMP universe, applies<br/>Greenblatt's eligibility gates, and<br/>ranks survivors by the Magic Formula"]
+    A["Phase A — Screener<br/>Scans the FMP universe, applies<br/>Greenblatt's eligibility gates, and<br/>ranks survivors on ROC, Earnings Yield<br/>and Lynch's PEG ratio"]
     B["Phase B — Decomposer Analysis<br/>Bear and Bull agents argue the case;<br/>a neutral Analyst Agent weighs both<br/>and issues Buy / Watch / Avoid"]
     C["Phase C — Sale Advisory<br/>Assumes the stock is already owned;<br/>names 3 measurable events that would<br/>break the original investment thesis"]
     A --> B --> C
@@ -20,9 +21,11 @@ flowchart LR
 **Phase A — Screener.** Scans the FMP stock universe, applies Greenblatt's
 step-by-step eligibility gates — no financials, utilities, funds/REITs or foreign
 (ADR) issuers; **Return on Assets ≥ 25%**; **P/E ≥ 5**; nothing that announced
-earnings in the **last 7 days** — then ranks the survivors by the Magic Formula
-itself (Return on Capital × Earnings Yield), producing a ranked candidate list
-(also written to a CSV for reuse).
+earnings in the **last 7 days** — plus one gate that is *not* Greenblatt's:
+**earnings per share must actually be growing, off a base period that was genuinely
+profitable, at a PEG ratio of 1.5 or lower**. It then ranks the survivors on three
+measures — Return on Capital, Earnings Yield, and 1/PEG — producing a ranked
+candidate list (also written to a CSV for reuse).
 
 Note that Return on **Assets** and Return on **Capital** are different measures and
 both are used deliberately: ROA divides operating profit by *all* assets and only
@@ -36,8 +39,8 @@ on-demand ticker):
      concentration.
    - FMP quantitative metrics — 3-year trends, 5-year P/E average, competitor
      metrics, analyst consensus.
-   - Magic Formula ROC / Earnings Yield (from the screen, or computed on the fly
-     for on-demand tickers).
+   - Magic Formula ROC / Earnings Yield and the PEG growth test (from the screen,
+     or computed on the fly for on-demand tickers).
 2. **Bear Agent** — builds the skeptical case (`src/research-instructions.md`),
    using FMP news + Tavily web search for bear-case research.
 3. **Bull Agent** — builds the bull case (`src/bullish-research-instructions.md`),
@@ -88,7 +91,7 @@ you just need to systematically buy **good businesses at cheap prices**, and let
 formula (not your emotions) decide which stocks qualify.
 
 The **Magic Formula** ranks every stock in the universe on two measures, then
-combines the two ranks:
+combines the two ranks (this project adds a third — see below):
 
 - **Return on Capital (ROC)** = EBIT ÷ (Net Working Capital + Net Fixed Assets) —
   how efficiently the business turns the capital it employs into profit. This is
@@ -105,11 +108,152 @@ over long periods — largely because it forces you to buy unpopular, temporaril
 out-of-favor companies instead of the popular, expensive ones everyone already
 wants.
 
+### Peter Lynch's PEG ratio — the third measure
+
+Greenblatt's two ratios ask whether a company is cheap and whether it is a good
+business. Neither asks whether it is **growing** — and a company whose profits are
+shrinking gets *cheaper on paper every year*, because its price usually falls further
+than its profits do. That is the classic value trap.
+
+It is not hypothetical here. On the screen run immediately before this was added, the
+**top-ranked company** was on a 20% earnings yield and a 1,673% return on capital —
+and its earnings per share had gone from $3.21 to $0.15 in four years, through a
+$945M write-off. Its profit had fallen 19%; its share price had fallen 68%. The screen
+saw only the ratio between the two, and called it a bargain.
+
+So this project adds the **PEG ratio** from Peter Lynch's *One Up on Wall Street*:
+
+```
+PEG = price-to-earnings ratio ÷ earnings growth rate, in percentage points
+```
+
+A P/E of 20 on 20% growth is a PEG of exactly 1.0 — Lynch's fair-value line. Below
+1.0 you are getting the growth cheaply; above it you are paying up front for growth
+that has not happened yet. A company must be growing at all and have a PEG of **1.5 or
+lower** to enter the list, and its **1/PEG rank is added to the two Magic Formula
+ranks** to order it. So a stock ranked 5th on ROC, 12th on earnings yield and 9th on
+1/PEG scores 26.
+
+#### How the growth rate is measured
+
+Not by comparing one year to one year three years earlier — that is decided entirely
+by which two years the calendar happens to pick, and it steps straight over everything
+in between. Instead:
+
+```
+growth = ( total EPS over the last 3 years  ÷  total EPS over the 3 years before that ) ^ (1/3) − 1
+```
+
+Adding up whole periods means a loss year is counted at its real negative value
+instead of being skipped. On one live example — a company the two-point method scored
+at *+349% a year* — the last three years actually **total −$0.57 per share**. It made
+a loss overall, so it has no growth rate and is excluded. The old method would have
+ranked it first.
+
+#### The three thresholds, and why they are where they are
+
+Each was set from a 189-company cross-sector study rather than picked by feel. The
+study, including its caveats, is in §10.I of `src/specs/agent_architecture.md`.
+
+**`max_peg: 1.5` — how expensive, relative to growth, is too expensive.** It started
+at 1.2 and the data said that was wrong: the companies sitting between 1.2 and 1.5
+were JNJ, ISRG, CMG, MCK, KDP and similar — steady growth, no loss years, and none of
+them there because of a capped growth rate. The genuinely speculative names were
+already getting in *below* 1.2. So 1.2 was excluding quality, not risk.
+
+**`min_base_net_margin: 3%` — the starting period must have been a real one.** A
+compound growth rate is only as meaningful as what it starts from. One company's base
+year earned $852K on $195M of sales — a 0.4% margin, profitable on paper and
+breakeven in reality — which turned an ordinary recovery into a three-digit growth
+rate. A dollar floor on earnings per share cannot express this (10 cents is nothing
+for a $500 stock and a lot for a $2 stock), so the test is **net profit margin**,
+which means the same thing at any price or in any sector. A typical company here
+scores about 10%; NVDA's base year was 16%, LLY's 22%.
+
+**`max_growth_rate_for_peg: 60%` — never divide by a growth rate above 60.** Growth
+does not persist. Checking what companies actually delivered *after* a fast stretch:
+of those growing over 50% a year, **73% went on to negative growth over the next three
+years**, with a median of −20%. The fastest growers were the worst subsequent
+performers, and the group was dominated by cyclicals at a peak. Meanwhile only 5% of
+companies ever sustain more than 63%. So paying for growth above ~60% is paying for
+something the data says almost never arrives.
+
+Two consequences worth knowing. Capping can only ever *raise* a PEG, so it can never
+flatter a company into the list — and it puts a hard ceiling on P/E for the whole
+screen of `max_peg × cap × 100` = **90**, however fast a company is growing. Review
+those two settings together, never one alone.
+
 This project doesn't stop at the ranking. **Phase A** reproduces Greenblatt's
-formula and eligibility rules exactly (see above); **Phases B and C** add an LLM
-research layer that argues both sides of each candidate and flags the specific
-events that would prove the thesis wrong — so you have more to go on than the
-ranking alone before deciding whether to act on a name.
+formula and eligibility rules (see above) and adds Lynch's growth test; **Phases B
+and C** add an LLM research layer that argues both sides of each candidate and
+flags the specific events that would prove the thesis wrong — so you have more to
+go on than the ranking alone before deciding whether to act on a name.
+
+### Re-checking and adjusting the growth cap
+
+The three PEG thresholds were set from **one sample of 189 companies taken on
+2026-07-31** — the largest ~21 companies in each of the 9 sectors the screen allows,
+with 8 years of annual figures each. That sample is a snapshot: it reflects where the
+market was that week, it covers US large and mid caps only, and its headline finding
+(that fast growth reverses) rests on just 11 companies, because few companies ever
+grow that fast. **The direction is solid. The exact numbers are not gospel.**
+
+So re-derive them rather than adjusting by feel. There is a tool for it, in
+[`tools/`](tools/) rather than `src/` because it is not part of the pipeline — nothing
+imports it, it computes no PEG and screens no company:
+
+```bash
+python tools/analyze_growth_persistence.py
+```
+
+Run it from the repository root. It takes about 10 minutes, makes no LLM calls and
+writes nothing — FMP is billed by subscription, so it costs time only. Use
+`--per-sector 40` for a larger sample.
+
+**When to run it:** before changing `max_growth_rate_for_peg`, `max_peg` or
+`min_base_net_margin`; and roughly once a year regardless, so a threshold tuned to one
+market doesn't quietly persist into a different one.
+
+**What it prints, and how to read it.** Three tables, one per threshold:
+
+1. **Growth persistence** — for every company with enough history it compares the
+   growth you would have *known about* three years ago against what the company
+   *actually delivered* since. Both windows are historical, so nothing is being
+   forecast. If the fastest-growing bucket still shows most companies going on to
+   shrink, the cap is doing real work; if fast growth has started to persist, the cap
+   is costing you candidates.
+2. **Distribution of realised growth** — what companies genuinely achieve. **Set
+   `max_growth_rate_for_peg` near the 95th percentile.** The logic: above that line you
+   are dividing by a rate almost nobody actually delivers, so you'd be paying for
+   growth that doesn't arrive. The script prints the percentile and compares it to
+   your configured value.
+3. **Base-window net margin** — set `min_base_net_margin` *below* the 25th percentile,
+   so it catches only genuinely breakeven starting periods rather than ordinary ones.
+
+**One trap when adjusting.** `max_peg` and `max_growth_rate_for_peg` are
+mathematically linked. A company passes when `PEG ≤ max_peg`, and PEG is
+`P/E ÷ growth` where growth can never exceed the cap. So the best possible PEG is
+`P/E ÷ cap`, which means:
+
+```
+hard P/E ceiling for the whole screen = max_peg × max_growth_rate_for_peg × 100
+                                      = 1.5 × 0.60 × 100 = 90
+```
+
+**No company with a P/E above 90 can enter the screen, however fast it grows.** Raise
+`max_peg` to 2.0 and you have also silently raised that ceiling to 120; drop the cap to
+40% and you have lowered it to 60. Neither knob moves alone — decide what P/E ceiling
+you want, then pick the pair. The script prints your current ceiling as a reminder.
+
+**After any change**, re-run the screen alone before paying for analysis:
+
+```bash
+python src/main.py --screen-only
+```
+
+That refreshes the rankings CSV and prints the gate breakdown, so you can see exactly
+which cut moved and how many candidates survived — for free. Only then run
+`python src/main.py --from-csv`, which is the billed part.
 
 ## Requirements
 
