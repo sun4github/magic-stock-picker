@@ -32,14 +32,15 @@ The deterministic ground truth injected into every agent's prompt, so no
 agent can assert a debt/cash/market-cap/EV figure the pipeline's own
 calculation disagrees with.
 
-- `_verified_figures(candidate)` (`main.py:1314`) extracts the numeric subset
+- `_verified_figures(candidate)` (`main.py:1348`) extracts the numeric subset
   (`TotalDebt`, `Cash`, `TotalEquity`, `TotalAssets`,
   `GoodwillAndIntangibles`, `InvestedCapital`, `EnterpriseValue`,
   `LiveMarketCap`, `EBIT`, `CapitalEmployed`) as a plain `{field: float}` dict.
   This same dict is what the reconciliation gate (below) checks agent prose
   against.
-- `_format_verified_figures(candidate)` (`main.py:1331`) renders it as
-  prose for the `VERIFIED_FIGURES` prompt block, including the ROC vs.
+- `_format_verified_figures(candidate)` (`main.py:1365`) renders it as
+  prose for the `VERIFIED_FIGURES` prompt block, including Lynch's P/E,
+  growth rate and PEG (spec §10) and the ROC vs.
   goodwill-inclusive-ROIC pairing (§2.F in the spec) and the ROA fallback
   note when ROIC can't be computed (negative invested capital from heavy
   buybacks).

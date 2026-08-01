@@ -52,6 +52,84 @@ ROA_BASIS = (screening_params.get("roa_basis") or "ebit").lower()
 MIN_PE = screening_params.get("min_pe", 5.0)
 RECENT_EARNINGS_DAYS = screening_params.get("exclude_recent_earnings_days", 7)
 
+# How many candidates Phase B would analyse if there were enough of them. Used ONLY
+# to decide whether the "short list" notice at the end of a run is worth printing —
+# the screener never truncates to it, and Phase B treats it as a ceiling rather than
+# a quota. Read from the same config key main.py uses so the two cannot drift apart.
+PHASE_B_DEPTH = int(
+    (config.get("agents", {}).get("screener_agent", {}) or {}).get("top_n_candidates", 30)
+)
+
+# --- Peter Lynch's PEG test ("One Up on Wall Street") -------------------------
+# Greenblatt's two ratios say whether a company is cheap and whether it is a good
+# business. Neither says whether it is GROWING: a high earnings yield on flat or
+# shrinking earnings is the classic value trap the Magic Formula buys by design and
+# relies on the basket to average out. Lynch's PEG divides the P/E by the earnings
+# growth rate, so a company only looks cheap if it is cheap RELATIVE to how fast it
+# is compounding. Both an eligibility gate (below) and a third ranking factor.
+#
+# EPS growth is the compound annual rate over EPS_GROWTH_YEARS fiscal years:
+#     growth = (EPS_latest_FY / EPS_FY_minus_N) ** (1/N) - 1
+# Set either threshold to null in config.yaml to disable that half of the gate.
+MIN_EPS_GROWTH = screening_params.get("min_eps_growth", 0.0)
+MAX_PEG = screening_params.get("max_peg", 1.5)
+EPS_GROWTH_YEARS = int(screening_params.get("eps_growth_years", 3) or 3)
+
+# How the growth rate is measured. See §10.B/§10.I of specs/agent_architecture.md
+# for the study behind the default.
+#
+#   "sums"     - CAGR of the LAST N years' TOTAL EPS against the PRIOR N years'
+#                total. Uses every year in a 2N-year window, so a loss year inside
+#                it drags the total down instead of being stepped over, and a
+#                one-off spike is diluted rather than annualised. Needs 2N filings.
+#   "endpoint" - the plain two-point CAGR of the original implementation.
+#
+# Measured over a 189-company cross-sector sample, "sums" cut the median growth of
+# the companies the endpoint formula called >50% growers from 66.1% to 41.8% (AU
+# 111%->17%, IBM 84%->21%), while leaving genuine compounders high (NVDA
+# 207%->132%). It also RESCUES companies a single weak endpoint year wrongly
+# disqualified: `no_eps_growth` rejections fell from 56 to 42.
+EPS_GROWTH_METHOD = (screening_params.get("eps_growth_method") or "sums").lower()
+
+# Ceiling on the growth rate the PEG DIVIDES BY (not on the rate reported, and not
+# on the "is it growing at all" gate).
+#
+# Grounded in measured persistence, not a guess. Over the same sample, companies
+# that had been compounding at >50% a year went on to deliver a MEDIAN of -20.4%
+# over the following three years, and 73% of them went outright negative; the >100%
+# cohort was worse (75% negative). Meanwhile the 95th percentile of actually-realised
+# 3-year EPS CAGR is 63%. So a denominator above ~60% is paying for growth that the
+# data says almost never arrives.
+#
+# Capping only ever makes a PEG LARGER (a worse rank), so it can never flatter a
+# company. NOTE it also implies a hard ceiling on P/E for the whole screen:
+# max_peg x max_growth_rate_for_peg x 100 (= 90 at the defaults). Set to null to
+# divide by the raw rate.
+MAX_GROWTH_FOR_PEG = screening_params.get("max_growth_rate_for_peg", 0.60)
+
+# The base window must be a REAL trading period, not a breakeven one.
+#
+# This replaces "the base EPS looks small" — an absolute dollar floor is meaningless
+# across price levels — with a scale-free test: net margin over the base window.
+# GRND's base year earned $852K on $195M of revenue, a 0.4% margin: technically
+# profitable, economically breakeven, and a denominator that turns any recovery into
+# a three-digit "growth rate". Across the sample the median base-year margin is
+# 10.5% and the 25th percentile 4.3%, so 3% sits below the ordinary range while
+# still clearing genuine compounders comfortably (NVDA 16.2%, LLY 21.9%).
+#
+# Deliberately NOT "base EPS as a share of the company's own peak": that measure
+# scored NVDA at 3.5% — its trough year — and would have excluded the single best
+# compounder in the sample. Set to null to disable.
+MIN_BASE_NET_MARGIN = screening_params.get("min_base_net_margin", 0.03)
+
+# How old the most recent ANNUAL filing may be before the growth window is treated
+# as ending too long ago to describe the company today. Deliberately far looser than
+# MAX_STATEMENT_AGE_DAYS (200 days), which is tuned for quarterly data: an annual
+# `date` is a FISCAL YEAR END, and FMP publishes it only after the filing lag, so a
+# perfectly current filer legitimately shows an annual period end up to ~15 months
+# old. 640 days leaves headroom above that; anything beyond it is a delinquent filer.
+MAX_ANNUAL_HISTORY_AGE_DAYS = 640
+
 # Financial/fund industries that FMP files OUTSIDE the excluded sectors above.
 # Matched case-insensitively as substrings of the `industry` field.
 EXCLUDED_INDUSTRIES = [
@@ -682,6 +760,285 @@ def ratio_gate_reason(metrics):
     return None
 
 
+def _annual_eps(row, field):
+    """The EPS figure on one annual income-statement row, or None."""
+    value = row.get(field)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _statement_date(row):
+    """Parse a statement's period-end date, or None if unusable."""
+    try:
+        return datetime.fromisoformat(str(row.get("date") or "")[:10]).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+# --- Shared growth math -------------------------------------------------------
+# The three functions below are the ONLY definitions of how this project measures
+# EPS growth. `fetch_eps_growth` uses them, and so does
+# `analyze_growth_persistence.py`, the offline tool that re-derives the thresholds
+# in config.yaml. That sharing is the point: a tuning study that measured growth
+# differently from the screener would recommend thresholds for a formula the screener
+# does not use, and nothing would fail loudly enough to notice.
+
+
+def annualised_growth(now, then, years):
+    """Compound annual growth from `then` to `now` over `years` years, or None.
+
+    Returns None rather than a number whenever the result would be meaningless — a
+    non-positive base (you cannot take a root of a negative ratio, and
+    positive/negative is not a growth rate), a non-positive end value, or a
+    non-positive span. Callers distinguish the causes; this only refuses."""
+    if now is None or then is None or years is None:
+        return None
+    if then <= 0 or now <= 0 or years <= 0:
+        return None
+    return (now / then) ** (1.0 / years) - 1.0
+
+
+def pick_eps_field(rows):
+    """The EPS field usable across EVERY row given, preferring diluted, or None.
+
+    All years must come from the SAME measure: pairing a diluted numerator with a
+    basic base would read the dilution itself as a change in earnings power."""
+    for field in ("epsDiluted", "eps"):
+        if rows and all(_annual_eps(r, field) is not None for r in rows):
+            return field
+    return None
+
+
+def base_window_margin(base_rows):
+    """Net margin over a set of annual rows, or None when revenue is missing.
+
+    The scale-free test of whether the growth window started from a real trading
+    period or a breakeven one — see MIN_BASE_NET_MARGIN."""
+    net_income = sum(r.get("netIncome") or 0 for r in base_rows)
+    revenue = sum(r.get("revenue") or 0 for r in base_rows)
+    return (net_income / revenue) if revenue else None
+
+
+def fetch_eps_growth(symbol, api_key, years=None):
+    """Compound annual EPS growth over the last `years` fiscal years, for the PEG test.
+
+    Costs ONE extra request (annual income statements), so the screener calls this
+    only for the companies that already cleared the ROA / P/E gates — roughly 5% of
+    the universe. The single-ticker path calls it unconditionally, because there the
+    user asked about one named company.
+
+    Deliberately ANNUAL-to-ANNUAL rather than TTM-to-annual. The exponent 1/N assumes
+    the two EPS figures sit exactly N years apart; a TTM window ends at an arbitrary
+    quarter, so pairing it with a fiscal-year base would annualise over a span of
+    anywhere from 3 to 4 years while claiming 3. The trade-off is that the growth
+    figure lags the P/E it is divided by (the P/E is TTM) — stated in the report
+    rather than hidden.
+
+    The returned dict is ALWAYS the same shape. When the rate cannot be computed,
+    `EPSGrowth` is None and `EPSGrowth_Unavailable_Reason` names the specific cause —
+    `fetch_failed`, `insufficient_history`, `no_eps_reported`, `no_period_dates`,
+    `stale_eps_history`, `non_positive_base_eps`, `non_positive_current_eps`, or
+    `period_too_short` — so the run summary and the report can say WHY a company was
+    dropped instead of showing an unexplained count. Most of these are facts about
+    the company rather than data outages, and the report renders each one in plain
+    English (see `_no_peg_reason` in main.py).
+    """
+    years = years or EPS_GROWTH_YEARS
+    use_sums = EPS_GROWTH_METHOD != "endpoint"
+    # "sums" compares two adjacent N-year windows, so it needs 2N filings; the
+    # two-point form needs only N+1.
+    needed = 2 * years if use_sums else years + 1
+    out = {
+        "EPS_Current": None,
+        "EPS_Base": None,
+        "EPS_Current_Date": None,
+        "EPS_Base_Date": None,
+        "EPS_Basis": None,
+        "EPS_Window": "sums" if use_sums else "endpoint",
+        "EPS_Window_Years": years,
+        "EPSGrowth": None,
+        "EPSGrowth_Years": None,
+        "BaseNetMargin": None,
+        "EPSGrowth_Unavailable_Reason": None,
+    }
+
+    def _fail(reason):
+        out["EPSGrowth_Unavailable_Reason"] = reason
+        return out
+
+    try:
+        rows = fmp_get(
+            "https://financialmodelingprep.com/stable/income-statement",
+            params={"symbol": symbol, "limit": needed, "apikey": api_key},
+            context=f"{symbol} income (annual EPS history)",
+        )
+    except FMPError:
+        # Already retried inside fmp_get. Reported as a reason rather than raised:
+        # one company's missing history must not abort a 2,500-company run, and the
+        # gate below drops it anyway, where it is counted and printed.
+        return _fail("fetch_failed")
+
+    rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+    if len(rows) < needed:
+        # A company younger than the growth window has no N-year record to measure.
+        return _fail("insufficient_history")
+
+    current, base = rows[0], rows[years]
+
+    # Diluted EPS is the conservative standard, but EVERY year used must come from
+    # the SAME measure — mixing a diluted numerator with a basic base would read the
+    # dilution itself as a change in earnings power.
+    field = pick_eps_field(rows[:needed])
+    if field is None:
+        return _fail("no_eps_reported")
+
+    cur_date, base_date = _statement_date(current), _statement_date(base)
+    if cur_date is None or base_date is None:
+        return _fail("no_period_dates")
+
+    if use_sums:
+        # Total earnings per share over the recent window against the total over the
+        # window before it. A loss year is counted at its real (negative) value here
+        # rather than stepped over, which is the whole point.
+        eps_now = sum(_annual_eps(r, field) for r in rows[:years])
+        eps_then = sum(_annual_eps(r, field) for r in rows[years:2 * years])
+    else:
+        eps_now, eps_then = _annual_eps(current, field), _annual_eps(base, field)
+
+    out.update({
+        "EPS_Current": round(eps_now, 4),
+        "EPS_Base": round(eps_then, 4),
+        "EPS_Current_Date": current.get("date"),
+        "EPS_Base_Date": base.get("date"),
+        "EPS_Basis": "diluted" if field == "epsDiluted" else "basic",
+    })
+
+    if (datetime.now(timezone.utc) - cur_date).days > MAX_ANNUAL_HISTORY_AGE_DAYS:
+        return _fail("stale_eps_history")
+
+    # Net margin over the base window: the scale-free test of whether the starting
+    # point was a real trading period or a breakeven one. Reported here, enforced by
+    # `growth_gate_reason` — measurement and policy stay separate.
+    base_rows = rows[years:2 * years] if use_sums else [base]
+    out["BaseNetMargin"] = base_window_margin(base_rows)
+
+    # A negative or zero base makes the ratio meaningless: you cannot take the cube
+    # root of a negative number, and (positive / negative) is not a growth rate. This
+    # is a real fact about the company (it lost money over the base window), not a
+    # data gap, so it is reported as its own reason rather than as a fetch failure.
+    if eps_then is None or eps_then <= 0:
+        return _fail("non_positive_base_eps")
+    if eps_now is None or eps_now <= 0:
+        return _fail("non_positive_current_eps")
+
+    span = (cur_date - base_date).days / 365.25
+    if span < 1:
+        return _fail("period_too_short")
+    # Snap a near-whole span to the whole number so the published figure is exactly
+    # the documented formula and can be hand-checked. A genuinely irregular span
+    # (a changed fiscal year end) keeps its real length, which is the honest
+    # annualisation — better than pretending it was N years.
+    if abs(span - round(span)) <= 0.2:
+        span = float(round(span))
+
+    out["EPSGrowth"] = annualised_growth(eps_now, eps_then, span)
+    out["EPSGrowth_Years"] = round(span, 2)
+    return out
+
+
+def compute_peg(pe_ratio, growth_rate):
+    """Lynch's PEG ratio: P/E divided by the growth rate in PERCENTAGE POINTS.
+
+    The unit matters and is the easiest thing here to get wrong. Lynch's rule of
+    thumb — "the P/E of any fairly priced company will equal its growth rate" — pairs
+    a P/E of 20 with 20% growth for a PEG of 1.0. So the denominator is 20, not 0.20;
+    dividing by the decimal would produce a PEG a hundred times too large and the
+    1.2 ceiling would reject the entire market.
+
+    Returns None when either input is missing or non-positive: a negative P/E or a
+    shrinking EPS produces a negative PEG, which would sort as 'cheap' and is exactly
+    the trap this ratio exists to catch.
+    """
+    if pe_ratio is None or growth_rate is None:
+        return None
+    if pe_ratio <= 0 or growth_rate <= 0:
+        return None
+    return pe_ratio / (growth_rate * 100.0)
+
+
+def growth_gate_reason(metrics):
+    """Why a company fails the PEG / growth gates, or None if it passes.
+
+    Applied AFTER `ratio_gate_reason` because it costs an extra request. Two cuts:
+
+      - **No growth.** EPS today no higher than N years ago. The Magic Formula's
+        cheapness signal is a trap on a company whose earnings are flat or falling,
+        and Lynch's ratio is undefined there.
+      - **PEG above `max_peg`.** Cheap relative to earnings, but not relative to
+        growth.
+
+    Unlike the ROA / P/E gates, MISSING DATA IS A REJECTION here, which is a
+    deliberate departure from the rule elsewhere in this file. Two reasons: 1/PEG is
+    now a ranking factor, so a survivor without a PEG cannot be ranked against the
+    others; and the gate asks the company to demonstrate growth — a company that
+    cannot be shown to be growing has not met that condition, whatever the cause.
+    Every rejection carries a distinct reason and the run prints the breakdown, so a
+    provider outage shows up as a large `growth_unavailable` count rather than
+    silently thinning the list.
+    """
+    if MIN_EPS_GROWTH is not None:
+        growth = metrics.get("EPSGrowth")
+        if growth is None:
+            return "growth_unavailable"
+        if growth <= MIN_EPS_GROWTH:
+            return "no_eps_growth"
+
+    # The base window has to have been a real trading period. Checked AFTER the
+    # growth rate is computed, so the run can report "grew 349% — off a breakeven
+    # base" rather than silently swallowing both facts.
+    if MIN_BASE_NET_MARGIN is not None:
+        margin = metrics.get("BaseNetMargin")
+        if margin is None:
+            return "base_margin_unavailable"
+        if margin < MIN_BASE_NET_MARGIN:
+            return "base_year_breakeven"
+
+    if MAX_PEG is not None:
+        peg = metrics.get("PEG")
+        if peg is None:
+            return "peg_unavailable"
+        if peg > MAX_PEG:
+            return "peg_above_max"
+
+    return None
+
+
+def peg_growth_rate(growth_rate):
+    """The growth rate the PEG divides by: the measured rate, capped at
+    MAX_GROWTH_FOR_PEG. See the comment on that constant for why the cap exists.
+    Returns (rate_used, was_capped)."""
+    if growth_rate is None or MAX_GROWTH_FOR_PEG is None:
+        return growth_rate, False
+    if growth_rate > MAX_GROWTH_FOR_PEG:
+        return MAX_GROWTH_FOR_PEG, True
+    return growth_rate, False
+
+
+def attach_growth_metrics(symbol, metrics, api_key):
+    """Fetch EPS growth for `symbol` and fold it, plus the derived PEG, into
+    `metrics` in place. Returns the same dict for convenience.
+
+    `EPSGrowth` is always the measured rate. `EPSGrowth_ForPEG` is what the PEG was
+    actually computed from, which differs only when the cap bit. Both are carried so
+    a report can show a 349% growth rate and a PEG built on 50% without either figure
+    looking like an error."""
+    metrics.update(fetch_eps_growth(symbol, api_key))
+    rate_for_peg, capped = peg_growth_rate(metrics.get("EPSGrowth"))
+    metrics["EPSGrowth_ForPEG"] = rate_for_peg
+    metrics["EPSGrowth_Capped"] = capped
+    metrics["PEG"] = compute_peg(metrics.get("PE"), rate_for_peg)
+    return metrics
+
+
 def calculate_company_metrics(symbol, live_market_cap, api_key):
     """Back-compat wrapper over `compute_company_metrics_detailed`: returns the
     plain metrics dict on success, or None when the company cannot be ranked.
@@ -735,6 +1092,12 @@ def main():
             # Steps 1 & 2 of Greenblatt's screen. Dropped BEFORE ranking so a rejected
             # company cannot shift the percentile ranks of the ones that survive.
             gate = ratio_gate_reason(metrics)
+            if not gate:
+                # Lynch's growth test costs one extra request per company, so it runs
+                # only on what survives the free-to-check gates above — ~5% of the
+                # universe, turning ~2,500 extra calls into ~120.
+                attach_growth_metrics(symbol, metrics, API_KEY)
+                gate = growth_gate_reason(metrics)
             if gate:
                 gate_counts[gate] = gate_counts.get(gate, 0) + 1
             else:
@@ -753,6 +1116,19 @@ def main():
             f"\nGreenblatt gates: {gate_counts.get('roa_below_min', 0)} dropped for ROA "
             f"below {MIN_ROA:.0%} ({roa_label} / total assets), "
             f"{gate_counts.get('pe_below_min', 0)} dropped for a P/E below {MIN_PE:g}."
+        )
+        # The growth gate is reported separately, and split by reason, because it is
+        # the one gate that drops companies for MISSING data as well as for failing
+        # the test. A provider outage would show up here as a large
+        # `growth_unavailable` count instead of a quietly shorter candidate list.
+        print(
+            f"Lynch PEG gate ({EPS_GROWTH_METHOD} growth over {EPS_GROWTH_YEARS} years): "
+            f"{gate_counts.get('no_eps_growth', 0)} dropped for no EPS growth, "
+            f"{gate_counts.get('base_year_breakeven', 0)} dropped for a base window "
+            f"below {MIN_BASE_NET_MARGIN:.0%} net margin, "
+            f"{gate_counts.get('peg_above_max', 0)} dropped for a PEG above {MAX_PEG:g}, "
+            f"{gate_counts.get('growth_unavailable', 0) + gate_counts.get('peg_unavailable', 0) + gate_counts.get('base_margin_unavailable', 0)} "
+            f"dropped because a growth rate, margin or PEG could not be computed."
         )
 
     # Step 3: drop anything that reported earnings in the last week. Run over the
@@ -814,8 +1190,28 @@ def main():
     df["ROC_Rank"] = df["ROC"].rank(ascending=False, method="min")
     df["EY_Rank"] = df["EarningsYield"].rank(ascending=False, method="min")
 
+    # Greenblatt's own score, unchanged: the sum of the two Magic Formula ranks. Kept
+    # as its own column so the pure formula stays visible next to the composite below.
     df["MagicFormula_Score"] = df["ROC_Rank"] + df["EY_Rank"]
-    df["Final_Rank"] = df["MagicFormula_Score"].rank(ascending=True, method="min").astype(int)
+
+    # Lynch's growth factor, folded in as 1/PEG so that all three inputs point the
+    # same way — higher is better — and one `ascending=False` ranks them all. Ranking
+    # 1/PEG descending is arithmetically the same order as PEG ascending, but the
+    # column reads as a score rather than as a cost, which is what the score adds up.
+    #
+    # `na_option="bottom"` is a belt-and-braces default: the growth gate already drops
+    # every company without a PEG, but if that gate is disabled in config.yaml a
+    # missing PEG must rank LAST rather than turn the whole composite into NaN and
+    # take Final_Rank down with it.
+    df["InversePEG"] = df["PEG"].map(
+        lambda v: 1.0 / v if isinstance(v, (int, float)) and pd.notna(v) and v > 0 else None
+    )
+    df["PEG_Rank"] = df["InversePEG"].rank(ascending=False, method="min", na_option="bottom")
+
+    # The ranking the list is actually ordered by: cheap (EY) + good (ROC) + growing
+    # (1/PEG), each an equally weighted rank, exactly as Greenblatt combines his two.
+    df["Composite_Score"] = df["MagicFormula_Score"] + df["PEG_Rank"]
+    df["Final_Rank"] = df["Composite_Score"].rank(ascending=True, method="min").astype(int)
 
     df = df.sort_values(by="Final_Rank", ascending=True)
 
@@ -833,13 +1229,29 @@ def main():
         lambda v: f"{v}%" if pd.notna(v) else ""
     )
     df["PE_Ratio"] = df["PE"].round(2)
+    # Lynch's growth figures. EPSGrowth is kept raw ALONGSIDE the percent string
+    # because main.py's `_normalize_candidate` derives display fields from the raw
+    # ratio columns — see agent_architecture.md §2.I on the two candidate shapes.
+    df["EPSGrowth_Pct"] = (df["EPSGrowth"] * 100).round(2).map(
+        lambda v: f"{v}%" if pd.notna(v) else ""
+    )
+    df["PEG_Ratio"] = df["PEG"].round(2)
 
     output_df = df[[
         "Final_Rank", "Symbol", "CompanyName", "Live_Price",
-        "LiveMarketCap", "ROC_Pct", "EY_Pct", "EBIT_Basis", "MagicFormula_Score",
-        "ROC_Rank", "EY_Rank",
+        "LiveMarketCap", "ROC_Pct", "EY_Pct", "EBIT_Basis",
+        "Composite_Score", "MagicFormula_Score",
+        "ROC_Rank", "EY_Rank", "PEG_Rank",
         # Greenblatt's step-by-step gate figures (see ratio_gate_reason).
         "ROA_Pct", "ROA_NetIncome_Pct", "PE_Ratio", "NetIncome",
+        # Lynch's PEG test (see growth_gate_reason): the growth rate, the ratio it
+        # feeds, and the EPS pair the rate was computed from, so a reader can redo
+        # the arithmetic from the CSV alone.
+        "EPSGrowth", "EPSGrowth_Pct", "PEG", "PEG_Ratio", "InversePEG",
+        "EPSGrowth_ForPEG", "EPSGrowth_Capped",
+        "EPS_Current", "EPS_Base", "EPS_Current_Date", "EPS_Base_Date",
+        "EPS_Basis", "EPS_Window", "EPS_Window_Years", "BaseNetMargin",
+        "EPSGrowth_Years", "EPSGrowth_Unavailable_Reason",
         # Raw component dollar figures, kept alongside the Pct columns so the
         # final report can show the actual EY/ROC formula, not just the result.
         "EBIT", "CapitalEmployed", "EnterpriseValue",
@@ -864,10 +1276,21 @@ def main():
     # analyzes the top 30, so a run that leaves fewer than that is not a stricter
     # screen, it is a broken one. Say so rather than letting the pipeline quietly
     # analyze whatever handful survived.
-    if len(output_df) < 30:
-        print(f"\nWARNING: only {len(output_df)} companies cleared the screen, which is "
-              f"fewer than the 30 the analysis phase expects. Consider lowering "
-              f"`min_roa` or raising `universe_limit` in specs/config.yaml.")
+    # NOT an error, and nothing downstream breaks: Phase B takes top_n_candidates as a
+    # MAXIMUM (`df.head(top_n)` / `candidates[:top_n]`), so a 12-company list is
+    # analysed as 12 companies. This notice exists for two other reasons — a short list
+    # is usually a signal that a gate is mistuned rather than that the market is
+    # genuinely thin, and the Magic Formula is a BASKET strategy whose historical
+    # results assume 20-30 names, so a very short list weakens the diversification the
+    # method depends on. Worth knowing about; not worth stopping for.
+    if len(output_df) < PHASE_B_DEPTH:
+        print(f"\nNOTE: {len(output_df)} companies cleared the screen, fewer than the "
+              f"{PHASE_B_DEPTH} Phase B would analyse. Nothing is broken — Phase B "
+              f"treats that number as a ceiling and will analyse all "
+              f"{len(output_df)}. But Greenblatt's method assumes a 20-30 name basket, "
+              f"so consider whether a gate is too tight: min_roa is by far the "
+              f"strictest (see the gate breakdown above), then universe_limit, then "
+              f"max_peg.")
 
     print(f"\nSuccess! Processed {len(output_df)} valid candidates.")
     print(f"Archived run : '{timestamped_path}'")

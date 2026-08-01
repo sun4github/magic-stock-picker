@@ -31,6 +31,7 @@ from magic_formula_starter_screener import (
     main as run_screener_main,
     OUTPUT_FILENAME,
     compute_company_metrics_detailed,
+    attach_growth_metrics,
     fmp_get,
     FMPError,
 )
@@ -93,11 +94,18 @@ def compute_ticker_magic_metrics(ticker: str) -> str:
                 "CapitalEmployed": metrics.get("CapitalEmployed"),
                 "LiveMarketCap": live_cap,
             })
+        # Lynch's growth figures. Costs one extra request, spent unconditionally here
+        # (the screener spends it only on gate survivors) because an on-demand run is
+        # asking about ONE named company and the PEG is part of the answer.
+        attach_growth_metrics(ticker, metrics, api_key)
+
         roic = metrics.get("ROIC_InclGoodwill")
         intang_share = metrics.get("IntangiblesShareOfAssets")
         roa = metrics.get("ROA")
         roa_ni = metrics.get("ROA_NetIncome")
         pe = metrics.get("PE")
+        growth = metrics.get("EPSGrowth")
+        peg = metrics.get("PEG")
         return json.dumps({
             "Symbol": ticker,
             "CompanyName": metrics.get("CompanyName", ticker),
@@ -111,6 +119,38 @@ def compute_ticker_magic_metrics(ticker: str) -> str:
             "ROA_Pct": f"{round(roa * 100, 2)}%" if roa is not None else None,
             "ROA_NetIncome_Pct": f"{round(roa_ni * 100, 2)}%" if roa_ni is not None else None,
             "PE_Ratio": round(pe, 2) if pe is not None else None,
+            # Lynch's PEG test. Reported, never enforced here, for the same reason as
+            # the two gate figures above: the report says which side of the "PEG at or
+            # below 1.2, and growing at all" cuts this company falls on. Both the raw
+            # ratio and the display string go out, because the batch and single-ticker
+            # candidate shapes must agree (agent_architecture.md §2.I).
+            "EPSGrowth": growth,
+            "EPSGrowth_Pct": f"{round(growth * 100, 2)}%" if growth is not None else None,
+            # What the PEG was actually divided by: the same rate unless the
+            # sustainability cap bit (see MAX_GROWTH_FOR_PEG in the screener).
+            "EPSGrowth_ForPEG": metrics.get("EPSGrowth_ForPEG"),
+            "EPSGrowth_Capped": metrics.get("EPSGrowth_Capped"),
+            "PEG": peg,
+            "PEG_Ratio": round(peg, 2) if peg is not None else None,
+            "EPS_Current": metrics.get("EPS_Current"),
+            "EPS_Base": metrics.get("EPS_Base"),
+            "EPS_Current_Date": metrics.get("EPS_Current_Date"),
+            "EPS_Base_Date": metrics.get("EPS_Base_Date"),
+            "EPS_Basis": metrics.get("EPS_Basis"),
+            # Which window the growth was measured over ("sums" = N-year totals vs
+            # the prior N years; "endpoint" = the two-point CAGR), and whether the
+            # base window was a real trading period or a breakeven one.
+            "EPS_Window": metrics.get("EPS_Window"),
+            "EPS_Window_Years": metrics.get("EPS_Window_Years"),
+            "BaseNetMargin": metrics.get("BaseNetMargin"),
+            "BaseNetMargin_Pct": (
+                f"{round(metrics['BaseNetMargin'] * 100, 2)}%"
+                if metrics.get("BaseNetMargin") is not None else None
+            ),
+            "EPSGrowth_Years": metrics.get("EPSGrowth_Years"),
+            # Why the growth rate is missing, when it is, so the report can explain it
+            # instead of printing a bare "Not available" (see ROIC_Unavailable_Reason).
+            "EPSGrowth_Unavailable_Reason": metrics.get("EPSGrowth_Unavailable_Reason"),
             "NetIncome": metrics.get("NetIncome"),
             "EBIT_Basis": metrics.get("EBIT_Basis"),
             "EBIT": metrics.get("EBIT"),
@@ -119,6 +159,7 @@ def compute_ticker_magic_metrics(ticker: str) -> str:
             "LiveMarketCap": live_cap,
             "Final_Rank": None,
             "MagicFormula_Score": None,
+            "Composite_Score": None,
             # Authoritative balance-sheet figures + goodwill-inclusive ROIC. These
             # are what the reconciliation gate checks agent prose against, and what
             # keeps a rollup's headline ROC from being read as operating efficiency.
@@ -253,10 +294,54 @@ def _prune_rows(rows, keep):
 
 
 @mcp.tool()
+def fmp_company_profile(ticker: str) -> str:
+    """
+    Look up what a company ACTUALLY DOES: its sector, industry, and a description of
+    its business, from Financial Modeling Prep.
+
+    Use this to VERIFY a candidate competitor before naming it as one. A company is
+    only a competitor if it sells something that competes for the same customer spend
+    as the subject's largest revenue segment — being the same size, or sitting in the
+    same broad sector, is not enough.
+
+    Exists because a bear case once named Frontdoor (FTDR) as a peer of H&R Block on
+    the strength of a provider peer list. One call to this tool returns "provider of
+    extensive home service plans… repair or replacement of key components", against a
+    tax preparer — which settles it in a sentence.
+
+    Returns JSON with symbol, companyName, sector, industry, description, country,
+    marketCap and isActivelyTrading, or {"error": ...}.
+    """
+    api_key = os.getenv("FMP_API_KEY")
+    if not api_key:
+        return json.dumps({"error": "FMP_API_KEY not configured"})
+    try:
+        time.sleep(0.20)  # 300 calls/min Starter rate limit
+        data = fmp_get(
+            "https://financialmodelingprep.com/stable/profile",
+            params={"symbol": ticker, "apikey": api_key},
+            context=f"{ticker} profile",
+        )
+        row = data[0] if isinstance(data, list) and data else data
+        if not isinstance(row, dict) or not row.get("symbol"):
+            return json.dumps({"error": f"No profile found for {ticker}"})
+        keep = ("symbol", "companyName", "sector", "industry", "country",
+                "marketCap", "isActivelyTrading", "description")
+        return json.dumps({k: row.get(k) for k in keep}, separators=(",", ":"))
+    except FMPError as e:
+        return json.dumps({"error": f"Could not fetch profile for {ticker}: {e}"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
 def fmp_metrics_extractor(ticker: str) -> str:
     """
     Fetches 3-year metric trends, 5-year P/E history/average, analyst consensus
-    targets, and competitor data from Financial Modeling Prep.
+    targets, and an UNVERIFIED peer cohort from Financial Modeling Prep.
+
+    The peer cohort is deliberately not called "competitors" — see the comment at
+    the `stock-peers` call below for why that label was actively misleading.
 
     Uses the current /stable API (the legacy /api/v3 and /api/v4 endpoints were
     retired 2025-08-31). All endpoints below are available on the Starter plan.
@@ -288,7 +373,15 @@ def fmp_metrics_extractor(ticker: str) -> str:
         ratings_snapshot = _get("ratings-snapshot", symbol=ticker)     # replaces legacy /v3/rating
         price_target = _get("price-target-consensus", symbol=ticker)   # analyst consensus targets
         grades = _get("grades-consensus", symbol=ticker)               # analyst buy/hold/sell consensus
-        peers = _get("stock-peers", symbol=ticker)                     # replaces legacy /v4/stock_peers
+        # NOT a competitor list, despite the endpoint name. FMP returns a size-and-
+        # sector bucket: for HRB (tax preparation) it returns Allison Transmission
+        # (truck gearboxes), Boyd Gaming (casinos), Churchill Downs (horse racing) and
+        # Frontdoor (home warranties), while OMITTING Intuit — the one company that is
+        # actually its main competitor. Labelling this "competitors" caused a bear case
+        # to reach for Frontdoor as a comparable, which it did while visibly doubting
+        # the premise. The field is kept because a size/sector cohort has some value,
+        # but it now travels with a name and a note that say what it really is.
+        peers = _get("stock-peers", symbol=ticker)
 
         # Compute the 5-year average P/E from the ratios history.
         pe_values = [
@@ -310,7 +403,21 @@ def fmp_metrics_extractor(ticker: str) -> str:
             "ratings_snapshot": ratings_snapshot,
             "price_target_consensus": price_target,
             "grades_consensus": grades,
-            "competitors": peers,
+            # Renamed from "competitors" — see the comment at the fetch site. The
+            # caveat rides INSIDE the payload rather than only in a prompt, so it
+            # reaches every agent that reads this blob regardless of instructions.
+            "peer_group_note": (
+                "UNVERIFIED. This list comes from the data provider's peer endpoint, "
+                "which groups by market size and broad sector, NOT by business model. "
+                "It regularly contains companies in unrelated industries and regularly "
+                "OMITS the subject's real competitors, including its largest one. Do "
+                "not describe any of these as a competitor, and do not compare margins "
+                "or multiples against them, unless you have separately established "
+                "that it competes in the same business. Real competitors are often "
+                "private and will not appear here at all — say so rather than "
+                "substituting whatever this list contains."
+            ),
+            "fmp_peer_group_unverified": peers,
         }
         # Compact separators, not indent=2: the pretty-printing was pure whitespace
         # billed as input tokens on every agent turn.

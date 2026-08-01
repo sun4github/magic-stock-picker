@@ -31,6 +31,17 @@ Come here once you need to change or extend the code.
 | [07-observability-and-logging.md](07-observability-and-logging.md) | How logging is actually wired up (three independent loggers), where each diagnostic ends up, and two verified logging quirks (duplicate console lines, CWD-relative log directory) | `src/main.py`, `src/mcp_server.py`, `src/magic_formula_starter_screener.py` |
 | [08-gates-and-validation-inventory.md](08-gates-and-validation-inventory.md) | Every validation/eligibility/integrity/resilience gate in the system, consolidated into one table by category, with fail-loud-vs-fail-open behavior called out | all of the above |
 
+## What is *not* in the runtime path
+
+[`tools/`](../tools/) holds offline instruments that nothing imports and no run
+executes. Today that is `analyze_growth_persistence.py`, which re-derives the
+evidence behind the PEG thresholds in `config.yaml` (see
+[`agent_architecture.md`](../src/specs/agent_architecture.md) §10.I and the
+"Re-checking and adjusting the growth cap" section of the root README). It computes
+no PEG and screens no company; it imports the screener's growth math rather than
+reimplementing it, so a tuning study can never measure something the screener does
+not. Put anything similar there rather than in `src/`.
+
 ## Reading order for a first pass
 
 1. **01** to see the shape of a run end to end (`python main.py` → screener →

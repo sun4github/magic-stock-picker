@@ -262,6 +262,90 @@ screening_parameters:
   # is rejected earlier).
   min_pe: 5.0
 
+  # --- Peter Lynch's PEG test ("One Up on Wall Street") -----------------------
+  # NOT part of Greenblatt's screen. Added because his two ratios are silent on
+  # GROWTH: a high earnings yield on flat or shrinking earnings is precisely the
+  # value trap the Magic Formula buys by design and leaves the basket to average
+  # out. Lynch divides the P/E by the earnings growth rate, so a company counts as
+  # cheap only relative to how fast it is compounding.
+  #
+  # This one is BOTH a gate and a ranking factor: survivors are ranked on 1/PEG
+  # alongside ROC and earnings yield (Composite_Score = ROC_Rank + EY_Rank + PEG_Rank).
+  #
+  # Growth rate = (EPS_latest_FY / EPS_FY_minus_N) ** (1/N) - 1, from ANNUAL filings.
+  # PEG = P/E divided by the growth rate in PERCENTAGE POINTS (a P/E of 20 with 20%
+  # growth is a PEG of 1.0). Set either threshold to null to disable that half.
+
+  # Minimum compound annual EPS growth. 0.0 means "must be growing at all" —
+  # anything flat or shrinking is dropped. Unlike the ROA/PE gates, a company whose
+  # growth CANNOT be computed is also dropped (it has not demonstrated growth, and
+  # 1/PEG is a ranking input so a survivor without one cannot be ranked). The run
+  # prints the reasons split out so a provider outage is visible as a count.
+  min_eps_growth: 0.0
+
+  # Lynch's fair-value line is PEG = 1.0. 1.5 allows a premium for a company that is
+  # already clearing a 25% ROA hurdle.
+  #
+  # Raised from 1.2 on evidence, not taste. Over a 189-company cross-sector sample,
+  # the companies sitting in the 1.2-1.5 band were NMRK, JNJ, VMC, KDP, MCK, MPLX,
+  # OKE, CMG and ISRG — 8.7% to 29.2% growth, zero loss years in the window, and NOT
+  # ONE of them there because its growth rate had been capped. The speculative
+  # high-growth cohort does not live in that band at all: capped growth plus a low
+  # multiple already puts it well under 1.2. So 1.2 was excluding quality, not
+  # excluding risk. See §10.I of specs/agent_architecture.md.
+  max_peg: 1.5
+
+  # Length of each growth window, in fiscal years.
+  eps_growth_years: 3
+
+  # How the growth rate is measured:
+  #   "sums"     - CAGR of the last N years' TOTAL EPS vs the PRIOR N years' total.
+  #                Uses every year in a 2N-year window, so a loss year inside it is
+  #                counted at its real negative value instead of being stepped over,
+  #                and a one-off spike is diluted rather than annualised. Needs 2N
+  #                annual filings, so it excludes more recent listings.
+  #   "endpoint" - the plain two-point CAGR (EPS_now / EPS_N_years_ago) ^ (1/N) - 1.
+  #
+  # "sums" is the default because the endpoint form is driven entirely by which two
+  # years the calendar happens to pick. On the sample it cut the median growth of the
+  # supposed >50% growers from 66.1% to 41.8% (AU 111%->17%, IBM 84%->21%) while
+  # leaving real compounders high (NVDA 207%->132%), and it RESCUED companies a
+  # single weak endpoint year had wrongly disqualified (no-growth rejections 56->42).
+  eps_growth_method: "sums"
+
+  # Ceiling on the growth rate the PEG DIVIDES BY — not on the rate reported, and not
+  # on the "is it growing at all" gate, both of which use the measured figure.
+  #
+  # Grounded in measured persistence. Companies in the sample that had been
+  # compounding at >50%/yr went on to deliver a MEDIAN of -20.4% over the next three
+  # years, with 73% going outright negative (the >100% cohort: 75% negative). The
+  # 95th percentile of actually-realised 3-year EPS CAGR is 63%. So a denominator
+  # much above 60% prices in growth that the data says almost never arrives.
+  #
+  # Capping can only ever RAISE a PEG (a worse rank), so it cannot flatter a company.
+  # NOTE it also implies a hard P/E ceiling for the whole screen of
+  # max_peg x max_growth_rate_for_peg x 100 = 90 at these defaults.
+  # Set to null to divide by the raw rate instead.
+  max_growth_rate_for_peg: 0.60
+
+  # The base window must have been a REAL trading period, not a breakeven one.
+  #
+  # This is the targeted fix for the problem the cap above only blunts. An absolute
+  # dollar floor on EPS is meaningless across price levels, so the test is net margin
+  # over the base window instead — scale-free and comparable across sectors. GRND's
+  # base year made $852K on $195M of revenue: a 0.4% margin, technically profitable
+  # and economically breakeven, and a denominator that turns any recovery into a
+  # three-digit growth rate.
+  #
+  # Sample distribution of base-window net margin: p25 4.3%, p50 10.5%, p90 28.1%.
+  # 3% sits below the ordinary range while clearing genuine compounders comfortably
+  # (NVDA 16.2%, LLY 21.9%).
+  #
+  # Deliberately NOT "base EPS as a share of the company's own peak EPS": that
+  # measure scored NVDA at 3.5% (its trough year) and would have thrown out the best
+  # compounder in the sample. Set to null to disable.
+  min_base_net_margin: 0.03
+
   # Step 3: "eliminate companies that have announced earnings in the last week".
   # A fresh report has not been absorbed into the price yet, so the screen would be
   # ranking on figures the market is still digesting. Checked against FMP's earnings
