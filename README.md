@@ -111,15 +111,34 @@ wants.
 ### Peter Lynch's PEG ratio — the third measure
 
 Greenblatt's two ratios ask whether a company is cheap and whether it is a good
-business. Neither asks whether it is **growing** — and a company whose profits are
-shrinking gets *cheaper on paper every year*, because its price usually falls further
-than its profits do. That is the classic value trap.
+business. Neither asks whether it is **growing**, and that gap is the classic value
+trap.
 
-It is not hypothetical here. On the screen run immediately before this was added, the
-**top-ranked company** was on a 20% earnings yield and a 1,673% return on capital —
-and its earnings per share had gone from $3.21 to $0.15 in four years, through a
-$945M write-off. Its profit had fallen 19%; its share price had fallen 68%. The screen
-saw only the ratio between the two, and called it a bargain.
+The earnings yield is a **snapshot**: this year's profit set against today's price. It
+has no memory and no sense of direction. Consider two companies both showing a 10%
+yield:
+
+| | Profit | Price | Yield |
+| :--- | ---: | ---: | ---: |
+| **A** — steady | $10, and has been for years | $100 | 10% |
+| **B** — shrinking | $10, down from $25 three years ago | $100, down from $250 | 10% |
+
+**The screen cannot tell them apart.** But buy B for $100 and next year it earns $7,
+the year after $5 — the return on the money you actually paid falls to 7%, then 5%.
+You bought a melting asset at what looked like a fair price.
+
+Note what is *not* being claimed: falling profits do not raise the yield — as your
+arithmetic would expect, a drop from $10 to $6 on a $100 price takes the yield from
+10% down to 6%. The trap is that **the price falls too, and usually faster**, because
+the market prices in the decline it can see coming. That keeps the ratio looking
+healthy while the business underneath deteriorates.
+
+That is not hypothetical here. On the screen run immediately before this was added,
+the **top-ranked company** showed a 20% earnings yield and a 1,673% return on capital.
+Its operating profit had fallen 19% over three years — but its market value had fallen
+**68%**, so the yield went *up*, from 13% to 33%. Its earnings per share had gone from
+$3.21 to $0.15, through a $945M write-off. The screen saw only the ratio between price
+and profit, and called it the best company on the list.
 
 So this project adds the **PEG ratio** from Peter Lynch's *One Up on Wall Street*:
 
