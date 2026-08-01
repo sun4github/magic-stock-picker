@@ -24,6 +24,7 @@ from mcp_server import (
     compute_ticker_magic_metrics,
     fetch_sec_10k_data,
     fmp_metrics_extractor,
+    fmp_company_profile,
     fmp_quarterly_trends,
     fmp_stock_news,
     web_search_tool,
@@ -250,8 +251,10 @@ bear_agent = LlmAgent(
         research_instructions
         + "\n\n## How to run this research\n"
         "You are building the BEAR case for {company_name} ({ticker}). Use your tools: "
-        "call fmp_stock_news for recent factual news, and web_search_tool for bear-case "
-        "risks, short-seller theses, and competitive/regulatory threats. Answer the "
+        "call fmp_stock_news for recent factual news, web_search_tool for bear-case "
+        "risks, short-seller theses, and competitive/regulatory threats, and "
+        "fmp_company_profile to CHECK WHAT A COMPANY ACTUALLY SELLS before naming it "
+        "as a competitor — a shared sector label is not competition. Answer the "
         "questions above skeptically, using the gathered research plus the financial "
         "data below. Do not invent facts; cite sources.\n\n"
         + RECENCY_MANDATE
@@ -263,7 +266,7 @@ bear_agent = LlmAgent(
         + REFERENCE_DATA_BLOCKS
         + RESEARCH_SOURCE_BLOCKS
     ),
-    tools=[fmp_stock_news, web_search_tool],
+    tools=[fmp_stock_news, web_search_tool, fmp_company_profile],
     output_key="bear_data",
     include_contents=PIPELINE_INCLUDE_CONTENTS,
 )
@@ -300,7 +303,7 @@ bull_agent = LlmAgent(
         + RESEARCH_SOURCE_BLOCKS
         + "\n<BEAR_CASE>\n{bear_data}\n</BEAR_CASE>\n"
     ),
-    tools=[fmp_stock_news, web_search_tool],
+    tools=[fmp_stock_news, web_search_tool, fmp_company_profile],
     output_key="bull_data",
     include_contents=PIPELINE_INCLUDE_CONTENTS,
 )
@@ -469,7 +472,17 @@ analyst_agent = LlmAgent(
         "conditions' or 'execution risk' — and say what a reader would see in a future "
         "earnings report if it were happening. For a 'Buy', this is the thing most "
         "likely to break the case; for 'Watch' or 'Avoid', the thing most likely to "
-        "prove you too cautious. Do not use the word 'Verdict' in this section.\n\n"
+        "prove you too cautious. Do not use the word 'Verdict' in this section.\n"
+        "**When you point the reader at a future quarter, check the seasonality first.** "
+        "QUARTERLY_DATA gives you eight quarters with their period-end dates, so you can "
+        "see how the company's year is actually shaped. Name the quarter AND its period "
+        "end, and if the business is seasonal, say whether that one quarter captures the "
+        "whole season or only part of it — if only part, name the quarters that together "
+        "do. A tax preparer whose fiscal Q3 ends 31 March has booked most of the filing "
+        "season but not its final fortnight, and an investor told to judge the year on "
+        "Q3 alone has been pointed at an incomplete picture. The same applies to any "
+        "retailer, or to any company whose quarters are visibly uneven in "
+        "QUARTERLY_DATA.\n\n"
         + REFERENCE_DATA_BLOCKS
         + "<BEAR_CASE>\n{bear_data}\n</BEAR_CASE>\n\n"
         "<BULL_CASE>\n{bull_data}\n</BULL_CASE>\n"
@@ -510,6 +523,22 @@ sale_advisor_agent = LlmAgent(
         "current figures already satisfy, or that sits so far from them it could never "
         "realistically fire, is worse than useless: check each one against the actual "
         "value before you write it.\n\n"
+        "## Seasonality — check it before writing any quarter-based trigger\n"
+        "QUARTERLY_DATA gives you eight quarters with their period-end dates. Read the "
+        "shape of the year before you write a threshold that counts quarters.\n"
+        "- Many businesses are structurally uneven. A tax preparer earns almost "
+        "everything in the quarter ending 31 March and LOSES money in the two quarters "
+        "before it, every single year. A trigger reading 'two consecutive quarters of "
+        "negative net income' would fire annually on such a company, in its best years "
+        "as well as its worst, and would tell the investor to sell a healthy business.\n"
+        "- So compare like with like: a quarter against the SAME quarter one year "
+        "earlier, never against the quarter immediately before it, unless you have "
+        "checked that the company's quarters are genuinely comparable.\n"
+        "- **Test every trigger against the eight quarters you were given.** If it "
+        "would have fired at some point in that window while the business was "
+        "performing normally, it is broken — rewrite it. Say explicitly which quarter "
+        "you are measuring and what its period end is, so the investor knows when to "
+        "look.\n\n"
         + "<VERIFIED_FIGURES>\n{verified_figures}\n</VERIFIED_FIGURES>\n\n"
         "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
         "<FINAL_REPORT>\n{final_report}\n</FINAL_REPORT>\n"

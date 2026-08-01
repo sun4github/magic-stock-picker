@@ -294,10 +294,54 @@ def _prune_rows(rows, keep):
 
 
 @mcp.tool()
+def fmp_company_profile(ticker: str) -> str:
+    """
+    Look up what a company ACTUALLY DOES: its sector, industry, and a description of
+    its business, from Financial Modeling Prep.
+
+    Use this to VERIFY a candidate competitor before naming it as one. A company is
+    only a competitor if it sells something that competes for the same customer spend
+    as the subject's largest revenue segment — being the same size, or sitting in the
+    same broad sector, is not enough.
+
+    Exists because a bear case once named Frontdoor (FTDR) as a peer of H&R Block on
+    the strength of a provider peer list. One call to this tool returns "provider of
+    extensive home service plans… repair or replacement of key components", against a
+    tax preparer — which settles it in a sentence.
+
+    Returns JSON with symbol, companyName, sector, industry, description, country,
+    marketCap and isActivelyTrading, or {"error": ...}.
+    """
+    api_key = os.getenv("FMP_API_KEY")
+    if not api_key:
+        return json.dumps({"error": "FMP_API_KEY not configured"})
+    try:
+        time.sleep(0.20)  # 300 calls/min Starter rate limit
+        data = fmp_get(
+            "https://financialmodelingprep.com/stable/profile",
+            params={"symbol": ticker, "apikey": api_key},
+            context=f"{ticker} profile",
+        )
+        row = data[0] if isinstance(data, list) and data else data
+        if not isinstance(row, dict) or not row.get("symbol"):
+            return json.dumps({"error": f"No profile found for {ticker}"})
+        keep = ("symbol", "companyName", "sector", "industry", "country",
+                "marketCap", "isActivelyTrading", "description")
+        return json.dumps({k: row.get(k) for k in keep}, separators=(",", ":"))
+    except FMPError as e:
+        return json.dumps({"error": f"Could not fetch profile for {ticker}: {e}"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
 def fmp_metrics_extractor(ticker: str) -> str:
     """
     Fetches 3-year metric trends, 5-year P/E history/average, analyst consensus
-    targets, and competitor data from Financial Modeling Prep.
+    targets, and an UNVERIFIED peer cohort from Financial Modeling Prep.
+
+    The peer cohort is deliberately not called "competitors" — see the comment at
+    the `stock-peers` call below for why that label was actively misleading.
 
     Uses the current /stable API (the legacy /api/v3 and /api/v4 endpoints were
     retired 2025-08-31). All endpoints below are available on the Starter plan.
@@ -329,7 +373,15 @@ def fmp_metrics_extractor(ticker: str) -> str:
         ratings_snapshot = _get("ratings-snapshot", symbol=ticker)     # replaces legacy /v3/rating
         price_target = _get("price-target-consensus", symbol=ticker)   # analyst consensus targets
         grades = _get("grades-consensus", symbol=ticker)               # analyst buy/hold/sell consensus
-        peers = _get("stock-peers", symbol=ticker)                     # replaces legacy /v4/stock_peers
+        # NOT a competitor list, despite the endpoint name. FMP returns a size-and-
+        # sector bucket: for HRB (tax preparation) it returns Allison Transmission
+        # (truck gearboxes), Boyd Gaming (casinos), Churchill Downs (horse racing) and
+        # Frontdoor (home warranties), while OMITTING Intuit — the one company that is
+        # actually its main competitor. Labelling this "competitors" caused a bear case
+        # to reach for Frontdoor as a comparable, which it did while visibly doubting
+        # the premise. The field is kept because a size/sector cohort has some value,
+        # but it now travels with a name and a note that say what it really is.
+        peers = _get("stock-peers", symbol=ticker)
 
         # Compute the 5-year average P/E from the ratios history.
         pe_values = [
@@ -351,7 +403,21 @@ def fmp_metrics_extractor(ticker: str) -> str:
             "ratings_snapshot": ratings_snapshot,
             "price_target_consensus": price_target,
             "grades_consensus": grades,
-            "competitors": peers,
+            # Renamed from "competitors" — see the comment at the fetch site. The
+            # caveat rides INSIDE the payload rather than only in a prompt, so it
+            # reaches every agent that reads this blob regardless of instructions.
+            "peer_group_note": (
+                "UNVERIFIED. This list comes from the data provider's peer endpoint, "
+                "which groups by market size and broad sector, NOT by business model. "
+                "It regularly contains companies in unrelated industries and regularly "
+                "OMITS the subject's real competitors, including its largest one. Do "
+                "not describe any of these as a competitor, and do not compare margins "
+                "or multiples against them, unless you have separately established "
+                "that it competes in the same business. Real competitors are often "
+                "private and will not appear here at all — say so rather than "
+                "substituting whatever this list contains."
+            ),
+            "fmp_peer_group_unverified": peers,
         }
         # Compact separators, not indent=2: the pretty-printing was pure whitespace
         # billed as input tokens on every agent turn.
