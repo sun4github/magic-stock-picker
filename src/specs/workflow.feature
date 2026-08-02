@@ -121,3 +121,64 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     And the application successfully loads secrets from the local ".env" file using python-dotenv
     And the application parses operational parameters from "specs/config.yaml"
     And a custom run-specific logger is initialized in "logs/run_{timestamp}.log" and outputting to the console
+  # --- Phase D: independent critic review (Producer-Critic / reflection loop) ---
+  # Deliberately NOT part of a pipeline run: it costs several times what producing
+  # the report cost, so it is a separate command aimed at names about to be acted on.
+
+  Scenario: Review a finished report with an independent critic
+    Given a previous run produced and stored a final report for a ticker
+    When the investor runs the critic refinement loop for that single ticker
+    Then it loads that report via "db_get_final_report" (a specific run when pinned with --run, else the most recent)
+    And it strips the deterministic sections the pipeline added, so the critic reviews the analyst's own prose
+    And it recomputes the Magic Formula figures so the critic has verified figures to check claims against
+    And it loads the BEAR_CASE and BULL_CASE of the reviewed run, so the report's summaries can be checked against the originals
+    And the critic agent uses its own instructions in critic-instructions.md, which never include the analyst's prompt
+    And the critic uses the FMP news, company profile, metrics, quarterly and Web search tools to verify claims independently
+    And it grades each finding as BLOCKING, MATERIAL or MINOR
+    And the refinement is recorded as its own pipeline run, leaving the reviewed report untouched
+
+  Scenario: Revise the report and re-review until the critic agrees
+    Given the critic recorded at least one BLOCKING or MATERIAL finding
+    When the loop has budget for a revision and the review that must follow it
+    Then the analyst rewrites the report in full under exactly the same rules that produced it
+    And it either fixes each finding or rebuts it with a stated reason
+    And its point-by-point reply is separated from the report and shown to the critic on the next round, never to the investor
+    And the critic reviews the rewritten report again
+    And the loop ends on a review, so the report finally shipped has always been checked as it stands
+
+  Scenario: Agreement is decided from the findings, not from the critic's own summary
+    Given the critic has written its review
+    When the loop reads the verdict
+    Then a declared AGREE while a BLOCKING or MATERIAL finding stands is treated as REVISE, and the override is logged
+    And a review with no parsable verdict line falls back to the recorded severities rather than being read as agreement
+    And MINOR findings never prevent agreement, because another paid round costs more than the point is worth
+
+  Scenario: Report a review that never reached agreement
+    Given the loop stopped on the round limit or the spend ceiling with objections standing
+    When the refined report is written
+    Then it states plainly that the independent critic has NOT agreed the report
+    And it gives the number of blocking and material objections still standing and why the review stopped
+    And it reproduces the critic's full final review underneath, so the reader can weigh the objections themselves
+
+  Scenario: Report the minor points that agreement did not fix
+    Given the critic agreed while MINOR findings remained
+    When the refined report is written
+    Then it states that the critic agreed, and names each remaining minor point with the fix that was never applied
+    And it says the report was not revised for them, so they read as caveats rather than corrections already made
+    And it states that agreement means no fault was found in the argument, not that the verdict is correct
+
+  Scenario: Remember critic findings across rounds and across sessions
+    Given the critic has recorded findings for a ticker in this or an earlier session
+    When any later round of any later session runs for that ticker
+    Then those findings are replayed to both the critic and the analyst with how each was settled
+    So that the analyst does not reintroduce a correction it already made
+    And the critic does not spend a paid round re-raising a point already resolved
+    And findings outlive the runs they came from, because memory that cascades away would be paid for twice
+
+  Scenario: Keep the refinement inside a spend ceiling
+    Given the investor named a maximum budget for the review
+    When the loop decides whether to run another round
+    Then it checks the running cost plus an estimate of the next round against that ceiling
+    And it checks the same total against the rolling daily ceiling, so an ad-hoc command cannot route around it
+    And it reserves enough for a revision plus the review that must follow it before starting either
+    And it never abandons a round already under way, since a part-paid round produces nothing

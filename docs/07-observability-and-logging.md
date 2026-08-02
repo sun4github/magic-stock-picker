@@ -103,6 +103,18 @@ itself (the `run_id` UUID *is* embedded in these strings, though, so a
 | Embedding failures | `mcp_server.py:774-780` | ERROR (first 3 per process, then suppressed) | A zero vector silently stored in the row (unsearchable, but present) |
 | Missing verified-figures columns for a ticker | `main.py:1170` | WARNING | — (reconciliation gate is silently weaker for that ticker) |
 | Screener gate counts / warnings (Phase A) | **`print()`**, not `logging` | n/a | Console/stdout only — see below |
+| Critic round verdict + every finding's severity/title (Phase D) | `refine.py:486-492` | INFO | `agent_outputs` (`CRITIC_REVIEW`) and `critic_memory` rows |
+| Critic verdict overridden by the severity cross-check | `refine.py:484` | WARNING | — (the override reason is only in the log; the shipped report shows the resulting standing, not that it was overridden) |
+| Refinement stopping on the round or spend ceiling | `refine.py:527, 533-538` | WARNING | The report's own un-agreed banner + `pipeline_runs.status` |
+| Reviser omitted the `<<<RESPONSE TO CRITIC>>>` trailer | `refine.py:567-571` | WARNING | — (costs one round of re-raised findings; not persisted) |
+| Refinement outcome (agreed / not, verdict before → after) | `refine.py:646-653` | INFO | `pipeline_runs.status` + `final_reports` |
+
+Phase D reuses `main.py`'s logger object (`refine.py:81`, `logger = main.logger`), so
+its lines land in the **same** `logs/run_<timestamp>.log` file and carry the same
+format — a refinement is just another run in the log directory. It follows the same
+`[TICKER]` correlation convention, extended with the role and round
+(`[FISV critic r2]`, `[FISV reviser r1]`), which is what makes a per-round cost
+regression visible rather than buried in a moving loop total.
 
 ### Phase A (the screener) doesn't use `logging` at all
 

@@ -8,6 +8,12 @@ a neutral Analyst Agent weighs them
 and issues a verdict, followed by a Sale Advisor that (assuming you own the stock)
 names the specific business events that would break the thesis.
 
+An optional fourth phase applies the **Producer–Critic pattern** (also called
+**reflection**): an independent Critic Agent — its own instructions, its own
+research tools, and no sight of how the report was written — audits the finished
+report for fallacies in the Analyst's *judgement* and hands findings back for
+revision, looping until both agree or a spend ceiling is reached.
+
 ## What it does
 
 ```mermaid
@@ -15,8 +21,19 @@ flowchart LR
     A["Phase A — Screener<br/>Scans the FMP universe, applies<br/>Greenblatt's eligibility gates, and<br/>ranks survivors on ROC, Earnings Yield<br/>and Lynch's PEG ratio"]
     B["Phase B — Decomposer Analysis<br/>Bear and Bull agents argue the case;<br/>a neutral Analyst Agent weighs both<br/>and issues Buy / Watch / Avoid"]
     C["Phase C — Sale Advisory<br/>Assumes the stock is already owned;<br/>names 3 measurable events that would<br/>break the original investment thesis"]
+    D["Phase D — Critic Review (opt-in)<br/>Producer–Critic / reflection loop<br/>An INDEPENDENT Critic Agent re-verifies<br/>the report with its own web + FMP tools<br/>and hunts fallacies in the Analyst's judgement"]
+    E["Analyst revises<br/>under the same rules<br/>as Phase B"]
+    F["Refined report — agreed by both,<br/>or stamped 'the critic has NOT agreed',<br/>with the open objections attached"]
     A --> B --> C
+    C -.->|"opt-in, run per ticker:<br/>python refine.py TICKER"| D
+    D -->|"blocking / material findings"| E
+    E -->|"re-review"| D
+    D ==>|"agreed, or budget spent"| F
 ```
+
+Phases A–C are one pipeline run. **Phase D is deliberately not part of it** — it is
+a separate command you point at a report you're about to act on, because it costs
+several times what producing that report cost.
 
 **Phase A — Screener.** Scans the FMP stock universe, applies Greenblatt's
 step-by-step eligibility gates — no financials, utilities, funds/REITs or foreign
@@ -61,12 +78,36 @@ bull/bear thesis plus fresh FMP news + Tavily research — names the **three spe
 measurable business events** (not price movements) that would signal the original
 investment case is broken and justify selling.
 
+**Phase D — Critic Review (opt-in): the Producer–Critic / reflection pattern.**
+Phases B and C are adversarial — bear versus bull — but all four roles read the
+*same* pre-fetched evidence and descend from the same prompt lineage, so nothing
+stands outside them. The reconciliation gate catches wrong **figures**; nothing
+catches wrong **reasoning** — a verdict that doesn't follow from the report's own
+body, a "Buy" resting entirely on a rumoured deal, a "priced in" claim with nothing
+behind it.
+
+So `python refine.py TICKER` (see [below](#independent-critic-review-refinepy))
+adds a **Critic Agent** as the independent half of a producer–critic pair. It has
+its own instruction file, its own FMP + Tavily tools to verify claims against the
+world, and **no sight of the analyst's prompt** — a critic told how the report was
+*supposed* to be written grades against that spec instead of against reality. It
+grades each finding **BLOCKING / MATERIAL / MINOR**; anything blocking or material
+sends the report back to the analyst — same rules, same five sections — which
+either fixes it or rebuts it with a reason. That reflection loop repeats until the
+critic agrees or the budget runs out, and **the refined report says on its face
+which of the two happened.** Findings persist in a `critic_memory` table across
+rounds *and across sessions*, so the loop never spends a paid round relitigating a
+point already settled.
+
 **Persistence.** Every run writes to PostgreSQL (with `pgvector` embeddings for
 semantic search): the pipeline run's token/search usage and estimated cost, each
 agent's raw output (SEC/metrics stored without embeddings; bear/bull/sale case and
 the final report embedded for search), and the final verdict. Reports are also
 saved locally to `src/reports/<TICKER>_Final_Report_<Buy|Watch|Avoid>.md` and
-`src/reports/<TICKER>_Sale_Advisory.md`.
+`src/reports/<TICKER>_Sale_Advisory.md`. A Phase D review is stored as its **own**
+run — the report it reviewed is never overwritten — writing
+`src/reports/<TICKER>_Refined_Report_<Verdict>.md` and
+`src/reports/<TICKER>_Critic_Review.md`.
 
 See [`src/specs/agent_architecture.md`](src/specs/agent_architecture.md) and
 [`src/specs/workflow.feature`](src/specs/workflow.feature) for the full design spec
