@@ -12,9 +12,13 @@ model prose. The two failures that matter:
     "the critic agreed" on a report carrying a blocking objection;
   - a spend projection that lets the loop start a round it cannot finish.
 """
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'webapp'))
+
 import main
 import refine
 import critic_agent as ca
+import app as wapp   # the viewer, for its borrowed-content labels
 
 
 # --- Fixtures ------------------------------------------------------------------
@@ -209,11 +213,27 @@ def _budget_cases():
     # round, or the next projection lets the loop start something it cannot finish.
     est.observe("critique", 0.0)
     zero_ignored = abs(est.critique - 0.40 * h) < 1e-9
+    adv = refine.SEED_ADVISORY_USD if refine.REGENERATE_SALE_ADVISORY else 0.0
+    fresh = refine._Estimator()          # unmeasured, as at session start
+    tight = refine.SEED_CRITIQUE_USD + 0.01   # room for one critique, nothing more
     return [
-        ("a full round reserves revision + critique",
-         abs(seeded - (refine.SEED_CRITIQUE_USD + refine.SEED_REVISION_USD)) < 1e-9),
+        # A revision commits the session to three things, not two: the revision, the
+        # critique that must follow it, AND the sale advisory it invalidates. Missing
+        # the third is how a session ends up revised, reviewed, and shipping a stale
+        # advisory it could not afford to re-derive.
+        ("a full round reserves revision + critique + advisory",
+         abs(seeded - (refine.SEED_CRITIQUE_USD + refine.SEED_REVISION_USD + adv)) < 1e-9),
+        ("the advisory reservation is real, not zero",
+         adv > 0 if refine.REGENERATE_SALE_ADVISORY else adv == 0),
         ("measurements replace the seeds",
-         abs(measured - (0.40 * h + 0.20 * h)) < 1e-9),
+         abs(measured - (0.40 * h + 0.20 * h + adv)) < 1e-9),
+        # The reservation must bind exactly where intended: a session that only ever
+        # critiques is not charged for an advisory it will never need, but the moment
+        # a revision is on the table the advisory is part of the commitment.
+        ("a first critique is not charged the reservation",
+         refine._affordable(0.0, fresh.critique, tight, 0.0) == ""),
+        ("committing to a revision at that same ceiling is refused",
+         bool(refine._affordable(0.0, fresh.full_round, tight, 0.0))),
         ("a zero measurement is ignored (a failed turn is not a cheap one)", zero_ignored),
         ("spending inside the ceiling is allowed",
          refine._affordable(0.50, 0.40, 2.00, 0.0) == ""),
@@ -295,6 +315,47 @@ def _minor_carryover_cases():
     ]
 
 
+def _advisory_cases():
+    """The sale advisory is an OUTPUT of the report, not an input to it.
+
+    The critic never sees it, so a review that changes the report leaves the advisory
+    describing a thesis that no longer exists — and its sell triggers are required to
+    be anchored to VERIFIED_FIGURES, so a corrected figure can leave a threshold
+    calibrated against a number the pipeline now says was wrong. Before this, a
+    refinement wrote no SALE_CASE at all, which also broke `--sell-check --run
+    <refine_id>` — the very id the refined report tells the reader to save.
+    """
+    notes = refine._ADVISORY_NOTE
+    carried = notes["carried"].format(src="abc-123")
+    regen = notes["regenerated"].format(src="abc-123")
+    stale = notes["carried_stale"].format(src="abc-123")
+    # Notes must not stack when a refined report is refined again.
+    body = "## Sale Advisory\n\nTrigger 1.\n"
+    twice = refine._RUN_BANNER_RE.sub("", carried + body, count=1).lstrip()
+    marker = notes["carried"].split("**")[1]
+    stripped = twice.split("\n\n", 1)[-1] if twice.startswith("> **" + marker) else twice
+    return [
+        ("a carried advisory says it was carried unchanged",
+         "unchanged" in carried and "no revision" in carried),
+        ("a regenerated advisory says it was re-derived",
+         "Re-derived" in regen and "not critiqued" in regen),
+        # The dangerous case: report changed, no budget to re-derive it. Shipping it
+        # silently would be worse than not shipping it at all.
+        ("an unaffordable re-derivation warns that it may be out of date",
+         "may be out of date" in stale and "Check its thresholds" in stale),
+        ("every note names the run it came from", all("abc-123" in n for n in (carried, stale))),
+        ("stacking is prevented when refining a refined report",
+         stripped == body),
+        # The webapp's borrowed label must distinguish an input the critic read from
+        # an output it never saw.
+        ("webapp labels a borrowed bear case as an input",
+         "examined the report built from it" in wapp._borrowed_note("r1", "BEAR_CASE")),
+        ("webapp labels a borrowed advisory as pre-review and unreviewed",
+         "not re-derived" in wapp._borrowed_note("r1", "SALE_CASE")
+         and "never reviewed the advisory" in wapp._borrowed_note("r1", "SALE_CASE")),
+    ]
+
+
 def _inlining_cases():
     """An inlined review must not outrank the container it is inlined under."""
     review = "## Findings\n### Finding 1 — x\n- **Severity:** MINOR\n#### deep\n"
@@ -343,6 +404,7 @@ def run():
         ("stripping generated sections", _strip_cases()),
         ("spend projection", _budget_cases()),
         ("reader-facing banners", _banner_cases()),
+        ("sale advisory after review", _advisory_cases()),
         ("minor findings carried to the reader", _minor_carryover_cases()),
         ("inlining the critic's review", _inlining_cases()),
         ("long-term memory rendering", _memory_cases()),

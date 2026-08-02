@@ -256,12 +256,30 @@ def _refinement_of(cur, run_id: str):
     return row[0], ("agreed" if (row[1] or "").upper() == "COMPLETED" else "not_agreed")
 
 
-def _borrowed_note(source_run_id: str) -> str:
+def _borrowed_note(source_run_id: str, agent_type: str) -> str:
     """Header stamped onto a case borrowed from the run under review.
 
-    The refinement never re-ran the bear/bull research — it reviewed a report built
-    from it — so presenting these tabs unlabelled would imply work this run did not
-    do, and would date the research to the refinement rather than to the analysis."""
+    Two different notes, because the two kinds of borrowed content stand in very
+    different relations to the review:
+
+    - Bear/Bull are **inputs** the critic actually read, to check the report's
+      summaries against the originals. Borrowing them is presentational.
+    - The sale advisory is an **output** derived from the pre-review report, which
+      the critic never saw. If a revision changed the report, the advisory can be
+      describing a thesis that no longer exists — and since its sell triggers must be
+      anchored to VERIFIED_FIGURES, a corrected figure can leave a threshold
+      calibrated against a number now known to be wrong. Since 2026-08 `refine.py`
+      gives each refinement its own SALE_CASE, so this note only appears on runs made
+      before that, or when regeneration was disabled or unaffordable.
+    """
+    if agent_type == "SALE_CASE":
+        return (
+            f"> **From the reviewed run** `{source_run_id}`, and **not re-derived "
+            f"after the review.** This advisory was written against the report as it "
+            f"stood *before* the critic examined it; the critic never reviewed the "
+            f"advisory itself. Check its thresholds against the refined report before "
+            f"acting on them.\n\n"
+        )
     return (
         f"> **From the reviewed run** `{source_run_id}`. The critic review did not "
         f"re-run this research; it examined the report built from it.\n\n"
@@ -315,7 +333,7 @@ def _fetch_reports(run_id: str, ticker: str):
         )
         for t, content in cur.fetchall():
             if not parts.get(t) and content:
-                parts[t] = _borrowed_note(source_run_id) + content
+                parts[t] = _borrowed_note(source_run_id, t) + content
 
     cur.execute(
         "SELECT markdown_report, verdict FROM final_reports WHERE run_id = %s AND ticker = %s",
