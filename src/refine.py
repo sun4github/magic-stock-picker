@@ -1,6 +1,6 @@
 """Critic/analyst refinement loop — the expensive, opt-in second opinion.
 
-    python refine.py TICKER [Company] [--run SOURCE_RUN_ID] [--max-budget 2.00]
+    python refine.py TICKER [Company] [--run SOURCE_RUN_ID] [--max-budget 2.25]
 
 Takes a final report the pipeline has ALREADY produced and puts it through rounds
 of independent review until the critic agrees with it or the money runs out. The
@@ -22,12 +22,13 @@ time, with a spend ceiling named on the command line.
 `LoopAgent` runs its sub-agents in order until `max_iterations` or an escalation
 event. It would work, and it would cost more to work with:
 
-- **The stopping condition is a spend decision, not an agent decision.** This loop
-  stops when it can no longer afford CRITIC + REVISION + ANOTHER CRITIQUE, which
-  needs the running dollar total and an estimate of the next round — figures that
-  live in `main`'s cost accounting, outside any agent's context. Getting a
-  LoopAgent to stop on that means an escalation callback that reaches into the same
-  accounting anyway.
+- **The stopping condition is a spend decision, not an agent decision.** Committing
+  to a revision commits to three things at once — the revision, the critique that
+  must follow it, and the sale advisory that revision invalidates — so the loop
+  stops when it can no longer afford all three together. Deciding that needs the
+  running dollar total and a per-role estimate, figures that live in `main`'s cost
+  accounting, outside any agent's context. Getting a LoopAgent to stop on it means
+  an escalation callback reaching into the same accounting anyway.
 - **Cost has to be attributed per role per round**, exactly as `_run_pipeline_async`
   attributes it per role per ticker, or a prompt change that doubles the critic's
   cost is invisible inside a moving loop total.
@@ -81,7 +82,7 @@ from mcp_server import (
 logger = main.logger
 
 _cfg = main.config.get("refinement", {}) or {}
-MAX_BUDGET_USD = float(_cfg.get("max_budget_usd", 2.00))
+MAX_BUDGET_USD = float(_cfg.get("max_budget_usd", 2.25))
 MAX_ROUNDS = int(_cfg.get("max_rounds", 3))
 # Seed estimates for the first ceiling check, before either role has been measured
 # once. Only ever used to decide whether to START a round, so erring high means
@@ -93,6 +94,8 @@ SEED_REVISION_USD = float(_cfg.get("seed_revision_usd", 0.20))
 ESTIMATE_HEADROOM = float(_cfg.get("estimate_headroom", 1.25))
 MEMORY_LIMIT = int(_cfg.get("memory_limit", 25))
 MEMORY_MAX_AGE_DAYS = int(_cfg.get("memory_max_age_days", 365))
+REGENERATE_SALE_ADVISORY = bool(_cfg.get("regenerate_sale_advisory", True))
+SEED_ADVISORY_USD = float(_cfg.get("seed_advisory_usd", 0.12))
 
 # Sections this tool appends to a report itself. Stripped before a report re-enters
 # the loop so refining a refined report does not nest one critic section inside
@@ -193,6 +196,10 @@ class _Estimator:
     def __init__(self):
         self.critique = SEED_CRITIQUE_USD
         self.revision = SEED_REVISION_USD
+        # Never measured within a session — there is at most one advisory per
+        # refinement, so there is nothing to learn from. The seed carries the
+        # headroom instead (0.12 against a measured 0.072-0.095).
+        self.advisory = SEED_ADVISORY_USD if REGENERATE_SALE_ADVISORY else 0.0
 
     def observe(self, role: str, usd: float) -> None:
         if usd <= 0:
@@ -201,15 +208,27 @@ class _Estimator:
 
     @property
     def full_round(self) -> float:
-        """A revision plus the critique that must follow it.
+        """Everything a revision commits the session to: the revision, the critique
+        that must follow it, and the sale advisory it will invalidate.
 
-        Both, always. Shipping a revision nobody reviewed would attach the PREVIOUS
-        round's critique to text that no longer says what the critique objects to —
-        a reader would be shown objections that may already have been fixed, or
-        worse, told nothing about text that was never checked. So a revision is only
-        started when the round after it is affordable too.
+        **The critique, always.** Shipping a revision nobody reviewed would attach the
+        PREVIOUS round's critique to text that no longer says what the critique
+        objects to — a reader would be shown objections that may already have been
+        fixed, or worse, told nothing about text that was never checked.
+
+        **The advisory, always too.** The moment a revision happens the existing sale
+        advisory is describing a thesis that no longer exists, so re-deriving it stops
+        being optional. Reserving it here rather than discovering the shortfall
+        afterwards is what keeps the ceiling honest: the alternative — a second budget
+        the advisory draws on — would mean the ceiling you name being quietly exceeded
+        by the advisory's cost, and a ceiling that can be exceeded by design is not a
+        ceiling. Reserving costs
+        nothing in practice (~$0.12 against rounds of ~$0.20 on a $2.25 default) and
+        only ever binds in the session that is about to need it: no revision has been
+        committed to before this check, so a run that agrees first time never pays
+        the reservation.
         """
-        return self.revision + self.critique
+        return self.revision + self.critique + self.advisory
 
 
 def _affordable(spent: float, need: float, ceiling: float, prior_day: float) -> str:
@@ -295,6 +314,140 @@ def _not_agreed_banner(rounds: int, cost: float, findings: list, stop_reason: st
 
 
 _HEADING_RE = re.compile(r"^(#{1,4})(?=\s)", re.MULTILINE)
+
+
+# --- The sale advisory ----------------------------------------------------------
+# The advisory is an OUTPUT of the report, not an input to it: the sale advisor reads
+# the finished report and names the events that would break its thesis. The critic
+# never sees it. So a review that CHANGES the report silently leaves the advisory
+# describing a thesis that no longer exists — and because every sell trigger must be
+# anchored to VERIFIED_FIGURES with the current value quoted beside it, a figure the
+# critic corrected can leave a threshold calibrated against a number the pipeline
+# itself now says was wrong.
+_ADVISORY_NOTE = {
+    "carried": (
+        "> **Carried over from run `{src}`, unchanged.** The independent critic "
+        "review made no revision to the report this advisory was derived from, so it "
+        "applies to the refined report exactly as it did to the original.\n\n"
+    ),
+    "regenerated": (
+        "> **Re-derived after independent critic review.** The review changed the "
+        "report this advisory rests on, so it was regenerated against the revised "
+        "text rather than carried over. The advisory itself was not critiqued.\n\n"
+    ),
+    "carried_stale": (
+        "> **Carried over from run `{src}` — and it may be out of date.** The critic "
+        "review revised the report this advisory was derived from, but there was not "
+        "enough budget left to re-derive it. Check its thresholds against the refined "
+        "report above before acting on them.\n\n"
+    ),
+}
+
+
+def _refresh_sale_advisory(ticker: str, company_name: str, src_run: str,
+                           refine_run_id: str, report_body: str, verified_figures: str,
+                           quarterly_data: str, revised: bool, usage: dict,
+                           spent: float, ceiling: float, prior_day: float) -> tuple:
+    """Give the refinement run its own SALE_CASE. Returns (text, origin).
+
+    Two outcomes, because the cost is only worth paying in one of them:
+
+    - **No revision ran** (the critic agreed first time): the analyst's prose is
+      byte-identical to what the advisory was built from, so it is exactly as valid
+      as before. Carried forward unchanged, for $0.
+    - **A revision ran**: re-derived against the revised report.
+
+    Carrying it forward is not just tidiness. `_with_run_header` stamps the
+    refinement's run_id on the refined report and tells the reader that is the id to
+    save against their lot — and `--sell-check TICKER --run <that id>` used to fail
+    outright, because no SALE_CASE existed under the refinement run.
+    """
+    if not REGENERATE_SALE_ADVISORY:
+        logger.info(f"[{ticker}] Sale advisory left untouched "
+                    f"(refinement.regenerate_sale_advisory is false).")
+        return "", "none"
+
+    try:
+        prior = json.loads(db_get_agent_output(ticker, "SALE_CASE", src_run))
+    except Exception as e:
+        logger.warning(f"[{ticker}] Could not load the reviewed run's SALE_CASE: {e}")
+        prior = {"found": False}
+    prior_text = prior.get("raw_content") or "" if prior.get("found") else ""
+
+    origin = None
+    text = ""
+    if not revised:
+        if not prior_text:
+            logger.info(f"[{ticker}] The reviewed run stored no SALE_CASE, and the "
+                        f"report was not revised, so there is nothing to carry forward.")
+            return "", "none"
+        origin, text = "carried", prior_text
+    else:
+        blocked = _affordable(spent, SEED_ADVISORY_USD, ceiling, prior_day)
+        if blocked:
+            # Defensive, and expected never to fire: `_Estimator.full_round` reserves
+            # this cost before committing to the revision that made the advisory
+            # stale, so by construction the money is already set aside. Reaching here
+            # means the advisory cost materially more than its seed, or the rolling
+            # daily ceiling moved underneath the session — both real, neither
+            # something to paper over. Shipping the old advisory silently would be
+            # the worst outcome available: it is anchored to figures the revision may
+            # have corrected. Carry it with a visible staleness warning instead.
+            logger.warning(
+                f"[{ticker}] The report was revised but the sale advisory cannot be "
+                f"re-derived: {blocked}. Carrying the previous one forward with a "
+                f"staleness warning. (The reservation in _Estimator.full_round should "
+                f"normally prevent this — worth investigating if it recurs.)"
+            )
+            if not prior_text:
+                return "", "none"
+            origin, text = "carried_stale", prior_text
+        else:
+            logger.info(f"[{ticker}] Report was revised — re-deriving the sale "
+                        f"advisory against the refined text...")
+            try:
+                text, adv_usage = run_agent(
+                    main.sale_advisor_agent,
+                    {
+                        "ticker": ticker,
+                        "company_name": company_name,
+                        "verified_figures": verified_figures,
+                        "quarterly_data": quarterly_data,
+                        # The analyst's prose, matching what the pipeline's own sale
+                        # advisor receives in session state (not the assembled report
+                        # with its deterministic sections prepended).
+                        "final_report": report_body,
+                    },
+                    f"Write the sale advisory for {company_name} ({ticker}).",
+                )
+            except Exception as e:
+                logger.error(f"[{ticker}] Sale advisory regeneration failed: {e}. "
+                             f"Carrying the previous one forward with a warning.")
+                if not prior_text:
+                    return "", "none"
+                origin, text = "carried_stale", prior_text
+            else:
+                cost = main._log_usage(f"{ticker} sale advisor (post-review)", adv_usage)
+                main._merge_usage(usage, adv_usage)
+                logger.info(f"[{ticker}] Sale advisory re-derived (${cost:.4f}).")
+                if not text.strip():
+                    logger.warning(f"[{ticker}] Sale advisor produced no output; "
+                                   f"carrying the previous advisory forward.")
+                    if not prior_text:
+                        return "", "none"
+                    origin, text = "carried_stale", prior_text
+                else:
+                    origin = "regenerated"
+
+    # Strip any banner/note the carried text already carries, so notes don't stack up
+    # across successive refinements of the same ticker.
+    body = _RUN_BANNER_RE.sub("", text, count=1).lstrip()
+    for note in _ADVISORY_NOTE.values():
+        marker = note.split("**")[1]
+        if body.startswith("> **" + marker):
+            body = body.split("\n\n", 1)[-1]
+    stamped = _ADVISORY_NOTE[origin].format(src=src_run) + body
+    return main._with_run_header(stamped, refine_run_id, ticker), origin
 
 
 def _demote_headings(markdown: str, levels: int = 2) -> str:
@@ -440,6 +593,7 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     final_review = ""
     final_findings = []
     agreed = False
+    revised = False   # did the analyst ever actually rewrite the report?
     stop_reason = f"the {rounds_allowed}-round limit was reached"
     rounds_done = 0
 
@@ -555,8 +709,8 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
         main._merge_usage(usage, revise_usage)
         est.observe("revision", revise_cost)
 
-        revised, analyst_response = split_revision(raw)
-        if not revised.strip():
+        revised_text, analyst_response = split_revision(raw)
+        if not revised_text.strip():
             logger.error(f"[{ticker}] Reviser produced no report in round {rnd}; "
                          f"keeping the previous version.")
             stop_reason = f"the analyst produced no revised report in round {rnd}"
@@ -577,7 +731,8 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
             for row in this_round:
                 row["analyst_response"] = analyst_response
             past_corrections = _corrections()
-        report_body = strip_generated_sections(revised)
+        report_body = strip_generated_sections(revised_text)
+        revised = True
         logger.info(f"[{ticker}] Round {rnd} revision complete (${revise_cost:.4f}). "
                     f"Verdict now: {main._extract_verdict(report_body)}.")
 
@@ -586,14 +741,27 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     # figure a reader sees includes the embeddings the stored critiques already
     # billed. Drained again at the end for the final report's own vector.
     main._collect_embedding_usage(usage)
-    total_cost = main._total_cost(usage)
+    # Quoted in the report's own banner, so it must be the cost of the REVIEW —
+    # captured before the sale advisory below, which is a separate piece of work and
+    # would otherwise inflate the figure a reader is told the review cost.
+    # `_finalize_run` still records the true session total.
+    review_cost = main._total_cost(usage)
     if not report_body.strip():
         logger.error(f"[{ticker}] No report survived the refinement; nothing stored.")
         main._finalize_run(refine_run_id, usage, "Refinement Run", status="FAILED")
         return
 
+    # 4a. Give this run its own sale advisory — re-derived if the report changed,
+    # carried forward if it did not. See _refresh_sale_advisory for why both cases
+    # matter and why leaving it absent broke `--sell-check --run`.
+    sale_data, sale_origin = _refresh_sale_advisory(
+        ticker, company_name, src_run, refine_run_id, report_body, verified_figures,
+        quarterly_data, revised, usage, review_cost, ceiling, prior_day_usd,
+    )
+
     recon_findings = []
-    for label, body in (("Refined report", report_body), ("Critic review", final_review)):
+    for label, body in (("Refined report", report_body), ("Critic review", final_review),
+                        ("Sale advisory", sale_data)):
         recon_findings.extend(main._reconcile_agent_figures(body, candidate, label))
     if recon_findings:
         for f in recon_findings:
@@ -606,8 +774,8 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
         logger.info(f"[{ticker}] Reconciliation gate passed on the refined report.")
 
     critic_section = (
-        _agreed_banner(rounds_done, total_cost, final_findings) if agreed
-        else _not_agreed_banner(rounds_done, total_cost, final_findings, stop_reason)
+        _agreed_banner(rounds_done, review_cost, final_findings) if agreed
+        else _not_agreed_banner(rounds_done, review_cost, final_findings, stop_reason)
     )
     verdict = main._extract_verdict(report_body)
     report_stored = main._with_run_header(
@@ -630,6 +798,18 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
                                    "RESOLVED" if agreed else "UNRESOLVED"),
         f"{ticker} settle critic findings",
     )
+    if sale_data:
+        main._check_db(
+            db_store_agent_output(
+                refine_run_id, ticker, "SALE_CASE", sale_data,
+                json.dumps({"ticker": ticker, "origin": sale_origin,
+                            "source_run_id": src_run, "report_revised": revised}),
+            ),
+            f"{ticker} sale advisory ({sale_origin})",
+        )
+        sale_path = os.path.join("reports", f"{ticker}_Sale_Advisory.md")
+        with open(sale_path, "w", encoding="utf-8") as f:
+            f.write(sale_data)
 
     report_path = os.path.join("reports", f"{ticker}_Refined_Report_{verdict.title()}.md")
     with open(report_path, "w", encoding="utf-8") as f:

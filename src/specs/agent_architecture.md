@@ -1866,6 +1866,39 @@ holds only its own `CRITIC_REVIEW` rows — to borrow the Bear/Bull/Sale tabs fr
 reviewed run at read time instead of copying ~26KB of text and two vectors per
 refinement to say nothing new.
 
+### G2. The sale advisory after a review
+
+The advisory (§1 Phase C) is an **output** of the final report, not an input to it,
+and the critic never sees it. So a review that changes the report leaves the advisory
+describing a thesis that no longer exists — and because §2.E requires every sell
+trigger to be anchored to `VERIFIED_FIGURES` with the current value quoted beside it,
+a figure the critic corrected can leave a threshold calibrated against a number the
+pipeline itself now says was wrong.
+
+Handled by outcome, so the cost is only paid when it buys something: **no revision**
+→ the analyst's prose is byte-identical, so the existing advisory is carried forward
+unchanged for $0; **a revision ran** → re-derived against the revised report
+(~$0.07–0.10).
+
+There is no third outcome by design. The revision is what makes the advisory stale,
+so the two are **one commitment** and are priced as one: `_Estimator.full_round`
+reserves the advisory before the loop agrees to a revision. The alternative — a
+separate budget the advisory draws on — would mean `--max-budget 2.00` billing $2.12,
+and a ceiling that can be exceeded by design is not a ceiling. Reserving costs
+nothing in practice (~$0.12 against rounds of ~$0.20) and only binds in the session
+about to need it. A "revised but unaffordable" branch survives as a defensive last
+resort — carrying the old advisory with a visible staleness warning and a loud log —
+for the cases the reservation cannot foresee: an advisory that costs far more than
+its seed, or the rolling daily ceiling moving underneath a running session. The advisory is not itself critiqued — it has its own
+guardrails and reviewing it would roughly double the loop's cost for a second-order
+artefact.
+
+Carrying it forward also repairs a broken promise. `_with_run_header` stamps the
+refinement's `run_id` on the refined report and tells the reader that is the id to
+record against a lot so `--sell-check --run RUN_ID` can pin the exact thesis bought
+under (§8.D). A refinement wrote no `SALE_CASE`, so that command failed outright, and
+the unpinned form silently resolved to the pre-review conditions.
+
 ### H. Why it is not in the pipeline
 
 It costs several times what producing the report cost, and takes as long. Putting a

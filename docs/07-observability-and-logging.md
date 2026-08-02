@@ -107,6 +107,7 @@ itself (the `run_id` UUID *is* embedded in these strings, though, so a
 | Critic verdict overridden by the severity cross-check | `refine.py:484` | WARNING | — (the override reason is only in the log; the shipped report shows the resulting standing, not that it was overridden) |
 | Refinement stopping on the round or spend ceiling | `refine.py:527, 533-538` | WARNING | The report's own un-agreed banner + `pipeline_runs.status` |
 | Reviser omitted the `<<<RESPONSE TO CRITIC>>>` trailer | `refine.py:567-571` | WARNING | — (costs one round of re-raised findings; not persisted) |
+| Sale advisory carried forward / re-derived / stale after review | `refine.py:349, 365, 383, 409` (INFO) · `:374-378` (WARNING), `:401-402` (ERROR) | INFO (skipped, nothing to carry, re-deriving, re-derived) / WARNING (revised but unaffordable, or regeneration failed — carried with a staleness warning) | `agent_outputs` `SALE_CASE` row with an `origin` in its metadata |
 | Refinement outcome (agreed / not, verdict before → after) | `refine.py:646-653` | INFO | `pipeline_runs.status` + `final_reports` |
 
 Phase D reuses `main.py`'s logger object (`refine.py:81`, `logger = main.logger`), so

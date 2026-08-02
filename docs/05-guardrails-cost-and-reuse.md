@@ -184,6 +184,7 @@ knowing when you change anything here, because the loop is a second consumer:
 | `_reconcile_agent_figures` / `_format_reconciliation_section` (§3) | Re-run over the revised report *and* the critic's own review (`refine.py:595`). |
 | `_analysis_key` (§5) | **Deliberately bypassed** — a refinement stores `analysis_key = NULL` so the duplicate-run skip can never serve a refined report in place of a fresh analysis. Its provenance is a review session; reuse keys on filings. |
 | `_normalize_candidate` / `_present` (§1) | Same normalization, same reason. |
+| `sale_advisor_agent` (Phase C) | Re-run **only when a review actually revised the report** — the advisory is derived from the report, so a changed report leaves it describing a thesis that no longer exists. Unchanged report → the existing advisory is carried forward for $0. |
 
 ## Where to look next
 

@@ -143,12 +143,18 @@ reuse:
 # purpose, on the names you are about to act on. `--max-budget` overrides the ceiling
 # for one invocation.
 #
-# The ceiling is enforced BETWEEN rounds and covers a revision plus the critique that
-# must follow it — a revision nobody reviewed would ship text carrying the previous
-# round's objections, which may already have been fixed. The rolling
-# budget.per_day_usd window still applies on top of this.
+# The ceiling is enforced BETWEEN rounds. Committing to a revision commits to three
+# things, priced as one: the revision, the critique that must follow it (a revision
+# nobody reviewed would ship text carrying the previous round's objections, which may
+# already have been fixed), and the sale advisory that revision invalidates. The
+# rolling budget.per_day_usd window still applies on top of this.
 refinement:
-  max_budget_usd: 2.00      # ~4-6 agent turns at current rates
+  # Raised from 2.00 to 2.25 when the sale advisory joined the revision commitment
+  # (see seed_advisory_usd below). The reservation is ~$0.12 and is held back from
+  # the review rounds, so without this the change would have quietly bought fewer
+  # rounds for the same stated ceiling. 2.25 restores the review headroom rather than
+  # paying for the advisory out of it.
+  max_budget_usd: 2.25      # ~4-6 agent turns at current rates, plus the advisory
   max_rounds: 3             # hard stop; the budget usually binds first
   # Cost estimates used ONLY for the first ceiling check, before either role has run
   # once and can be measured. After round 1 they are discarded in favour of the
@@ -171,6 +177,36 @@ refinement:
   # it raises every round's cost — 25 findings is already a long history for one name.
   memory_limit: 25
   memory_max_age_days: 365
+
+  # The sale advisory is an OUTPUT derived from the final report, not an input to
+  # it, so a review that changes the report leaves the advisory describing a thesis
+  # that no longer exists — and its sell triggers must be anchored to
+  # VERIFIED_FIGURES, so a corrected figure can leave a threshold calibrated against
+  # a number the pipeline itself now says was wrong.
+  #
+  # Handled by outcome, so the cost is only paid when it buys something:
+  #   critic agreed with no revision -> the analyst's prose is byte-identical, so
+  #       the existing advisory is exactly as valid as before. Carried forward into
+  #       the refinement run unchanged, for $0.
+  #   a revision ran -> re-derived against the revised report (~$0.07-0.10, measured
+  #       across the 2026-08-01 runs: CRMD $0.0892, CROX $0.0824, OMC $0.0724,
+  #       RIGL $0.0945).
+  #
+  # Carrying it forward also fixes a broken promise: the refined report stamps the
+  # refinement's run_id and tells the reader to save it against their lot, but
+  # `--sell-check TICKER --run <that id>` used to fail outright because no SALE_CASE
+  # existed under it.
+  #
+  # Set false to leave the advisory untouched (the pre-2026-08 behaviour).
+  regenerate_sale_advisory: true
+  # Reserved BEFORE the loop commits to a revision, not discovered afterwards — see
+  # _Estimator.full_round. A revision is what makes the advisory stale, so the two
+  # are one commitment and are priced as one. The alternative, a separate pot the
+  # advisory draws on, would mean the ceiling you name being quietly exceeded by
+  # the advisory's ~$0.12; a ceiling that can be exceeded by design is not a ceiling. Reserving costs nothing
+  # in practice (~$0.12 against rounds of ~$0.20) and only binds in a session that is
+  # about to need it, since no revision has been committed to before the check.
+  seed_advisory_usd: 0.12
 
 tools:
   web_search:

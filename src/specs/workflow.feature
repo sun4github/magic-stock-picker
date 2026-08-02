@@ -182,3 +182,13 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     And it checks the same total against the rolling daily ceiling, so an ad-hoc command cannot route around it
     And it reserves enough for a revision plus the review that must follow it before starting either
     And it never abandons a round already under way, since a part-paid round produces nothing
+
+  Scenario: Keep the sale advisory consistent with the reviewed report
+    Given the sale advisory was written against the report as it stood before the review
+    And the critic never examines the advisory itself
+    When the refinement finishes
+    Then the refinement run gets its own sale advisory rather than none at all
+    And if the report was never revised, the existing advisory is carried forward unchanged and labelled as such
+    And if the report was revised, the advisory is re-derived against the revised report
+    And if it was revised but the budget cannot cover re-deriving it, the previous advisory is carried with a visible staleness warning rather than shipped silently
+    And the sell-condition check can then be pinned to the refinement's own run id, which is the id the refined report tells the reader to record

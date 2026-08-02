@@ -504,9 +504,12 @@ the verdict.
 Why it is a separate command: it costs several times what producing the report cost
 in the first place, and takes as long. Run it on the handful of names you are
 actually about to buy. The ceiling defaults to `refinement.max_budget_usd` in
-`config.yaml` ($2.00), is enforced *between* rounds, and always reserves enough for
-a revision **plus the review that must follow it** — so the report you are handed
-has always been checked as it stands. The rolling daily budget still applies on top.
+`config.yaml` ($2.25) and is enforced *between* rounds. Committing to a revision
+commits to three things, priced as one: the revision, **the review that must follow
+it** — so the report you are handed has always been checked as it stands — and the
+**sale advisory that revision invalidates**, since an advisory written against the
+pre-review report can carry sell triggers anchored to a figure the critic corrected.
+The rolling daily budget still applies on top.
 
 The refinement gets its **own** run id and its own cost row; the report it reviewed
 is left untouched, and the refined one is written to

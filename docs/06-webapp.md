@@ -43,12 +43,23 @@ could disagree with it:
   NOT agree", with the round count. It sits *next to* the verdict rather than
   replacing it, because an un-agreed report still has a verdict and the reader needs
   both at once. The outcome comes from `pipeline_runs.status` (`COMPLETED` = agreed).
-- **Borrowed Bear/Bull/Sale tabs.** A refinement run holds only its own
-  `CRITIC_REVIEW` rows, so those three tabs would be empty. They are read from the
-  reviewed run via `refines_run_id` and stamped "From the reviewed run `<id>`" —
-  borrowed at read time rather than copied at refine time, which would duplicate
-  ~26 KB of text and two 768-dim vectors per refinement to say nothing new, and
-  labelled because the refinement never re-ran that research.
+- **Borrowed Bear/Bull tabs.** A refinement run holds only its own `CRITIC_REVIEW`
+  rows, so those tabs would be empty. They are read from the reviewed run via
+  `refines_run_id` and stamped "From the reviewed run `<id>`" — borrowed at read time
+  rather than copied at refine time, which would duplicate ~26 KB of text and two
+  768-dim vectors per refinement to say nothing new, and labelled because the
+  refinement never re-ran that research.
+- **The Sale Advisory is a different case and gets its own label**
+  (`_borrowed_note`, `:60`). Bear/Bull are *inputs* the critic actually read, to
+  check the report's summaries against the originals — borrowing them is
+  presentational. The advisory is an *output* derived from the pre-review report,
+  which the critic never saw: if a revision changed the report, the advisory can be
+  describing a thesis that no longer exists, and its sell triggers may be anchored to
+  a figure the critic corrected. Since 2026-08 `refine.py` gives each refinement its
+  **own** `SALE_CASE` (carried forward when no revision ran, re-derived when one
+  did), so this borrowed label now only appears on refinements made before that, or
+  when regeneration was disabled or unaffordable — and when it appears it says
+  plainly that the advisory predates the review and was not re-derived.
 
 `/api/pipeline-runs` needs no change: it filters to `HAVING COUNT(*) > 1`, and a
 refinement is always single-ticker, so refinements never pollute the run browser.
