@@ -258,6 +258,14 @@ rolling daily ceiling moved underneath a running session — both real condition
 worth knowing about, neither worth papering over, which is why the branch survives
 and logs loudly rather than being replaced by an assertion.
 
+If that branch ever does fire, the repair is one command:
+`python sale_advisory.py TICKER --run <refinement_run_id>` — see
+[10-sale-advisory-regeneration.md](10-sale-advisory-regeneration.md). Note that
+re-running `refine.py` would **not** repair it: the critic would agree immediately
+(the report is already corrected), so no revision would run, and the "no revision →
+carry forward" rule would carry the stale advisory forward again, this time without
+its warning label.
+
 Why reserve rather than give the advisory its own budget: a second pot would mean
 the ceiling you name being quietly exceeded by the advisory's ~$0.12, and a
 ceiling that can be exceeded by design is not a ceiling. The reservation buys the same guarantee with one honest

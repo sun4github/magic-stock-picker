@@ -525,6 +525,37 @@ and a dedicated Critic Review tab — see below.
 > correction it made last week. See
 > [`docs/09-critic-and-refinement-loop.md`](docs/09-critic-and-refinement-loop.md).
 
+### Generate or repair a sale advisory (`sale_advisory.py`)
+
+The pipeline writes a sale advisory once, as the last step of the run that produced
+the report. A report can outlive its advisory, though — the critic revised the report
+but the budget could not cover re-deriving the advisory, `--skip-sale-advisor` was
+used, the advisor produced nothing, or the advisory is simply old and its thresholds
+are anchored to figures that have moved. This regenerates one for **any** stored
+report, without re-running the pipeline:
+
+```bash
+python sale_advisory.py CROX                    # from CROX's latest report
+python sale_advisory.py CROX --run <RUN_ID>     # from a SPECIFIC run's report
+python sale_advisory.py CROX "Crocs Inc"        # optional explicit company name
+```
+
+Costs ~$0.08-0.10 (one agent call) against the rolling daily budget, versus ~$0.40 to
+re-run the whole pipeline — which would also rewrite the report you already reviewed.
+It works against a pipeline run or a critic-review run alike, and the new advisory
+says on its face that it was generated separately and is anchored to the figures
+current at generation time.
+
+The advisory is stored **on the run you name**, so `--sell-check TICKER --run <that
+id>` picks it up and the web viewer shows it on that run's Sale Advisory tab. The
+*cost*, however, gets its own row — adding it to a finished run's totals would
+rewrite the record of what that run cost.
+
+> **After a critic review, prefer this over re-running `refine.py`.** Re-running the
+> review would not repair a stale advisory: the critic agrees immediately (the report
+> is already corrected), so no revision runs, and the advisory gets carried forward
+> again — this time without its staleness warning.
+
 ## Running the book's strategy on a 2-month cycle
 
 Greenblatt's method is a **basket** strategy: it works across many positions held for

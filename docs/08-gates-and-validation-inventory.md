@@ -124,6 +124,19 @@ Only active under `python refine.py TICKER`. Full walkthrough:
 | Sale-advisory freshness (`_refresh_sale_advisory`) | `refine.py:330-427` | Whether the report was actually revised, and whether re-deriving the advisory fits the ceiling | No revision → carried forward unchanged (valid, since the prose did not move). Revision → re-derived against the refined report. Revision but unaffordable → **should be unreachable** (the cost is reserved before the revision is committed to); if reached, carried with a visible staleness warning and a loud log, never silently, because its sell triggers may be anchored to a figure the critic corrected. |
 | Source-case availability (`_load_source_case`) | `refine.py:163-184` | Whether the reviewed run still has `BEAR_CASE`/`BULL_CASE` stored | **Fails open with an explicit prompt note** telling the critic the case is unavailable and not to read its absence as evidence the summary is wrong. |
 
+## G2. Standalone sale-advisory gates — `sale_advisory.py`
+
+Only active under `python sale_advisory.py TICKER`. Walkthrough:
+[10-sale-advisory-regeneration.md](10-sale-advisory-regeneration.md).
+
+| Gate | Line | Checks | On failure |
+| :--- | ---: | :--- | :--- |
+| Report exists | `sale_advisory.py:83-90` | Whether the named (or latest) run has a final report | Errors out with the command to run first. An advisory is *derived from* a report; there is nothing to derive from. |
+| Report has analyst prose | `:133-137` | Whether `strip_generated_sections` left anything | Errors out rather than sending an empty report to the advisor and paying for the answer. |
+| Rolling daily ceiling | `:114-127` | `prior day spend + ~$0.12` against `budget.per_day_usd` | Refuses to start, naming the figures. `--no-budget` overrides. No per-invocation ceiling by design — one deliberate call for a known artefact. |
+| Empty advisor output | `:159-164` | Whether the advisor returned anything | Nothing stored; the run is finalized `FAILED` **and the attempt's cost is still reported**, because it was still billed. |
+| Reconciliation gate | `:166-176` | The new advisory's thresholds against `VERIFIED_FIGURES` | Same as §E — warnings logged, never blocks persistence. |
+
 ## H. Persistence-layer gates — `mcp_server.py` / `sql-schema.sql`
 
 | Gate | Where | Behavior |

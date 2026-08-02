@@ -192,3 +192,26 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     And if the report was revised, the advisory is re-derived against the revised report
     And if it was revised but the budget cannot cover re-deriving it, the previous advisory is carried with a visible staleness warning rather than shipped silently
     And the sell-condition check can then be pinned to the refinement's own run id, which is the id the refined report tells the reader to record
+
+  # --- Standalone sale advisory (sale_advisory.py) ---
+  # A report can outlive its advisory: a refinement revised the report, or
+  # --skip-sale-advisor was used, or the advisor produced nothing, or the advisory's
+  # thresholds are simply anchored to figures that have aged.
+
+  Scenario: Generate a sale advisory for any stored report on demand
+    Given a run has a final report whose sale advisory is missing, stale, or out of date
+    When the investor runs the standalone sale advisory command for that ticker
+    Then it derives the advisory from that run's report, whether that run came from the pipeline or from a critic review
+    And it anchors the advisory to the figures current at generation time, not to the figures the report was written against
+    And it says so on the advisory itself, so an advisory written later is never mistaken for one written alongside its report
+    And it runs the same reconciliation gate the pipeline runs over an advisory
+    And re-running the whole pipeline is not required to recover one artefact
+
+  Scenario: Attach the advisory to the report it belongs to, without rewriting that run's cost
+    Given the investor generated a sale advisory for a specific run
+    Then the advisory is stored against that run, so the sell-condition check pinned to that run finds it
+    And the web viewer shows it on that run's sale advisory tab
+    And where a run holds more than one advisory, every reader takes the newest
+    But the cost is recorded as its own run, because adding it to a finished run's totals would rewrite the record of what that run cost
+    And that cost run is not browsable and is never mistaken for a critic review
+    And the spend still counts against the rolling daily ceiling

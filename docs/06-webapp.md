@@ -21,6 +21,14 @@ to — the only thing the two processes share.
 | `GET /api/report?ticker=&run_id=` | `:315` | `agent_outputs` (`BEAR_CASE`/`BULL_CASE`/`SALE_CASE`/`CRITIC_REVIEW`) + `final_reports` + `pipeline_runs` | Raw markdown rendered server-side to HTML (`render_md`, `:41`, via `python-markdown` with `extra`+`sane_lists` extensions) — trusted pipeline output, so no sanitization is applied. Also returns `critic_status` / `critic_rounds` / `source_run_id`. |
 | `GET /download?ticker=&run_id=&kind=` | `:338` | same as above | Raw markdown (not HTML) as a `.md` attachment, `kind` ∈ `bear`/`bull`/`sale`/`critic`/`final`. |
 
+> **A run can hold more than one row of the same type.** `sale_advisory.py` stores a
+> regenerated advisory on the run whose report it was derived from, alongside the one
+> that run originally produced. `_fetch_reports`'s `_CASE_TYPES` query therefore
+> orders **oldest-first**, so the dict comprehension that follows keeps the *newest*
+> of each type — the same rule `db_get_agent_output` and `db_get_sale_case` follow.
+> Without the `ORDER BY` the winner was whatever order the planner happened to
+> return. See [10-sale-advisory-regeneration.md](10-sale-advisory-regeneration.md).
+
 `_fetch_reports(run_id, ticker)` (`:262`) is the shared helper behind both
 `/api/report` and `/download`. It returns a **dict**, not the original 5-tuple —
 there are now six bodies plus two pieces of run metadata, and a positional tuple
