@@ -8,6 +8,13 @@ critic's own prompt).
 This is **Phase D** — an opt-in second opinion on a report the pipeline has already
 produced. Nothing in Phases A–C calls it, and `main.py` does not import it.
 
+It is the **Producer–Critic pattern** (also called **reflection**, or
+generator–evaluator): one agent produces, a second and independent agent evaluates,
+and the producer revises against the evaluation until the evaluator is satisfied or
+a stopping condition fires. The three things that make or break that pattern in
+practice — what "independent" actually means, what makes the evaluator stop, and how
+to keep it from relitigating the same point every lap — are §§ below.
+
 ## Why it exists
 
 The pipeline already runs an adversarial pair and a neutral judge, but all four
@@ -25,6 +32,64 @@ check load-bearing claims against the world rather than against the same cached
 blob, and **no sight of the analyst's instruction at all**. A critic told how the
 report was supposed to be written grades against that spec instead of against
 reality.
+
+## Code map
+
+Two new modules, split the same way `main.py` splits agent definitions from
+`_run_pipeline_async`: definitions and pure text handling in one file, orchestration
+and money in the other.
+
+### `critic_agent.py` — the agents and the parsers
+
+| Symbol | Line | What it does |
+| :--- | ---: | :--- |
+| `critic_agent` | `:86` | The `LlmAgent`. `critic-instructions.md` + a per-review block; tools = news/search/profile/metrics/quarterly; `output_key="critic_review"`. |
+| `RESPONSE_MARKER` | `:118` | `<<<RESPONSE TO CRITIC>>>` — separates the revised report from the analyst's reply inside one turn. |
+| `reviser_agent` | `:120` | The `LlmAgent` built from `main.analyst_agent.instruction` **verbatim** + a revision block; `output_key="revised_report"`. |
+| `BLOCKING_SEVERITIES` | `:184` | `("BLOCKING", "MATERIAL")` — the two that prevent agreement. Everything keys off this tuple. |
+| `parse_findings` | `:192` | Splits a review into finding dicts (`severity`/`type`/`title`/`finding`). Format-tolerant; see below. |
+| `finding_summary` | `:251` | One-line gist for the reader-facing banner — prefers the "Required fix" line over "Why it is wrong". |
+| `extract_critic_verdict` | `:269` | Returns `(verdict, note)`. Takes the **stricter** of the declared verdict and the assigned severities. |
+| `split_revision` | `:299` | Splits the reviser's turn on `RESPONSE_MARKER` into `(report, reply)`. |
+| `format_past_corrections` | `:315` | Renders stored findings into the `PAST_CORRECTIONS` prompt block, truncated. |
+| `_run_agent_async` / `run_agent` | `:349` / `:377` | One agent turn in a throwaway session, with 429 backoff. `usage` is built **outside** the retry loop so a rate-limited attempt's tokens are still counted. |
+
+### `refine.py` — the loop, the money, the CLI
+
+| Symbol | Line | What it does |
+| :--- | ---: | :--- |
+| config constants | `:84-95` | `MAX_BUDGET_USD`, `MAX_ROUNDS`, the two seeds, `ESTIMATE_HEADROOM`, memory bounds — all from `config.yaml`'s `refinement:` block. |
+| `CRITIC_SECTION_HEADING` | `:100` | `## Independent Critic Review`. Written by this tool, and stripped before a report re-enters the loop. |
+| `strip_generated_sections` | `:106` | Reduces a **stored** report back to the analyst's own prose. |
+| `_load_candidate` | `:131` | Recomputes Magic Formula figures via `compute_ticker_magic_metrics` (no LLM, no tokens). |
+| `_load_source_case` | `:161` | Loads `BEAR_CASE`/`BULL_CASE` from the reviewed run; missing is survivable, not fatal. |
+| `_Estimator` | `:184` | Per-role cost projection for the next round. `observe` `:197`, `full_round` `:203`. |
+| `_affordable` | `:215` | Returns a reason string when the next round cannot be paid for, else `""`. |
+| `_agreed_banner` / `_not_agreed_banner` | `:231` / `:281` | The reader-facing standing block, including unfixed MINOR findings. |
+| `_demote_headings` | `:300` | Pushes an inlined review's headings down so they nest under their container. |
+| `_assemble` | `:312` | Deterministic sections + analyst prose + reconciliation + critic standing. |
+| `run_refinement_loop` | `:330` | **The entry point.** Traced step by step below. |
+
+### Control flow through `run_refinement_loop`
+
+Read it in this order — the four numbered comments in the source mark the same
+boundaries:
+
+| Step | Line | What happens |
+| :--- | ---: | :--- |
+| 1 | `:345` | Load the report under review (`db_get_final_report`). Bail out with an explanatory error if the ticker has none — refinement reviews an existing report, it does not create one. |
+| 2 | `:379` | Gather every input, no LLM involved: recomputed candidate, quarterly trends, verified figures, screen context, the two source cases, and `critic_memory` for this ticker. |
+| 3 | `:417` | `db_create_pipeline_run(refine_run_id, [ticker], src_run)` — the parent row, carrying `refines_run_id`. |
+| — | `:429` | **Pre-flight ceiling check.** If one critique cannot be afforded, stop before spending anything. |
+| — | `:438` | `strip_generated_sections` on the stored report → `report_body`, the text that will be critiqued. |
+| loop | `:446` | `for rnd in range(1, rounds_allowed + 1)` — the round loop. |
+| ↳ a | `:447` | Build this round's `state` dict explicitly (all ten templated keys). |
+| ↳ b | `:460` | Run the critic. |
+| ↳ c | `:481-482` | `parse_findings` then `extract_critic_verdict` — deterministic Python, never a second model call. |
+| ↳ d | `:519` | **AGREE → break.** The loop always ends on a critique. |
+| ↳ e | `:525` | Round-limit check, then `:530` the spend check for a revision **plus the critique that must follow it**. |
+| ↳ f | `:540` | Run the reviser; `split_revision`; record the reply; `:580` the revised text becomes the new `report_body`. |
+| 4 | `:584` | Assemble and persist: reconciliation gate `:595`, standing banner `:608`, run header `:613`, DB writes, files, `_finalize_run` with the terminal status `:643`. |
 
 ## The two agents, `critic_agent.py`
 
@@ -50,7 +115,7 @@ point-by-point reply to the critic. The reply cannot become a sixth report secti
 the critic must see it, or it re-raises every rejected finding for as many rounds
 as the budget allows. So the reviser writes the report, then the marker
 `<<<RESPONSE TO CRITIC>>>` (`critic_agent.RESPONSE_MARKER`), then the reply;
-`split_revision()` separates them in Python. A missing marker is tolerated (the
+`split_revision()` (`critic_agent.py:299`) separates them in Python. A missing marker is tolerated (the
 whole turn becomes the report) because losing the reply costs one wasted round,
 while rejecting the turn would cost the whole revision.
 
@@ -73,10 +138,10 @@ flowchart TD
 
 Per round, in order:
 
-1. **Critique.** `run_agent(critic, state, ...)` — one throwaway session per turn,
+1. **Critique.** `run_agent` (`critic_agent.py:377`) — one throwaway session per turn,
    with 429 backoff. Usage is created outside the retry loop so a rate-limited
    attempt's tokens are still counted.
-2. **Parse** (`parse_findings`, `extract_critic_verdict`). Deterministic Python,
+2. **Parse** (`parse_findings` `critic_agent.py:192`, `extract_critic_verdict` `:269`). Deterministic Python,
    never a second model call — the stopping condition, the spend, and what the
    reader is told all hang off it.
 3. **Persist** the critique as a `CRITIC_REVIEW` agent output and its findings as
@@ -88,7 +153,7 @@ Per round, in order:
 
 ### Agreement is decided in Python, not by the model
 
-`extract_critic_verdict(review, findings)` takes the **stricter** of the critic's
+`extract_critic_verdict` (`critic_agent.py:269`) takes the **stricter** of the critic's
 declared verdict and the severities it assigned itself:
 
 - Declared `AGREE` while a `BLOCKING`/`MATERIAL` finding stands → forced to
@@ -111,14 +176,14 @@ session, and the existing rolling `budget.per_day_usd` window from
 [05](05-guardrails-cost-and-reuse.md) §4 — an ad-hoc command must not route around
 the guard that exists to stop exactly this kind of spending.
 
-- **Checked between rounds, never mid-round.** An abandoned round has been billed
+- **Checked between rounds, never mid-round** (`refine.py:429` pre-flight, `:530` per round). An abandoned round has been billed
   and produces nothing, which is worse than the overspend it prevents. Same rule
   `_check_budget` follows between tickers.
 - **A round is priced as revision + the critique that follows it.** Shipping a
   revision nobody reviewed would attach the *previous* round's objections to text
   that no longer says what they object to. So the loop always ends on a critique,
   and the report a reader sees has always been checked as it stands.
-- `_Estimator` keeps **per-role** estimates (the critic makes tool calls, the
+- `_Estimator` (`refine.py:184`) keeps **per-role** estimates (the critic makes tool calls, the
   reviser does not), seeded from config and then replaced by what each role
   actually cost × `estimate_headroom`. A zero measurement is ignored — a turn that
   failed before billing is not a cheap round.
@@ -136,7 +201,7 @@ or an analyst reintroducing something it already conceded, spends a paid round
 relitigating a lap already run. `critic_memory` (see
 [03-mcp-tools-and-persistence.md](03-mcp-tools-and-persistence.md)) is the fix —
 one row per finding, replayed into **both** agents' prompts every round via
-`format_past_corrections()`.
+`format_past_corrections()` (`critic_agent.py:315`), assembled at `refine.py:412`.
 
 - **Retrieved by exact ticker + recency, not by vector similarity.** The retrieval
   key is known exactly (this company's own review history); semantic search would
@@ -165,10 +230,10 @@ The refined report is assembled the same way `analyze_ticker` assembles a fresh
 one — deterministic `## Magic Formula Metrics`, the analyst's prose, reconciliation
 warnings — plus one section the pipeline never writes:
 
-- **Agreed:** a short `## Independent Critic Review` note giving the round count
+- **Agreed** (`_agreed_banner`, `refine.py:231`)**:** a short `## Independent Critic Review` note giving the round count
   and review cost, and stating plainly that agreement means neither agent could
   find a fault in the argument, **not** that the call is right.
-- **Not agreed:** the same heading carrying a blunt "**The independent critic has
+- **Not agreed** (`_not_agreed_banner`, `refine.py:281`)**:** the same heading carrying a blunt "**The independent critic has
   NOT agreed this report**", the count of blocking and material objections still
   standing, the stopping reason, and **the critic's full final review reproduced
   underneath**.

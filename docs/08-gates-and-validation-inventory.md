@@ -107,7 +107,23 @@ misconfigured or the data provider may have changed behavior:
 | Embedding failures (`get_embedding`) | `mcp_server.py:764-812` | **Fails open** — logs an ERROR (loud, not silent — see the rule at the top of this doc) and stores a zero vector rather than blocking the write |
 | Spend-lookup failure inside the budget guard | `agent_architecture.md`'s "Budget guard" §5B | Falls back to the per-run ceiling alone rather than failing open entirely — a guard that fails open silently would look protected when it isn't |
 
-## G. Persistence-layer gates — `mcp_server.py` / `sql-schema.sql`
+## G. Critic-loop gates (Phase D, opt-in) — `critic_agent.py` / `refine.py`
+
+Only active under `python refine.py TICKER`. Full walkthrough:
+[09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md).
+
+| Gate | Line | Checks | On failure |
+| :--- | ---: | :--- | :--- |
+| Agreement cross-check (`extract_critic_verdict`) | `critic_agent.py:269-297` | The critic's *declared* `CRITIC VERDICT:` line against the severities it assigned itself. Takes the **stricter** of the two. | A declared `AGREE` with a BLOCKING/MATERIAL finding standing is forced to `REVISE`, and the override is returned as a `note` and logged — resolving the contradiction the other way would stamp "the critic agreed" on a report the critic's own text says is unsupportable. |
+| Missing verdict line | `critic_agent.py:283-287` | Whether any `CRITIC VERDICT:` line parsed at all | **Falls back to the severities**, never to agreement — a formatting failure is not evidence of a clean report. |
+| Findings-parse fallback (`parse_findings`) | `critic_agent.py:222-238` | Whether the review's findings could be parsed at the expected heading/bold structure | If nothing parses *and* the text doesn't say "No findings.", any severity keyword in the body promotes it to a single `unparsed` finding. Silently returning `[]` would read as "the critic found nothing". |
+| Spend ceiling (`_affordable`) | `refine.py:215-228` | `spent + next-round estimate` against **both** `refinement.max_budget_usd` and the rolling `budget.per_day_usd` window | Returns a reason string; the loop stops **between** rounds and the report ships stamped un-agreed with that reason. Never aborts mid-round (an abandoned round is billed and produces nothing). |
+| Revision-affordability rule | `refine.py:530` | Whether a revision **plus the critique that must follow it** both fit | Stops before the revision. Guarantees the shipped report has always been critiqued *as it stands* — shipping an unreviewed revision would attach the previous round's objections to text that may already have fixed them. |
+| Zero-cost measurement guard (`_Estimator.observe`) | `refine.py:197-200` | Ignores a measured cost of `0` | A turn that failed before billing must not be recorded as a cheap round, or the next projection lets the loop start something it cannot finish. |
+| Reconciliation gate on the refined report | `refine.py:595-607` | Same `_reconcile_agent_figures` as §E, re-run over the revised text **and** the critic's own review | Same behavior as §E — warnings appended, never blocks persistence. |
+| Source-case availability (`_load_source_case`) | `refine.py:161-182` | Whether the reviewed run still has `BEAR_CASE`/`BULL_CASE` stored | **Fails open with an explicit prompt note** telling the critic the case is unavailable and not to read its absence as evidence the summary is wrong. |
+
+## H. Persistence-layer gates — `mcp_server.py` / `sql-schema.sql`
 
 | Gate | Where | Behavior |
 | :--- | :--- | :--- |

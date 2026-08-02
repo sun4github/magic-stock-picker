@@ -1,10 +1,18 @@
 # Orchestration & CLI Walkthrough
 
-Primary file: [`src/main.py`](../src/main.py) (2,372 lines). This is the only
-entry point — there is no separate "orchestrator agent" object; `main.py`'s
-module-level code builds five `LlmAgent`s once at import time, and its
-`if __name__ == "__main__"` block dispatches to one of five run functions
-based on CLI flags.
+Primary file: [`src/main.py`](../src/main.py) (2,372 lines). There is no separate
+"orchestrator agent" object; `main.py`'s module-level code builds five `LlmAgent`s
+once at import time, and its `if __name__ == "__main__"` block dispatches to one of
+five run functions based on CLI flags.
+
+> **There is a second entry point.** [`src/refine.py`](../src/refine.py) runs the
+> opt-in Phase D critic loop (`python refine.py TICKER`) and is documented in
+> [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md). It imports
+> `main` (for the agents, cost accounting, and report assembly) but `main` never
+> imports it — which is why it is a separate command rather than a sixth flag.
+> `main.py` is run as a script, so `import main` from a module `main` imported back
+> would load a **second copy** of every agent and re-run the module-level setup.
+> Everything below concerns Phases A–C only.
 
 ## 1. Startup (module load), `main.py:1-120`
 

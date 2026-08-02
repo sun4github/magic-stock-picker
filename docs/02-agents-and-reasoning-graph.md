@@ -1,11 +1,22 @@
 # Agents & Reasoning Graph Walkthrough
 
-All five agents are `google.adk.agents.LlmAgent` instances defined in
+All five agents in this doc are `google.adk.agents.LlmAgent` instances defined in
 [`src/main.py`](../src/main.py). None of them call each other directly —
 `_run_pipeline_async` (see
 [01-orchestration-and-cli.md](01-orchestration-and-cli.md)) runs them in
 order over one shared ADK session, and they communicate only through
 session-state keys (`output_key` on write, `{key_name}` templating on read).
+
+> **Two more agents live outside this file.** `critic_agent` and `reviser_agent`
+> (`src/critic_agent.py:86` and `:120`) belong to the opt-in Phase D refinement
+> loop, which `main.py` neither imports nor runs. They follow the same conventions
+> as everything below (`output_key`, `{key}` templating, `include_contents="none"`)
+> but are driven by `refine.py`, not `_run_pipeline_async`. See
+> [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md). One
+> connection matters here: `reviser_agent` is built from
+> **`analyst_agent.instruction` verbatim**, so any edit to the analyst prompt below
+> silently changes the reviser too — that is deliberate (one rule set, no drift),
+> but it means the analyst's prompt has a second consumer.
 
 There is **no** SEC/metrics/search "agent" — that data is fetched by direct
 Python function calls (`fetch_sec_10k_data`, `fmp_metrics_extractor`,

@@ -1723,6 +1723,13 @@ revisiting `max_growth_rate_for_peg` moves the implied hard P/E ceiling (§10.F)
 
 ## 11. Phase D — the independent critic and the refinement loop
 
+The **Producer–Critic pattern** (a.k.a. **reflection** / generator–evaluator): the
+analyst produces, an independent critic evaluates, the analyst revises, repeat until
+the critic is satisfied or a spend ceiling stops it. What follows is less about the
+pattern (which is standard) than about the three decisions that determine whether it
+is worth its cost here — what independence concretely means (§B), what makes the
+loop terminate (§C, §D), and how it avoids paying to relitigate settled ground (§F).
+
 Implementation: [`critic_agent.py`](../critic_agent.py) (agents + parsers),
 [`refine.py`](../refine.py) (loop, spend control, CLI),
 [`critic-instructions.md`](../critic-instructions.md) (the critic's prompt).

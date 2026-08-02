@@ -170,6 +170,21 @@ flowchart TD
   the aggregated usage/cost onto the `pipeline_runs` row via
   `db_finalize_pipeline_run`.
 
+## 7. What the Phase D critic loop reuses from this file
+
+[`refine.py`](../src/refine.py) reimplements none of the above — it imports it. Worth
+knowing when you change anything here, because the loop is a second consumer:
+
+| This file's machinery | How `refine.py` uses it |
+| :--- | :--- |
+| `_new_usage` / `_add_event_usage` / `_merge_usage` (§6) | Same accumulators, but attributed **per role per round** (`[TICKER critic r2]`, `[TICKER reviser r2]`) rather than per role per ticker. |
+| `_total_cost` / `_log_usage` / `_finalize_run` (§6) | Identical. A refinement writes an ordinary `pipeline_runs` row, so its spend shows up in `db_spend_since` and therefore in **this file's rolling daily ceiling**. |
+| `_prior_day_spend` + `BUDGET_PER_DAY_USD` (§4) | Checked by `refine.py:_affordable` alongside its own `refinement.max_budget_usd` — an ad-hoc command must not route around the daily guard. `BUDGET_PER_RUN_USD` does **not** apply; the refinement ceiling replaces it. |
+| `_verified_figures` / `_format_verified_figures` (§2) | Recomputed at review time from `compute_ticker_magic_metrics`, because the original run's candidate dict was never persisted — only its rendered prose was. Consequence: market cap and EV are **live**, so a report refined days later is checked against today's price. |
+| `_reconcile_agent_figures` / `_format_reconciliation_section` (§3) | Re-run over the revised report *and* the critic's own review (`refine.py:595`). |
+| `_analysis_key` (§5) | **Deliberately bypassed** — a refinement stores `analysis_key = NULL` so the duplicate-run skip can never serve a refined report in place of a fresh analysis. Its provenance is a review session; reuse keys on filings. |
+| `_normalize_candidate` / `_present` (§1) | Same normalization, same reason. |
+
 ## Where to look next
 
 - Where these functions are called from in the per-ticker/per-run flow:
