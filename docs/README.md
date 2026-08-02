@@ -31,6 +31,7 @@ Come here once you need to change or extend the code.
 | [07-observability-and-logging.md](07-observability-and-logging.md) | How logging is actually wired up (three independent loggers), where each diagnostic ends up, and two verified logging quirks (duplicate console lines, CWD-relative log directory) | `src/main.py`, `src/mcp_server.py`, `src/magic_formula_starter_screener.py` |
 | [08-gates-and-validation-inventory.md](08-gates-and-validation-inventory.md) | Every validation/eligibility/integrity/resilience gate in the system, consolidated into one table by category, with fail-loud-vs-fail-open behavior called out | all of the above |
 | [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md) | Phase D: the independent critic, the analyst/critic feedback loop, its spend ceiling, and the cross-run critic memory that keeps it from relitigating settled points | `src/critic_agent.py`, `src/refine.py`, `src/critic-instructions.md` |
+| [10-sale-advisory-regeneration.md](10-sale-advisory-regeneration.md) | The standalone `sale_advisory.py` command: generating or repairing a Phase C sale advisory for any stored report, and why its artefact and its cost land on different runs | `src/sale_advisory.py` |
 
 ## What is *not* in the runtime path
 
@@ -57,6 +58,9 @@ not. Put anything similar there rather than in `src/`.
    list of every gate in the system in one place.
 7. **09** when you need the opt-in critic loop (`python refine.py TICKER`) —
    it sits entirely outside the pipeline and nothing in **01**–**08** calls it.
+8. **10** for the standalone sale-advisory command
+   (`python sale_advisory.py TICKER`) — a small repair tool, also outside the
+   pipeline, for reports whose advisory is missing or out of date.
 
 ## Conventions used in these docs
 

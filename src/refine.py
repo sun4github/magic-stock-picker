@@ -344,6 +344,33 @@ _ADVISORY_NOTE = {
 }
 
 
+def run_sale_advisor(ticker: str, company_name: str, report_body: str,
+                     verified_figures: str, quarterly_data: str) -> tuple:
+    """Run Phase C's sale advisor over a report body. Returns (text, usage).
+
+    Shared with `sale_advisory.py`, the standalone regeneration command — the two
+    callers decide *whether* to generate an advisory for very different reasons, but
+    *how* to generate one must stay identical. Two copies of this would drift the
+    moment `sale_advisor_agent` gains a templated key, and the symptom would be one
+    entry point silently producing a worse advisory than the other.
+
+    `report_body` must be the analyst's own prose (see `strip_generated_sections`),
+    matching what the pipeline's own sale advisor receives in session state — not the
+    assembled report with the deterministic Magic Formula section prepended.
+    """
+    return run_agent(
+        main.sale_advisor_agent,
+        {
+            "ticker": ticker,
+            "company_name": company_name,
+            "verified_figures": verified_figures,
+            "quarterly_data": quarterly_data,
+            "final_report": report_body,
+        },
+        f"Write the sale advisory for {company_name} ({ticker}).",
+    )
+
+
 def _refresh_sale_advisory(ticker: str, company_name: str, src_run: str,
                            refine_run_id: str, report_body: str, verified_figures: str,
                            quarterly_data: str, revised: bool, usage: dict,
@@ -406,19 +433,8 @@ def _refresh_sale_advisory(ticker: str, company_name: str, src_run: str,
             logger.info(f"[{ticker}] Report was revised — re-deriving the sale "
                         f"advisory against the refined text...")
             try:
-                text, adv_usage = run_agent(
-                    main.sale_advisor_agent,
-                    {
-                        "ticker": ticker,
-                        "company_name": company_name,
-                        "verified_figures": verified_figures,
-                        "quarterly_data": quarterly_data,
-                        # The analyst's prose, matching what the pipeline's own sale
-                        # advisor receives in session state (not the assembled report
-                        # with its deterministic sections prepended).
-                        "final_report": report_body,
-                    },
-                    f"Write the sale advisory for {company_name} ({ticker}).",
+                text, adv_usage = run_sale_advisor(
+                    ticker, company_name, report_body, verified_figures, quarterly_data
                 )
             except Exception as e:
                 logger.error(f"[{ticker}] Sale advisory regeneration failed: {e}. "

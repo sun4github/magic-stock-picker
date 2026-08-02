@@ -294,9 +294,16 @@ def _fetch_reports(run_id: str, ticker: str):
     happen at each call site."""
     conn = get_conn()
     cur = conn.cursor()
+    # ORDER BY matters: a run can legitimately hold MORE THAN ONE row of the same
+    # type. `sale_advisory.py` stores a regenerated advisory on the run whose report
+    # it was derived from, alongside the one that run originally produced. Ordering
+    # oldest-first means the dict comprehension below keeps the NEWEST of each type,
+    # which is the same rule `db_get_agent_output` and `db_get_sale_case` follow.
+    # Without it the winner is whatever order the planner happened to return.
     cur.execute(
         """SELECT agent_type, raw_content FROM agent_outputs
-           WHERE run_id = %s AND ticker = %s AND agent_type = ANY(%s)""",
+           WHERE run_id = %s AND ticker = %s AND agent_type = ANY(%s)
+           ORDER BY created_at ASC""",
         (run_id, ticker, list(_CASE_TYPES)),
     )
     parts = {t: c for t, c in cur.fetchall()}

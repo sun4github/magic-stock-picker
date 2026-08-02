@@ -5,14 +5,19 @@ Primary file: [`src/main.py`](../src/main.py) (2,372 lines). There is no separat
 once at import time, and its `if __name__ == "__main__"` block dispatches to one of
 five run functions based on CLI flags.
 
-> **There is a second entry point.** [`src/refine.py`](../src/refine.py) runs the
+> **There are two more entry points.** [`src/sale_advisory.py`](../src/sale_advisory.py)
+> regenerates a Phase C sale advisory for any stored report
+> ([10-sale-advisory-regeneration.md](10-sale-advisory-regeneration.md)) — the repair
+> tool for a run whose advisory is missing, stale, or was skipped. And
+> [`src/refine.py`](../src/refine.py) runs the
 > opt-in Phase D critic loop (`python refine.py TICKER`) and is documented in
 > [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md). It imports
 > `main` (for the agents, cost accounting, and report assembly) but `main` never
 > imports it — which is why it is a separate command rather than a sixth flag.
-> `main.py` is run as a script, so `import main` from a module `main` imported back
-> would load a **second copy** of every agent and re-run the module-level setup.
-> Everything below concerns Phases A–C only.
+> Both are separate commands for the same mechanical reason: `main.py` is run as a
+> script, so `import main` from a module `main` imported back would load a **second
+> copy** of every agent and re-run the module-level setup. Everything below concerns
+> the five modes of `main.py` itself.
 
 ## 1. Startup (module load), `main.py:1-120`
 

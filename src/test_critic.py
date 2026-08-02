@@ -19,6 +19,7 @@ import main
 import refine
 import critic_agent as ca
 import app as wapp   # the viewer, for its borrowed-content labels
+import sale_advisory as sadv
 
 
 # --- Fixtures ------------------------------------------------------------------
@@ -356,6 +357,33 @@ def _advisory_cases():
     ]
 
 
+def _standalone_advisory_cases():
+    """`sale_advisory.py` — regenerating an advisory for any run, on demand.
+
+    The case that motivated it: a refinement left a stale advisory, and re-running
+    `refine.py` would NOT repair it — the critic agrees immediately (the report was
+    already corrected), so no revision runs, so the "no revision -> carry forward"
+    rule carries the stale one forward again, this time without its warning label.
+    """
+    note = sadv._origin_note("run-aaa", "run-bbb")
+    return [
+        ("the advisory names the run it was derived from", "run-aaa" in note),
+        ("and the run that generated it", "run-bbb" in note),
+        # An advisory generated days later is anchored to different figures than one
+        # written alongside its report. Looking identical would hide that.
+        ("it says the figures are from generation time, not report time",
+         "not to the figures the report was written against" in note),
+        ("it says it supersedes the run's own advisory", "supersedes" in note),
+        # The two entry points must generate advisories identically; only the
+        # decision to generate differs.
+        ("both entry points share one generator",
+         sadv.refine.run_sale_advisor is refine.run_sale_advisor),
+        ("the generator drives the pipeline's own sale advisor agent",
+         "sale_advisor_agent" in refine.run_sale_advisor.__doc__
+         or main.sale_advisor_agent.output_key == "sale_data"),
+    ]
+
+
 def _inlining_cases():
     """An inlined review must not outrank the container it is inlined under."""
     review = "## Findings\n### Finding 1 — x\n- **Severity:** MINOR\n#### deep\n"
@@ -405,6 +433,7 @@ def run():
         ("spend projection", _budget_cases()),
         ("reader-facing banners", _banner_cases()),
         ("sale advisory after review", _advisory_cases()),
+        ("standalone advisory regeneration", _standalone_advisory_cases()),
         ("minor findings carried to the reader", _minor_carryover_cases()),
         ("inlining the critic's review", _inlining_cases()),
         ("long-term memory rendering", _memory_cases()),

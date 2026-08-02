@@ -2658,6 +2658,8 @@ if __name__ == "__main__":
             "\n"
             "  python refine.py TICKER             (separate command) put an existing report\n"
             "                                     through independent critic review\n"
+            "  python sale_advisory.py TICKER      (separate command) generate or repair one\n"
+            "                                     report's sale advisory\n"
             "\n"
             "Phase A is subscription-metered (time only); Phase B/C is the billed part.\n"
             "--screen-only and --from-csv are inverses, so the two can run on different\n"

@@ -1899,6 +1899,35 @@ record against a lot so `--sell-check --run RUN_ID` can pin the exact thesis bou
 under (§8.D). A refinement wrote no `SALE_CASE`, so that command failed outright, and
 the unpinned form silently resolved to the pre-review conditions.
 
+### G3. Repairing an advisory outside the loop — `sale_advisory.py`
+
+§G2's third outcome is rare by construction but not impossible, and it is not the
+only way a report ends up without a current advisory: `--skip-sale-advisor` writes
+none at all, the advisor can return nothing (§1 logs a warning and continues), and an
+advisory's thresholds age even when nothing is wrong. Before, every one of those
+required re-running the whole pipeline — ~$0.40, and it rewrites the report you
+already reviewed — to recover one artefact.
+
+`python sale_advisory.py TICKER [--run RUN_ID]` derives a fresh advisory from any
+stored report for ~$0.08–0.10. Two placement rules, deliberate in both halves:
+
+- **The advisory is stored on the run you name.** An advisory belongs to the report
+  it was derived from; storing it under a run of its own would leave
+  `db_get_sale_case(ticker, run_id)` unable to find it and the viewer unable to show
+  it. A run may therefore hold more than one `SALE_CASE`; every reader takes the
+  newest, and the viewer's query orders accordingly.
+- **The cost is recorded as its own run.** Folding it into the target run's totals
+  would rewrite what that run cost, which is what run history exists to record — and
+  the target may have been finalized days earlier. The cost row carries no
+  `ticker_runs` row (nothing to browse) and no `refines_run_id` (§11.G), so it is
+  never mistaken for a critic review.
+
+Note that re-running `refine.py` does **not** repair a stale advisory: the critic
+agrees immediately on an already-corrected report, so no revision runs, so §G2's "no
+revision → carry forward" rule carries the stale advisory forward again — this time
+without its staleness warning. That is precisely why the repair is a separate
+command rather than a flag on the loop.
+
 ### H. Why it is not in the pipeline
 
 It costs several times what producing the report cost, and takes as long. Putting a
