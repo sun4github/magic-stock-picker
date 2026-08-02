@@ -14,16 +14,44 @@ to — the only thing the two processes share.
 | :--- | ---: | :--- | :--- |
 | `GET /` | `:47` | — | Serves `templates/index.html`. |
 | `GET /api/tickers` | `:52` | `ticker_runs` | Distinct tickers, alphabetical; optional `?q=` substring (`ILIKE`). |
-| `GET /api/runs?ticker=` | `:77` | `ticker_runs` | One ticker's runs, newest first, with `verdict`. |
+| `GET /api/runs?ticker=` | `:78` | `ticker_runs` ⋈ `pipeline_runs` | One ticker's runs, newest first, with `verdict`. The join supplies `refines_run_id`/`critic_status` so a critic refinement is marked **in the picker** — it is the newest run for its ticker, so it is what the picker selects by default and the distinction has to be visible before the click. |
 | `GET /api/pipeline-runs` | `:101` | `ticker_runs` (`GROUP BY run_id HAVING COUNT(*) > 1`) | Multi-ticker runs only — single-ticker on-demand runs are excluded here by design (browse those "by ticker" instead). |
 | `GET /api/pipeline-run?run_id=` | `:168` | `ticker_runs` | All tickers in one run, ordered Buy→Watch→Avoid then by `magic_rank` (SQL `CASE`, `_VERDICT_ORDER_SQL` at `:137`) — the ordering lives in SQL so the on-screen list and the CSV download can't drift apart. |
 | `GET /download-run?run_id=` | `:184` | `ticker_runs` (via `_fetch_run_tickers`, `:147`) | Same rows, same order, as a `.csv` attachment. |
-| `GET /api/report?ticker=&run_id=` | `:242` | `agent_outputs` (`BEAR_CASE`/`BULL_CASE`/`SALE_CASE`) + `final_reports` | Raw markdown rendered server-side to HTML (`render_md`, `:40`, via `python-markdown` with `extra`+`sane_lists` extensions) — trusted pipeline output, so no sanitization is applied. |
-| `GET /download?ticker=&run_id=&kind=` | `:265` | same as above | Raw markdown (not HTML) as a `.md` attachment, `kind` ∈ `bear`/`bull`/`sale`/`final`. |
+| `GET /api/report?ticker=&run_id=` | `:315` | `agent_outputs` (`BEAR_CASE`/`BULL_CASE`/`SALE_CASE`/`CRITIC_REVIEW`) + `final_reports` + `pipeline_runs` | Raw markdown rendered server-side to HTML (`render_md`, `:41`, via `python-markdown` with `extra`+`sane_lists` extensions) — trusted pipeline output, so no sanitization is applied. Also returns `critic_status` / `critic_rounds` / `source_run_id`. |
+| `GET /download?ticker=&run_id=&kind=` | `:338` | same as above | Raw markdown (not HTML) as a `.md` attachment, `kind` ∈ `bear`/`bull`/`sale`/`critic`/`final`. |
 
-`_fetch_reports(run_id, ticker)` (`:213`) is the shared helper behind both
-`/api/report` and `/download` — one query against `agent_outputs`, one
-against `final_reports`.
+`_fetch_reports(run_id, ticker)` (`:262`) is the shared helper behind both
+`/api/report` and `/download`. It returns a **dict**, not the original 5-tuple —
+there are now six bodies plus two pieces of run metadata, and a positional tuple
+that long is a bug waiting to happen at each call site.
+
+### Critic refinements in the viewer
+
+A refinement (see [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md))
+is stored as its own single-ticker run, so it arrives here as an ordinary run with
+three differences, all keyed off **`pipeline_runs.refines_run_id IS NOT NULL`** —
+the critic loop is the only thing that sets it, so there is no second flag that
+could disagree with it:
+
+- **A "Critic Review" tab**, hidden on runs that have none. It stacks *every* round
+  oldest-first under `## Review round N`, with each review's own headings demoted one
+  level (`_demote_headings`, `:48`) so they nest under their round instead of tying
+  with it. This tab is the only place the full exchange is visible: the stored report
+  carries the last review only, and only when the critic never agreed.
+- **A standing chip** beside the verdict badge — "✓ critic agreed" or "⚠ critic did
+  NOT agree", with the round count. It sits *next to* the verdict rather than
+  replacing it, because an un-agreed report still has a verdict and the reader needs
+  both at once. The outcome comes from `pipeline_runs.status` (`COMPLETED` = agreed).
+- **Borrowed Bear/Bull/Sale tabs.** A refinement run holds only its own
+  `CRITIC_REVIEW` rows, so those three tabs would be empty. They are read from the
+  reviewed run via `refines_run_id` and stamped "From the reviewed run `<id>`" —
+  borrowed at read time rather than copied at refine time, which would duplicate
+  ~26 KB of text and two 768-dim vectors per refinement to say nothing new, and
+  labelled because the refinement never re-ran that research.
+
+`/api/pipeline-runs` needs no change: it filters to `HAVING COUNT(*) > 1`, and a
+refinement is always single-ticker, so refinements never pollute the run browser.
 
 ```mermaid
 sequenceDiagram
@@ -43,8 +71,10 @@ sequenceDiagram
     UI->>App: GET /api/report?ticker=BKNG&run_id=...
     App->>DB: SELECT raw_content FROM agent_outputs WHERE agent_type IN (...)
     App->>DB: SELECT markdown_report, verdict FROM final_reports
+    App->>DB: SELECT refines_run_id, status FROM pipeline_runs
+    App->>App: if a refinement, borrow bear/bull/sale from the reviewed run
     App->>App: markdown.markdown(text) — server-side render
-    App-->>UI: JSON (bear_html, bull_html, sale_html, final_html, verdict)
+    App-->>UI: JSON (bear/bull/sale/critic/final _html, verdict, critic_status)
 ```
 
 ## Frontend, `templates/index.html`

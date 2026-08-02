@@ -1720,3 +1720,178 @@ loosening it further would start admitting the mean-reverting cohort in §10.F;
 `universe_limit` is the other clean lever. Note also that raising `max_peg` without
 revisiting `max_growth_rate_for_peg` moves the implied hard P/E ceiling (§10.F) — at
 1.5 × 60 it currently sits at 90.
+
+## 11. Phase D — the independent critic and the refinement loop
+
+Implementation: [`critic_agent.py`](../critic_agent.py) (agents + parsers),
+[`refine.py`](../refine.py) (loop, spend control, CLI),
+[`critic-instructions.md`](../critic-instructions.md) (the critic's prompt).
+Developer walkthrough: [`docs/09-critic-and-refinement-loop.md`](../../docs/09-critic-and-refinement-loop.md).
+
+### A. The gap it closes
+
+Phases B and C already run an adversarial pair and a neutral judge. But all four
+roles read the **same** pre-fetched evidence and descend from the same prompt
+lineage, so nothing stands outside them. §2.E's reconciliation gate catches a
+wrong **figure**; there was nothing catching wrong **reasoning** — a verdict that
+does not follow from the report's own body, a Buy resting entirely on a rumoured
+transaction, a "priced in" assertion with nothing behind it, a sell trigger that
+would fire annually on a seasonal business.
+
+The commit history is the argument for this. "Fix analyst rubber-stamping, peer
+mislabelling, and seasonality blindness" was a batch of prompt patches, each
+written after a human read a report and found the fallacy by hand. Those patches
+are still the right first line of defence — they are free and they apply to every
+run. The critic is the second line, for the reports you are about to act on: it
+finds the ones the prompt rules did not anticipate.
+
+### B. Independence, concretely
+
+Independence is a property of what the critic can and cannot see, not a claim in
+its prompt:
+
+- **Its own instruction file**, written without reference to the analyst's prompt.
+- **Its own tools** — FMP news/profile/metrics/quarterly plus Tavily — so it checks
+  load-bearing claims against the world, not against the same cached blob.
+- **No sight of the analyst's instruction.** A critic told how the report was
+  supposed to be written grades against that spec; the failure being hunted here is
+  invisible from inside the spec.
+- It **does** get the bear and bull cases the analyst was given, because "the
+  summary misrepresents the case" and "the summary drops its strongest point" are
+  both real findings and neither is checkable without the originals.
+
+`reviser_agent` inherits `analyst_agent.instruction` **verbatim** — see §11.E.
+
+### C. Agreement is decided in Python
+
+The critic writes `CRITIC VERDICT: AGREE|REVISE` and assigns each finding
+`BLOCKING`, `MATERIAL` or `MINOR`. `extract_critic_verdict()` takes the stricter of
+the two: a declared AGREE with a BLOCKING or MATERIAL finding standing is forced to
+REVISE, and a missing verdict line falls back to the severities rather than being
+read as agreement. `MINOR` never blocks — a critic that cannot agree over a wording
+nit spends the budget and leaves the reader a report stamped un-agreed for nothing.
+
+Every stopping decision is deterministic Python over the model's prose. None of it
+is delegated to a second model call, for the same reason `_extract_verdict` is not.
+
+### D. Why not `LoopAgent`
+
+The stopping condition is a **spend** decision, not an agent decision: the loop
+stops when it can no longer afford a revision **plus the critique that must follow
+it**, which needs the running dollar total and a per-role projection — figures that
+live in `main`'s cost accounting, outside any agent's context. Cost also has to be
+attributed per role per round, exactly as `_run_pipeline_async` attributes it per
+role per ticker (§5A), or a prompt change that doubles the critic's cost is
+invisible inside a moving loop total. And the hand-off is a rewrite, not an append.
+This is the same call §5B made in rejecting `SequentialAgent`, for the neighbouring
+reason.
+
+### E. Why the reviser reuses the analyst's instruction
+
+A report out of a refinement round must obey exactly the same rules as one out of
+the pipeline: the same five sections, the same Buy/Watch/Avoid vocabulary, the same
+basket framing (§2.G), the same plain-English standard. Restating those rules in
+`critic_agent.py` would create a second copy that drifts, and the first symptom
+would be a refined report subtly different **in kind** from an unrefined one — the
+hardest inconsistency to notice, because both look fine in isolation.
+
+The reviser is told it may **rebut** a finding rather than defer to it. A critic can
+misread a report, and a loop where the analyst always concedes is not a review, it
+is a ratchet. The rebuttal rides after a marker
+(`<<<RESPONSE TO CRITIC>>>`), is split off in Python before storage, and is shown to
+the critic next round — without it, the critic cannot tell a rejected finding from an
+ignored one and re-raises it for as many rounds as the budget allows.
+
+### F. Long-term memory (`critic_memory`)
+
+The loop's cost failure mode is repetition across rounds *and across sessions*. One
+row per finding, with severity, the analyst's reply, and how it was settled;
+replayed into both agents every round via `format_past_corrections()`.
+
+Retrieved by **exact ticker + recency, not vector similarity** — the retrieval key
+is known exactly, so semantic search would return approximate neighbours where an
+exact answer exists, and every row would add an embedding call to a loop whose whole
+design constraint is cost. This is the deliberate exception to §5's
+"analytical content gets embedded" rule.
+
+It carries **no foreign key onto `pipeline_runs`**, unlike every other table in §5.A.
+The others are per-run artefacts and should cascade away with their run. This is
+memory: if a finding vanished with the run it was learned from, the same fallacy
+would return on the next refinement and be paid for again.
+
+### G. What the reader is told
+
+The refined report is assembled like any other (deterministic metrics section,
+analyst prose, reconciliation warnings) plus one section the pipeline never writes.
+Agreed: the round count, the review cost, and an explicit statement that agreement
+means neither agent could find a fault — **not** that the call is right. Not agreed:
+"**The independent critic has NOT agreed this report**", the count of blocking and
+material objections still standing, the stopping reason, and the critic's full final
+review reproduced underneath.
+
+Agreement does not require the critic to have found *nothing*. A MINOR finding never
+blocks agreement (§C's severity rule), which means a revision never
+runs for it and its "Required fix" is never applied — the first live run surfaced
+exactly this: HRB's report overstated quarterly net income growth by not flagging an
+$84.1M one-off tax settlement, graded MINOR because operating profit and cash flow
+carried the thesis without it. Silently dropping a finding just because it did not
+block agreement would be worse than not finding it: the reader would believe nothing
+was found. So the agreed banner (`refine._agreed_banner`) lists every outstanding
+MINOR by title, with its "Required fix" line carried verbatim (`finding_summary` in
+`critic_agent.py` — it prefers "Required fix" over "Why it is wrong" precisely
+because a MINOR reaches the reader only when it was NOT corrected, so what the reader
+needs is the fix that never happened, not a critique of prose they are about to
+read). A clean agreement with zero findings still says nothing extra.
+
+The original run's rows and report file are left untouched. The refinement gets its
+own `run_id`, its own `pipeline_runs` cost row, and its own `final_reports` row with
+an **empty `analysis_key`** — a refined report must never be served by the
+duplicate-run skip (§5B) in place of a fresh analysis, because its provenance is a
+review session and reuse keys on filings.
+
+`pipeline_runs.refines_run_id` (nullable, no FK — a refinement outliving the run it
+reviewed is worth keeping) names the reviewed run. Set only by this loop, so a
+non-NULL value **is** the "this is a refinement" test; there is deliberately no
+second boolean that could disagree with it. With `status` it also carries the
+outcome, which is what the web UI (§9) reads to show a Critic Review tab, a standing
+chip beside the verdict, a marker in the run picker, and — since a refinement run
+holds only its own `CRITIC_REVIEW` rows — to borrow the Bear/Bull/Sale tabs from the
+reviewed run at read time instead of copying ~26KB of text and two vectors per
+refinement to say nothing new.
+
+### H. Why it is not in the pipeline
+
+It costs several times what producing the report cost, and takes as long. Putting a
+2–4 round loop behind all 30 tickers of a Phase B run would multiply an ~$11 run by
+roughly the round count, for a batch in which most verdicts are "Watch" and will
+never be acted on. Which names are worth that is a judgement only the operator can
+make, so it is a separate command (`python refine.py TICKER`), taken deliberately,
+one ticker at a time, with a ceiling named on the command line.
+
+### I. First live runs (2026-08-01, gemini-3.6-flash)
+
+The offline test suite (`test_critic.py`) proves the parsing, spend projection, and
+banner logic behave correctly on FIXED inputs. It cannot prove the critic finds real
+defects, or that the severity scale is used honestly rather than as an excuse to
+either rubber-stamp everything or force revisions nobody needs. Three tickers, run
+for real, against `refinement.max_budget_usd: 2.00`:
+
+| Ticker | Source verdict | Rounds | Cost | Finding |
+| :--- | :--- | ---: | ---: | :--- |
+| HRB | Buy | 1, AGREE | $0.1248 | MINOR — Q3 net income +17.4% was inflated by an $84.1M one-off IRS settlement; not visible in any feed the pipeline gives its agents (`fmp_quarterly_trends` returns figures, not 10-Q narrative). |
+| LLY | Watch | 1, AGREE | $0.0959 | MINOR — "What Would Make This Wrong" named no specific quarter (`critic-instructions.md`'s "Unfalsifiable 'What Would Make This Wrong'" checklist item). |
+| FISV | Watch | 2, AGREE after 1 revision | $0.2556 | BLOCKING — cited Magic Formula ROC (136.73%) alone on a company where goodwill is 59.1% of assets; goodwill-inclusive ROIC is 9.4%, §2.F exactly. Plus 1 MATERIAL (market cap/P-E contradicted VERIFIED_FIGURES) and 2 MINOR. All four fixed in one revision; round 2 returned zero findings. |
+
+FISV is the load-bearing case: its report was written on 2026-07-24, **before** the
+"Fix analyst rubber-stamping, peer mislabelling, and seasonality blindness" prompt
+commit, and the critic rediscovered the exact class of defect that commit exists to
+prevent — without being told to look for it, from an independent read of the report
+text against VERIFIED_FIGURES.
+
+Original seed estimates (§C's `_Estimator`) were calibrated blind at $0.30 /
+$0.20 and turned out 2.4–3x too high against these five measured rounds; the config
+comment in `config.yaml`'s `refinement:` block records the recalibration
+(`seed_critique_usd: 0.15`, `seed_revision_usd: 0.12`). Not yet exercised by a live
+run: the un-agreed path (a session ending on the round/budget ceiling with
+objections still standing) — every run so far has reached AGREE within the default
+ceiling.

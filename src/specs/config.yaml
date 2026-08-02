@@ -133,6 +133,45 @@ reuse:
   enabled: true
   max_age_hours: 24
 
+# Critic refinement loop (refine.py). An INDEPENDENT critic agent — its own
+# instruction file, its own news/web-search tools, no sight of the analyst's prompt —
+# reviews a finished report and the analyst revises until the critic agrees or the
+# money runs out. A report that never reached agreement says so on its face.
+#
+# Deliberately NOT part of the pipeline and not covered by budget.per_run_usd: it
+# costs several times what producing the report cost, so it is run per ticker, on
+# purpose, on the names you are about to act on. `--max-budget` overrides the ceiling
+# for one invocation.
+#
+# The ceiling is enforced BETWEEN rounds and covers a revision plus the critique that
+# must follow it — a revision nobody reviewed would ship text carrying the previous
+# round's objections, which may already have been fixed. The rolling
+# budget.per_day_usd window still applies on top of this.
+refinement:
+  max_budget_usd: 2.00      # ~4-6 agent turns at current rates
+  max_rounds: 3             # hard stop; the budget usually binds first
+  # Cost estimates used ONLY for the first ceiling check, before either role has run
+  # once and can be measured. After round 1 they are discarded in favour of the
+  # measured cost x estimate_headroom, so they never affect a session that has got
+  # going — they only decide whether it starts. Erring high therefore costs nothing
+  # except declining a round that might just have fitted, at a very small ceiling.
+  #
+  # Calibrated against the first five live rounds (gemini-3.6-flash, 2026-08-01):
+  #   critique  HRB $0.1242 | LLY $0.0954 | FISV r1 $0.1149 | FISV r2 $0.0707
+  #   revision  FISV r1 $0.0692
+  # The original guesses (0.30 / 0.20) were 2.4-3x high, which made a ceiling under
+  # ~$0.35 refuse a review that actually costs ~$0.12. These sit ~20% above the
+  # dearest observed round of each kind. Note only ONE revision has been measured,
+  # and later-round revisions carry bigger prompts, so that one keeps more headroom.
+  seed_critique_usd: 0.15   # the critic makes tool calls, so it is the dearer role
+  seed_revision_usd: 0.12
+  estimate_headroom: 1.25   # rounds grow as findings and replies accumulate
+  # Long-term memory (critic_memory): how much of this company's review history is
+  # replayed into both agents' prompts each round. Sent twice per round, so raising
+  # it raises every round's cost — 25 findings is already a long history for one name.
+  memory_limit: 25
+  memory_max_age_days: 365
+
 tools:
   web_search:
     default_engine: "tavily"

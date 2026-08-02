@@ -86,6 +86,22 @@ this codebase that is not a third-party API.
 | `db_store_ticker_run` | `mcp_server.py:1026` | `ticker_runs` (write) | Relational row | Upsert the per-ticker index row (`ON CONFLICT (ticker, run_id) DO UPDATE`) — drives the web UI. |
 | `db_search_historical_reports` | `mcp_server.py:1063` | `final_reports` (read) | Vector cosine similarity (`<=>`) | Semantic search over stored reports. Not called anywhere in `main.py` today — available for ad hoc / future use. |
 | `db_get_sale_case` | `mcp_server.py:1107` | `agent_outputs` (read, `agent_type='SALE_CASE'`) | Raw text | Fetch the latest (or a pinned `run_id`'s) sale-condition text for `run_sell_check`. |
+| `db_get_agent_output` | `mcp_server.py:1294` | `agent_outputs` (read) | Raw text | The general form of `db_get_sale_case`, for any `agent_type`. Added for the critic loop, which needs the bear/bull cases the analyst was given. |
+| `db_get_final_report` | `mcp_server.py:1343` | `final_reports` (read) | Markdown text | Load a specific (or the latest) report for a ticker. No `analysis_key` match and no age limit — the caller named the report it wants to refine. |
+| `db_store_critic_findings` | `mcp_server.py:1394` | `critic_memory` (write) | Relational rows, one per finding | Persist one review round's findings as long-term memory. |
+| `db_record_analyst_response` | `mcp_server.py:1436` | `critic_memory` (write) | Text | Attach the analyst's FIXED/REBUTTED reply to the findings it answers. |
+| `db_resolve_critic_findings` | `mcp_server.py:1465` | `critic_memory` (write) | Status string | Settle a session's `OPEN` findings to `RESOLVED` or `UNRESOLVED`. |
+| `db_get_critic_memory` | `mcp_server.py:1495` | `critic_memory` (read) | Relational rows | Every past finding for a ticker, newest first. Retrieved by exact ticker + recency, deliberately **not** by vector similarity — see below. |
+
+### Why critic memory is not a vector search
+
+`critic_memory` is the one persistent store here that is read back into a prompt on
+every turn, and it is the one that does **not** use `pgvector`. The retrieval key is
+known exactly — this company's own review history — so semantic search would return
+approximate neighbours where an exact answer exists, and every row would carry an
+embedding call into a loop whose entire design constraint is cost.
+`db_search_historical_reports` remains the right tool for the fuzzy, cross-company
+question. See [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md).
 
 ```mermaid
 flowchart LR
