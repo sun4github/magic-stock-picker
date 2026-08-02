@@ -35,6 +35,13 @@ Phases A–C are one pipeline run. **Phase D is deliberately not part of it** �
 a separate command you point at a report you're about to act on, because it costs
 several times what producing that report cost.
 
+Two smaller commands are left off the diagram because they add no stage — they act
+on a run that already exists: **`sale_advisory.py`** regenerates one report's Phase C
+advisory (when it is missing, stale, or you want its thresholds re-anchored to
+today's figures), and **`main.py --sell-check`** tests a stored advisory's triggers
+against current data to advise Sell or Hold. Both are covered under
+[Running](#running).
+
 **Phase A — Screener.** Scans the FMP stock universe, applies Greenblatt's
 step-by-step eligibility gates — no financials, utilities, funds/REITs or foreign
 (ADR) issuers; **Return on Assets ≥ 25%**; **P/E ≥ 5**; nothing that announced
