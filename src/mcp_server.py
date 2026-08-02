@@ -720,8 +720,16 @@ def initialize_database():
             "llm_cost_usd NUMERIC(12, 6)",
             "search_cost_usd NUMERIC(12, 6)",
             "total_cost_usd NUMERIC(12, 6)",
+            # Set only by the critic refinement loop (refine.py): the run whose report
+            # this run reviewed. NULL for every ordinary pipeline run, which is also
+            # the test for "is this a refinement" — no separate flag to keep in sync.
+            # Without it the only link back to the reviewed run lived in a JSONB
+            # metadata field, which is not something the web UI can reasonably join on.
+            "refines_run_id UUID",
         ]:
             cur.execute(f"ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS {col_def}")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pipeline_runs_refines "
+                    "ON pipeline_runs(refines_run_id) WHERE refines_run_id IS NOT NULL")
 
         # Drop the provider-specific Brave columns (superseded by search_*).
         cur.execute("ALTER TABLE pipeline_runs DROP COLUMN IF EXISTS brave_requests")
@@ -796,6 +804,39 @@ def initialize_database():
         cur.execute("ALTER TABLE ticker_runs ADD COLUMN IF NOT EXISTS magic_rank INTEGER")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ticker_runs_ticker ON ticker_runs(ticker)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ticker_runs_date ON ticker_runs(run_date DESC)")
+
+        # critic_memory: the independent critic's findings, kept as LONG-TERM memory
+        # across refinement sessions (see critic_agent.py / refine.py). The analyst is
+        # shown it before every revision so a point it already conceded is not
+        # re-corrected, and the critic is shown it so a point already settled is not
+        # re-raised — that repetition is what turns a bounded feedback loop into one
+        # that burns its whole budget relitigating round 1.
+        #
+        # Deliberately NO foreign key onto pipeline_runs. Every other table here
+        # cascades away with its run, which is correct for per-run artefacts. This one
+        # is memory: if it vanished with the run it was learned from, the same fallacy
+        # would come back on the next refinement and be paid for a second time. The
+        # run ids are recorded for provenance, not as constraints.
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS critic_memory (
+                memory_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                ticker VARCHAR(10) NOT NULL,
+                source_run_id UUID,
+                refine_run_id UUID,
+                iteration INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                severity VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN',
+                finding_type VARCHAR(80),
+                title TEXT,
+                finding TEXT NOT NULL,
+                analyst_response TEXT,
+                status VARCHAR(16) NOT NULL DEFAULT 'OPEN'
+            )
+        ''')
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_critic_memory_ticker "
+                    "ON critic_memory(ticker, created_at DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_critic_memory_refine_run "
+                    "ON critic_memory(refine_run_id)")
 
         # Backfill ticker_runs from any pre-existing final_reports so the UI shows
         # historical runs. company_name is unknown for old rows (left NULL).
@@ -888,20 +929,26 @@ def get_embedding(text: str) -> List[float]:
         return [0.0] * EMBED_DIMS
 
 @mcp.tool()
-def db_create_pipeline_run(run_id: str, tickers: List[str]) -> str:
+def db_create_pipeline_run(run_id: str, tickers: List[str],
+                           refines_run_id: str = "") -> str:
     """
     Creates the parent pipeline_runs row for a batch execution. This MUST be
     called before storing any agent_outputs/final_reports, because those tables
     have a foreign key onto pipeline_runs(run_id).
+
+    `refines_run_id` is set only by the critic refinement loop, naming the run whose
+    report this one reviewed. A non-NULL value IS the marker that a run is a
+    refinement rather than an analysis — the web UI reads it to link the two and to
+    show whether the critic ended up agreeing (`status`).
     """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute('''
-            INSERT INTO pipeline_runs (run_id, status, top_30_tickers)
-            VALUES (%s, %s, %s)
+            INSERT INTO pipeline_runs (run_id, status, top_30_tickers, refines_run_id)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT (run_id) DO NOTHING
-        ''', (run_id, "RUNNING", list(tickers)))
+        ''', (run_id, "RUNNING", list(tickers), (refines_run_id or "").strip() or None))
         conn.commit()
         cur.close()
         conn.close()
@@ -1255,6 +1302,253 @@ def db_get_sale_case(ticker: str, run_id: str = "") -> str:
         })
     except Exception as e:
         return json.dumps({"error": f"Error fetching sale case for {ticker}: {str(e)}"})
+
+
+@mcp.tool()
+def db_get_agent_output(ticker: str, agent_type: str, run_id: str = "") -> str:
+    """
+    Fetch one stored agent output (BEAR_CASE, BULL_CASE, SALE_CASE, SEC_DATA,
+    QUANT_METRICS, CRITIC_REVIEW) for a ticker. With `run_id`, returns that run's
+    output; otherwise the most recent one. Returns JSON with run_id, created_at and
+    raw_content, or {"found": false}.
+
+    The general form of db_get_sale_case, added for the refinement loop, which needs
+    the bear and bull cases the analyst was actually given in order to check the
+    report's summaries of them against the originals. db_get_sale_case is left as it
+    is: --sell-check depends on its exact error-string shape.
+    """
+    try:
+        ticker = ticker.strip().upper()
+        run_id = (run_id or "").strip()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        if run_id:
+            cur.execute('''
+                SELECT run_id::text, created_at, raw_content
+                FROM agent_outputs
+                WHERE ticker = %s AND agent_type = %s AND run_id = %s
+                ORDER BY created_at DESC LIMIT 1
+            ''', (ticker, agent_type, run_id))
+        else:
+            cur.execute('''
+                SELECT run_id::text, created_at, raw_content
+                FROM agent_outputs
+                WHERE ticker = %s AND agent_type = %s
+                ORDER BY created_at DESC LIMIT 1
+            ''', (ticker, agent_type))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            return json.dumps({"found": False})
+        return json.dumps({
+            "found": True,
+            "ticker": ticker,
+            "agent_type": agent_type,
+            "run_id": row[0],
+            "created_at": row[1].isoformat() if row[1] else None,
+            "raw_content": row[2],
+        })
+    except Exception as e:
+        return json.dumps({"found": False, "error": f"Error fetching {agent_type} for {ticker}: {str(e)}"})
+
+
+@mcp.tool()
+def db_get_final_report(ticker: str, run_id: str = "") -> str:
+    """
+    Fetch a stored final report for a ticker. With `run_id`, that specific run's
+    report; otherwise the most recent one. Returns JSON with run_id, verdict,
+    markdown_report, created_at and age_hours, or {"found": false}.
+
+    Backs the refinement loop, which critiques an ALREADY-PRODUCED report rather than
+    generating one. Unlike db_find_reusable_report there is no analysis_key match and
+    no age limit: the caller has named the report it wants to refine, and refusing to
+    load a 30-hour-old one would just mean paying for a full pipeline re-run first.
+    """
+    try:
+        ticker = ticker.strip().upper()
+        run_id = (run_id or "").strip()
+        conn = get_db_connection()
+        cur = conn.cursor()
+        if run_id:
+            cur.execute('''
+                SELECT run_id::text, verdict, markdown_report, created_at,
+                       EXTRACT(EPOCH FROM (NOW() - created_at)) / 3600.0
+                FROM final_reports
+                WHERE ticker = %s AND run_id = %s
+                ORDER BY created_at DESC LIMIT 1
+            ''', (ticker, run_id))
+        else:
+            cur.execute('''
+                SELECT run_id::text, verdict, markdown_report, created_at,
+                       EXTRACT(EPOCH FROM (NOW() - created_at)) / 3600.0
+                FROM final_reports
+                WHERE ticker = %s
+                ORDER BY created_at DESC LIMIT 1
+            ''', (ticker,))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if not row:
+            return json.dumps({"found": False})
+        return json.dumps({
+            "found": True,
+            "ticker": ticker,
+            "run_id": row[0],
+            "verdict": row[1],
+            "markdown_report": row[2],
+            "created_at": row[3].isoformat() if row[3] else None,
+            "age_hours": round(float(row[4]), 1) if row[4] is not None else None,
+        })
+    except Exception as e:
+        return json.dumps({"found": False, "error": f"Error fetching final report for {ticker}: {str(e)}"})
+
+
+@mcp.tool()
+def db_store_critic_findings(ticker: str, source_run_id: str, refine_run_id: str,
+                             iteration: int, findings_json: str) -> str:
+    """
+    Store one round of critic findings as long-term memory (critic_memory).
+
+    `findings_json` is a JSON array of objects with severity / type / title /
+    finding. Rows land as status 'OPEN' and are settled later by
+    db_resolve_critic_findings once the refinement session ends, so an interrupted
+    session leaves its findings visibly unresolved rather than silently closed.
+    """
+    try:
+        findings = json.loads(findings_json) if findings_json else []
+        if not findings:
+            return f"No critic findings to store for {ticker} (round {iteration})"
+        conn = get_db_connection()
+        cur = conn.cursor()
+        for f in findings:
+            cur.execute('''
+                INSERT INTO critic_memory
+                    (ticker, source_run_id, refine_run_id, iteration, severity,
+                     finding_type, title, finding)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ''', (
+                ticker.strip().upper(),
+                (source_run_id or "").strip() or None,
+                (refine_run_id or "").strip() or None,
+                int(iteration),
+                (f.get("severity") or "UNKNOWN")[:16],
+                (f.get("type") or "")[:80] or None,
+                f.get("title"),
+                f.get("finding") or "",
+            ))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return f"Stored {len(findings)} critic finding(s) for {ticker} (round {iteration})"
+    except Exception as e:
+        logger.error(f"Error storing critic findings for {ticker}: {e}")
+        return f"Error storing critic findings: {str(e)}"
+
+
+@mcp.tool()
+def db_record_analyst_response(refine_run_id: str, ticker: str, iteration: int,
+                               response: str) -> str:
+    """
+    Attach the analyst's point-by-point reply to the findings of one review round.
+
+    Stored against the findings it answers so a later session can see not just what
+    was objected to but how it ended — a finding the analyst REBUTTED and the critic
+    accepted must not come back, and without the reply there is nothing on record to
+    say it was ever answered.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE critic_memory SET analyst_response = %s
+            WHERE refine_run_id = %s AND ticker = %s AND iteration = %s
+        ''', (response, (refine_run_id or "").strip() or None,
+              ticker.strip().upper(), int(iteration)))
+        n = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        return f"Recorded analyst response against {n} finding(s) for {ticker} (round {iteration})"
+    except Exception as e:
+        logger.error(f"Error recording analyst response for {ticker}: {e}")
+        return f"Error recording analyst response: {str(e)}"
+
+
+@mcp.tool()
+def db_resolve_critic_findings(refine_run_id: str, ticker: str, status: str) -> str:
+    """
+    Settle every still-OPEN finding from one refinement session.
+
+    'RESOLVED' when the critic agreed the final report, 'UNRESOLVED' when the session
+    ended on the budget or round ceiling with objections standing. The distinction is
+    what the next session reads: an UNRESOLVED finding is a live objection to raise
+    again, a RESOLVED one is settled and must not be.
+    """
+    try:
+        normalized = (status or "").strip().upper()
+        if normalized not in ("RESOLVED", "UNRESOLVED"):
+            normalized = "UNRESOLVED"
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE critic_memory SET status = %s
+            WHERE refine_run_id = %s AND ticker = %s AND status = 'OPEN'
+        ''', (normalized, (refine_run_id or "").strip() or None, ticker.strip().upper()))
+        n = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        return f"Marked {n} finding(s) {normalized} for {ticker}"
+    except Exception as e:
+        logger.error(f"Error resolving critic findings for {ticker}: {e}")
+        return f"Error resolving critic findings: {str(e)}"
+
+
+@mcp.tool()
+def db_get_critic_memory(ticker: str, limit: int = 25, max_age_days: int = 365) -> str:
+    """
+    Load a ticker's stored critic findings, newest first, as a JSON array.
+
+    Retrieved by exact ticker and recency rather than by vector similarity, and
+    deliberately so: the retrieval key here is known exactly (this company's own
+    review history), semantic search would return approximate neighbours where an
+    exact answer exists, and every embedded row would add an embedding call to a loop
+    whose whole design constraint is cost. `db_search_historical_reports` remains the
+    right tool for the fuzzy cross-company question.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT created_at, iteration, severity, finding_type, title, finding,
+                   analyst_response, status, refine_run_id::text, source_run_id::text
+            FROM critic_memory
+            WHERE ticker = %s AND created_at > NOW() - (%s || ' days')::interval
+            ORDER BY created_at DESC
+            LIMIT %s
+        ''', (ticker.strip().upper(), str(int(max_age_days)), int(limit)))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return json.dumps([
+            {
+                "created_at": r[0].isoformat() if r[0] else None,
+                "iteration": r[1],
+                "severity": r[2],
+                "finding_type": r[3],
+                "title": r[4],
+                "finding": r[5],
+                "analyst_response": r[6],
+                "status": r[7],
+                "refine_run_id": r[8],
+                "source_run_id": r[9],
+            }
+            for r in rows
+        ])
+    except Exception as e:
+        logger.error(f"Error loading critic memory for {ticker}: {e}")
+        return json.dumps([])
 
 
 if __name__ == "__main__":

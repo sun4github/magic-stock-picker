@@ -419,6 +419,68 @@ produced a `SALE_CASE` for the ticker.
 > than a fresh `SALE_CASE` anchored to a thesis you never acted on. The `RUN_ID` is
 > shown in the run logs. See [`src/specs/agent_architecture.md`](src/specs/agent_architecture.md) §8.D.
 
+### Independent critic review (`refine.py`)
+
+A **separate command**, not part of the pipeline. It takes a final report the
+pipeline has already produced and puts it in front of an **independent critic
+agent** — its own instructions, its own news and web-search tools, and no sight of
+how the report was written — which hunts for fallacies in the analyst's *judgement*:
+a verdict that does not follow from the report's own body, a "Buy" resting on a
+rumoured deal, a "priced in" claim with nothing behind it, a sell trigger that
+ignores the company's seasonality. The analyst then revises against those findings,
+and the critic reviews again, until **either the critic agrees or the budget runs
+out**.
+
+```bash
+python refine.py CROX                       # refine CROX's latest report
+python refine.py CROX --run <RUN_ID>        # refine a SPECIFIC run's report
+python refine.py CROX --max-budget 3.00     # raise the ceiling for this run
+python refine.py CROX --max-rounds 2        # cap the rounds instead
+```
+
+The refined report says on its face which of those two happened. If the critic
+agreed, it says so and states plainly that agreement means neither agent could find
+a fault in the argument — not that the call is right. Agreement doesn't require the
+critic to have found *nothing*: a MINOR point (worth fixing, but not serious enough
+to withhold agreement) does not trigger another paid round, so it is never silently
+dropped — it's **named in the report itself**, along with the required fix that was
+never applied, so you're reading a caveat rather than a correction already made.
+**If they never agreed, the report is stamped "the independent critic has NOT agreed
+this report"**, with the count of objections still standing, why the review stopped,
+and the critic's full final review reproduced underneath. Read that before acting on
+the verdict.
+
+> **First live runs (2026-08-01):** HRB and LLY agreed in round 1 (~$0.10–$0.12
+> each) with one MINOR finding apiece. FISV — an older report predating a prompt fix
+> for exactly this class of bug — took one revision: the critic caught the report
+> citing the Magic Formula return on capital (136.73%) alone on a company where
+> goodwill is 59.1% of assets, where the goodwill-inclusive figure is a very
+> different 9.4%. The analyst fixed it and three other findings in one pass; round 2
+> came back clean. Total cost $0.2556, verdict unchanged (Watch). See
+> [`docs/09-critic-and-refinement-loop.md`](docs/09-critic-and-refinement-loop.md#measured-behaviour-first-three-live-runs-2026-08-01-gemini-36-flash)
+> for the full findings from each run.
+
+Why it is a separate command: it costs several times what producing the report cost
+in the first place, and takes as long. Run it on the handful of names you are
+actually about to buy. The ceiling defaults to `refinement.max_budget_usd` in
+`config.yaml` ($2.00), is enforced *between* rounds, and always reserves enough for
+a revision **plus the review that must follow it** — so the report you are handed
+has always been checked as it stands. The rolling daily budget still applies on top.
+
+The refinement gets its **own** run id and its own cost row; the report it reviewed
+is left untouched, and the refined one is written to
+`src/reports/<TICKER>_Refined_Report_<Verdict>.md` alongside
+`src/reports/<TICKER>_Critic_Review.md`. It also shows up in the
+[web UI](#web-ui-report-viewer) as its own run, marked with a critic-standing chip
+and a dedicated Critic Review tab — see below.
+
+> **The critic remembers.** Every finding is stored in a `critic_memory` table and
+> replayed into both agents on later rounds *and later sessions for the same
+> company*, along with how it was settled. That is what stops the loop spending a
+> paid round relitigating a point the analyst already conceded, or reintroducing a
+> correction it made last week. See
+> [`docs/09-critic-and-refinement-loop.md`](docs/09-critic-and-refinement-loop.md).
+
 ## Running the book's strategy on a 2-month cycle
 
 Greenblatt's method is a **basket** strategy: it works across many positions held for
@@ -529,6 +591,11 @@ stored reports: pick a ticker, choose a run (by date), and view the Bear / Bull 
 Sale Advisory / Final reports with the Buy/Watch/Avoid recommendation and a markdown download.
 It's designed to run on a Raspberry Pi and connects to the same database via its
 own `.env`. See [`webapp/README.md`](webapp/README.md) for full details.
+
+A run produced by `refine.py` is marked in the run picker (✓/⚠), carries a critic
+standing chip next to its verdict badge, and gets a fifth **Critic Review** tab
+holding every round of the exchange — the Bear/Bull/Sale tabs on that run are
+borrowed from the report it reviewed rather than duplicated.
 
 ### Quick start
 

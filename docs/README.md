@@ -30,6 +30,7 @@ Come here once you need to change or extend the code.
 | [06-webapp.md](06-webapp.md) | The read-only Flask report viewer | `webapp/app.py`, `webapp/templates/index.html` |
 | [07-observability-and-logging.md](07-observability-and-logging.md) | How logging is actually wired up (three independent loggers), where each diagnostic ends up, and two verified logging quirks (duplicate console lines, CWD-relative log directory) | `src/main.py`, `src/mcp_server.py`, `src/magic_formula_starter_screener.py` |
 | [08-gates-and-validation-inventory.md](08-gates-and-validation-inventory.md) | Every validation/eligibility/integrity/resilience gate in the system, consolidated into one table by category, with fail-loud-vs-fail-open behavior called out | all of the above |
+| [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md) | Phase D: the independent critic, the analyst/critic feedback loop, its spend ceiling, and the cross-run critic memory that keeps it from relitigating settled points | `src/critic_agent.py`, `src/refine.py`, `src/critic-instructions.md` |
 
 ## What is *not* in the runtime path
 
@@ -54,6 +55,8 @@ not. Put anything similar there rather than in `src/`.
 6. **07** and **08** are reference material, not narrative — read them when
    you need to know where a specific diagnostic ends up, or want the full
    list of every gate in the system in one place.
+7. **09** when you need the opt-in critic loop (`python refine.py TICKER`) —
+   it sits entirely outside the pipeline and nothing in **01**–**08** calls it.
 
 ## Conventions used in these docs
 
@@ -64,4 +67,6 @@ not. Put anything similar there rather than in `src/`.
 - Diagrams are [Mermaid](https://mermaid.js.org/); they render directly in
   GitHub and most Markdown viewers.
 - "Phase A/B/C" match the terms used in `agent_architecture.md`: A = screener,
-  B = bear/bull/analyst reasoning, C = sale advisor.
+  B = bear/bull/analyst reasoning, C = sale advisor. "Phase D" is the critic
+  refinement loop — opt-in, run per ticker from its own entry point
+  (`refine.py`), never as part of a pipeline run.

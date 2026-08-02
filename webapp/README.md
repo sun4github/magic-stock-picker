@@ -12,11 +12,32 @@ It offers **two ways to browse the same reports**, switchable at the top of the 
 
 1. Pick a **ticker** — an alphabetical dropdown / type-ahead text box (any ticker
    that has at least one analysis run).
-2. Pick a **pipeline run** — sorted newest-first, with the run date shown.
+2. Pick a **pipeline run** — sorted newest-first, with the run date shown. A run
+   produced by `refine.py` (see below) is marked here — **✓ critic-reviewed** or
+   **⚠ critic did NOT agree** — before you click into it.
 3. View the **Bear Case**, **Bull Case**, **Sale Advisory**, and **Final Report**
    for that run, rendered as markdown, with the **recommendation** (Buy / Watch /
    Avoid) badge.
 4. **Download** any report as a `.md` file to the viewing device.
+
+### Critic-reviewed runs
+
+Some runs come from `python refine.py TICKER` (the repo root README documents the
+command) rather than from the pipeline: an independent critic agent reviews an
+already-produced report and the analyst revises against its findings until they
+agree or the budget runs out. Those runs get two things an ordinary run doesn't:
+
+- A **standing chip** next to the verdict badge — green "✓ critic agreed · N
+  round(s)" or amber "⚠ critic did NOT agree · N round(s)" — so you know at a
+  glance whether the report was checked and how that went, without opening the
+  fifth tab.
+- A fifth tab, **Critic Review**, listing every round of the exchange oldest-first.
+  This is the only place the *full* back-and-forth is visible — the stored Final
+  Report carries only the critic's last review, and only when they never agreed.
+
+A critic-reviewed run's Bear/Bull/Sale tabs are usually **borrowed** from the run
+it reviewed (stamped "From the reviewed run …") rather than duplicated, since
+`refine.py` critiques an existing report without re-running that research.
 
 ### Browse by pipeline run
 

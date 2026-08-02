@@ -55,6 +55,16 @@
     }
     .badge.buy { background: var(--buy); } .badge.watch { background: var(--watch); }
     .badge.avoid { background: var(--avoid); } .badge.na { background: var(--muted); }
+    /* Critic standing sits NEXT TO the verdict, not inside it: an un-agreed report
+       still has a verdict, and the reader needs to see both at once. Outlined rather
+       than filled so it reads as a qualifier on the verdict, not a second verdict. */
+    .critic-chip {
+      display: none; align-items: center; gap: 5px; font-size: 0.75rem; font-weight: 600;
+      padding: 3px 10px; border-radius: 999px; border: 1px solid currentColor;
+    }
+    .critic-chip.show { display: inline-flex; }
+    .critic-chip.agreed { color: var(--buy); }
+    .critic-chip.not_agreed { color: var(--watch); }
     .verdict-row { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; min-height: 30px; }
     .verdict-row .label { color: var(--muted); font-size: 0.85rem; }
     .tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 0; flex-wrap: wrap; }
@@ -391,6 +401,7 @@
       <div class="verdict-row">
         <span class="label">Recommendation:</span>
         <span id="verdict" class="badge na">—</span>
+        <span id="criticChip" class="critic-chip"></span>
         <span id="ticmeta" class="muted"></span>
         <span id="runmeta" class="muted"></span>
       </div>
@@ -399,6 +410,9 @@
         <button class="tab" data-kind="bull">Bull Case</button>
         <button class="tab" data-kind="bear">Bear Case</button>
         <button class="tab" data-kind="sale">Sale Advisory</button>
+        <!-- Hidden unless this run actually has critic reviews, so an ordinary
+             analysis run does not show a permanently empty tab. -->
+        <button class="tab" data-kind="critic" id="criticTab" style="display:none;">Critic Review</button>
       </div>
       <div class="panel">
         <div class="panel-actions">
@@ -460,7 +474,14 @@
         const o = document.createElement("option");
         o.value = r.run_id;
         o.dataset.date = r.run_date || "";
-        o.textContent = fmtDate(r.run_date) + "  —  " + (r.verdict || "—") + "  [" + shortId(r.run_id) + "]";
+        // A refinement is the NEWEST run for its ticker, so it is what this picker
+        // selects by default. Marking it here means the reader knows what they are
+        // looking at before the click, not after.
+        const mark = r.critic_status === "agreed" ? "  ✓ critic-reviewed"
+                   : r.critic_status === "not_agreed" ? "  ⚠ critic did NOT agree"
+                   : "";
+        o.textContent = fmtDate(r.run_date) + "  —  " + (r.verdict || "—") +
+          "  [" + shortId(r.run_id) + "]" + mark;
         sel.appendChild(o);
       });
       sel.disabled = false;
@@ -487,6 +508,7 @@
       // In run mode the run is fixed; lead with the ticker. In ticker mode, lead with the run date.
       $("ticmeta").textContent = state.mode === "run" ? "· " + ticker : "";
       $("runmeta").textContent = runDate ? "· run " + fmtDate(runDate) : "";
+      renderCriticStanding();
       $("backRow").style.display = state.mode === "run" ? "block" : "none";
       state.kind = "final";
       document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.kind === "final"));
@@ -497,9 +519,36 @@
       renderTab();
     }
 
+    // Show the critic tab and the standing chip only for runs that actually went
+    // through review. An ordinary analysis run has neither, and dressing it with an
+    // empty tab would suggest a review happened and found nothing.
+    function renderCriticStanding() {
+      const d = state.data || {};
+      const tab = $("criticTab");
+      tab.style.display = d.has_critic ? "" : "none";
+      // No need to guard state.kind here: loadReport resets it to "final" on every
+      // report load, so switching from a refinement to an ordinary run cannot leave
+      // the viewer parked on a tab that is now hidden.
+      const chip = $("criticChip");
+      const status = d.critic_status;
+      if (!status) { chip.className = "critic-chip"; chip.textContent = ""; return; }
+      const rounds = d.critic_rounds || 0;
+      const laps = rounds + (rounds === 1 ? " round" : " rounds");
+      chip.className = "critic-chip show " + status;
+      chip.textContent = status === "agreed"
+        ? "✓ critic agreed · " + laps
+        : "⚠ critic did NOT agree · " + laps;
+      chip.title = status === "agreed"
+        ? "An independent critic agent reviewed this report and records no blocking or "
+          + "material objection. That is not a promise the call is right."
+        : "An independent critic agent reviewed this report and its objections were "
+          + "still standing when the review stopped. Read the Critic Review tab before acting.";
+    }
+
     function renderTab() {
       if (!state.data) return;
-      const map = { final: "final_html", bull: "bull_html", bear: "bear_html", sale: "sale_html" };
+      const map = { final: "final_html", bull: "bull_html", bear: "bear_html",
+                    sale: "sale_html", critic: "critic_html" };
       $("content").innerHTML = state.data[map[state.kind]] || "<p class='muted'>Not available.</p>";
       $("download").href = "/download?ticker=" + encodeURIComponent(state.ticker) +
         "&run_id=" + encodeURIComponent(state.runId) + "&kind=" + state.kind;
