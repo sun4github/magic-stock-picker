@@ -53,6 +53,7 @@ from datetime import datetime, timezone
 
 import main
 import critic_agent
+import buy_case_agent
 from critic_agent import (
     critic_agent as critic,
     reviser_agent,
@@ -96,6 +97,15 @@ MEMORY_LIMIT = int(_cfg.get("memory_limit", 25))
 MEMORY_MAX_AGE_DAYS = int(_cfg.get("memory_max_age_days", 365))
 REGENERATE_SALE_ADVISORY = bool(_cfg.get("regenerate_sale_advisory", True))
 SEED_ADVISORY_USD = float(_cfg.get("seed_advisory_usd", 0.12))
+# The buy case is the same shape of problem as the sale advisory, one artefact along:
+# it is derived FROM the report, the critic never sees it, and a revision leaves it
+# describing a thesis that no longer exists. The one difference is that it is
+# conditional — only a report that ENDS on 'Watch' has one — so the reservation below
+# is held for every session even though roughly half of them will not spend it. That
+# is the safe direction: the alternative is discovering after the revision that the
+# verdict landed on Watch and the money for its buy case was never set aside.
+REGENERATE_BUY_CASE = bool(_cfg.get("regenerate_buy_case", True))
+SEED_BUY_CASE_USD = float(_cfg.get("seed_buy_case_usd", 0.18))
 
 # Sections this tool appends to a report itself. Stripped before a report re-enters
 # the loop so refining a refined report does not nest one critic section inside
@@ -200,6 +210,13 @@ class _Estimator:
         # refinement, so there is nothing to learn from. The seed carries the
         # headroom instead (0.12 against a measured 0.072-0.095).
         self.advisory = SEED_ADVISORY_USD if REGENERATE_SALE_ADVISORY else 0.0
+        # Same reasoning, and reserved unconditionally for the reason given at
+        # SEED_BUY_CASE_USD: whether it will be needed is only known once the revised
+        # report's verdict is read, which is after the money would have had to be set
+        # aside. It is the dearer of the two — the buy-case advisor makes more tool
+        # calls (forward estimates, the earnings calendar for the subject and for
+        # every company it names, segments, M&A filings).
+        self.buy_case = SEED_BUY_CASE_USD if REGENERATE_BUY_CASE else 0.0
 
     def observe(self, role: str, usd: float) -> None:
         if usd <= 0:
@@ -209,7 +226,8 @@ class _Estimator:
     @property
     def full_round(self) -> float:
         """Everything a revision commits the session to: the revision, the critique
-        that must follow it, and the sale advisory it will invalidate.
+        that must follow it, and the two derived documents it will invalidate — the
+        sale advisory and, when the verdict lands on Watch, the buy case.
 
         **The critique, always.** Shipping a revision nobody reviewed would attach the
         PREVIOUS round's critique to text that no longer says what the critique
@@ -227,8 +245,15 @@ class _Estimator:
         only ever binds in the session that is about to need it: no revision has been
         committed to before this check, so a run that agrees first time never pays
         the reservation.
+
+        **The buy case, whenever the feature is on.** Identical argument, with one
+        wrinkle: it is only written when the revised report ends on 'Watch', and that
+        is not knowable until the revision exists. Reserving conditionally is
+        therefore impossible, so it is reserved unconditionally and the ceiling was
+        raised to absorb it (see `refinement.max_budget_usd` in config.yaml). A
+        session whose verdict lands on Buy or Avoid simply does not spend it.
         """
-        return self.revision + self.critique + self.advisory
+        return self.revision + self.critique + self.advisory + self.buy_case
 
 
 def _affordable(spent: float, need: float, ceiling: float, prior_day: float) -> str:
@@ -466,6 +491,162 @@ def _refresh_sale_advisory(ticker: str, company_name: str, src_run: str,
     return main._with_run_header(stamped, refine_run_id, ticker), origin
 
 
+# --- The buy case ---------------------------------------------------------------
+# Everything said above about the sale advisory applies here, plus one thing that does
+# not apply there: this document exists ONLY for a 'Watch', so a review can create the
+# need for one where there was none (Buy -> Watch), and can destroy the need for one
+# that exists (Watch -> Buy or Avoid). Those two transitions are the whole reason this
+# cannot be a copy of `_refresh_sale_advisory` with the nouns changed.
+_BUY_CASE_NOTE = {
+    "carried": (
+        "> **Carried over from run `{src}`, unchanged.** The independent critic review "
+        "made no revision to the report this buy case was derived from, so it applies "
+        "to the refined report exactly as it did to the original. Its price range is "
+        "still anchored to the price on the day it was written — check that before "
+        "acting on it.\n\n"
+    ),
+    "regenerated": (
+        "> **Re-derived after independent critic review.** The review changed the "
+        "report this buy case rests on, so its triggers were rewritten against the "
+        "revised text and re-anchored to the current price. The buy case itself was "
+        "not critiqued.\n\n"
+    ),
+    "created": (
+        "> **Written after independent critic review.** The reviewed run had no buy "
+        "case — either the review moved the verdict to 'Watch', or none was written "
+        "at the time — so this one was derived from the refined report.\n\n"
+    ),
+    "carried_stale": (
+        "> **Carried over from run `{src}` — and it may be out of date.** The critic "
+        "review revised the report this buy case was derived from, but there was not "
+        "enough budget left to re-derive it. Its triggers, and especially its price "
+        "range, were written against the report as it stood BEFORE the review. Check "
+        "them against the refined report above before acting on them.\n\n"
+    ),
+}
+
+
+def _refresh_buy_case(ticker: str, company_name: str, src_run: str, refine_run_id: str,
+                      report_body: str, verified_figures: str, quarterly_data: str,
+                      candidate: dict, verdict: str, revised: bool, usage: dict,
+                      spent: float, ceiling: float, prior_day: float,
+                      price: dict = None) -> str:
+    """Give the refinement run its buy case, if the refined report has earned one.
+
+    Returns the origin ('regenerated', 'created', 'carried', 'carried_stale', 'none'),
+    having already stored whatever it decided on. Storing here rather than returning
+    text for the caller to store keeps the four outcomes' bookkeeping in one place —
+    two of them write a freshly generated document through `buy_case_agent`, and two
+    write a carried one with a warning label.
+
+    The decision table, verdict first:
+
+    | Refined verdict | Reviewed run had a buy case | What happens |
+    | :--- | :--- | :--- |
+    | not Watch | either | nothing is written; if one existed it is left behind with its run, where it still correctly describes that report |
+    | Watch | no | one is WRITTEN — the review either moved the verdict onto Watch or repaired a gap |
+    | Watch | yes, and a revision ran | re-derived against the revised text |
+    | Watch | yes, no revision ran | carried forward unchanged, for $0 |
+
+    Carrying forward is not tidiness. `_with_run_header` stamps the refinement's
+    run_id on the refined report and tells the reader that is the id to record; a
+    refinement that left no BUY_CASE under its own id would make
+    `--buy-check TICKER --run <that id>` fail outright.
+    """
+    if not REGENERATE_BUY_CASE:
+        logger.info(f"[{ticker}] Buy case left untouched "
+                    f"(refinement.regenerate_buy_case is false).")
+        return "none"
+
+    try:
+        prior = json.loads(db_get_agent_output(ticker, buy_case_agent.BUY_CASE_TYPE, src_run))
+    except Exception as e:
+        logger.warning(f"[{ticker}] Could not load the reviewed run's buy case: {e}")
+        prior = {"found": False}
+    prior_text = prior.get("raw_content") or "" if prior.get("found") else ""
+
+    if not buy_case_agent.is_watch(verdict):
+        # Not an omission, and worth saying out loud: a reader who saw a buy case on
+        # the reviewed run and none on the refinement should be told the review is
+        # the reason, not a failure.
+        if prior_text:
+            logger.info(
+                f"[{ticker}] The review moved the verdict to {verdict}, so this run "
+                f"gets no buy case. The one on run {src_run[:8]} still describes that "
+                f"report and is left where it is; it no longer describes this one."
+            )
+        else:
+            logger.info(f"[{ticker}] Verdict is {verdict}, not Watch — no buy case.")
+        return "none"
+
+    # From here the refined report is a Watch, so it should end this session with a
+    # buy case under the refinement's run id one way or another.
+    if not revised and prior_text:
+        origin, text = "carried", prior_text
+    else:
+        blocked = _affordable(spent, SEED_BUY_CASE_USD, ceiling, prior_day)
+        if blocked:
+            # Defensive, and expected never to fire: `_Estimator.full_round` reserves
+            # this before committing to the revision. Reaching here means the buy case
+            # costs materially more than its seed, or the rolling daily ceiling moved
+            # underneath the session. Shipping the old one silently would be the worst
+            # outcome available — its price range predates the revision — so it is
+            # carried with a visible warning, or omitted if there is nothing to carry.
+            logger.warning(
+                f"[{ticker}] The refined report is a Watch but its buy case cannot be "
+                f"derived: {blocked}. (The reservation in _Estimator.full_round should "
+                f"normally prevent this — worth investigating if it recurs.)"
+            )
+            if not prior_text:
+                logger.warning(f"[{ticker}] Nothing to carry forward either, so this "
+                               f"run has no buy case. Repair it with "
+                               f"`python buy_case.py {ticker} --run {refine_run_id}`.")
+                return "none"
+            origin, text = "carried_stale", prior_text
+        else:
+            origin = "regenerated" if prior_text else "created"
+            if origin == "created":
+                logger.info(f"[{ticker}] The refined report is a Watch and the "
+                            f"reviewed run had no buy case — writing one.")
+            stored = buy_case_agent.write_buy_case(
+                refine_run_id, ticker, company_name, report_body, verified_figures,
+                quarterly_data, candidate, usage,
+                origin_note=_BUY_CASE_NOTE[origin],
+                metadata={"origin": f"refinement_{origin}", "source_run_id": src_run,
+                          "report_revised": revised, "verdict": verdict},
+                price_data=buy_case_agent.price_data_block(ticker, price),
+            )
+            if stored:
+                return origin
+            # The generator produced nothing. Fall back to the carried text rather
+            # than leaving the run with no buy case at all.
+            if not prior_text:
+                return "none"
+            origin, text = "carried_stale", prior_text
+
+    # The carried paths. Strip any banner or note the text already has, so notes do
+    # not stack up across successive refinements of the same ticker.
+    body = _RUN_BANNER_RE.sub("", text, count=1).lstrip()
+    for note in _BUY_CASE_NOTE.values():
+        marker = note.split("**")[1]
+        if body.startswith("> **" + marker):
+            body = body.split("\n\n", 1)[-1]
+    stamped = main._with_run_header(
+        _BUY_CASE_NOTE[origin].format(src=src_run) + body, refine_run_id, ticker)
+    main._check_db(
+        db_store_agent_output(
+            refine_run_id, ticker, buy_case_agent.BUY_CASE_TYPE, stamped,
+            json.dumps({"ticker": ticker, "origin": f"refinement_{origin}",
+                        "source_run_id": src_run, "report_revised": revised,
+                        "verdict": verdict}),
+        ),
+        f"{ticker} buy case ({origin})",
+    )
+    with open(os.path.join("reports", f"{ticker}_Buy_Case.md"), "w", encoding="utf-8") as f:
+        f.write(stamped)
+    return origin
+
+
 def _demote_headings(markdown: str, levels: int = 2) -> str:
     """Push every heading down `levels` so an inlined document nests correctly.
 
@@ -479,9 +660,19 @@ def _demote_headings(markdown: str, levels: int = 2) -> str:
 
 
 def _assemble(candidate: dict, report_body: str, recon_findings: list,
-              critic_section: str, final_review: str, agreed: bool) -> str:
-    """Deterministic sections + the analyst's prose + the critic's standing."""
+              critic_section: str, final_review: str, agreed: bool,
+              price: dict = None, ticker: str = "") -> str:
+    """Deterministic sections + the analyst's prose + the critic's standing.
+
+    The price section is re-rendered from a quote taken at REVIEW time, not copied
+    from the report under review. That is the same choice `_load_candidate` makes for
+    the figures and for the same reason: a refined report is a document about today,
+    and the price at the top of it should be the one the critic's objections were
+    weighed against — not the one from the run being reviewed, which may be days old.
+    """
     parts = [
+        main._format_price_section(price or {}, ticker),
+        "",
         main._format_magic_formula_section(candidate),
         "",
         report_body,
@@ -548,12 +739,30 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     # 2. Everything the two agents read, gathered without an LLM in the loop.
     candidate = _load_candidate(ticker)
     quarterly_data = fmp_quarterly_trends(ticker)
-    verified_figures = main._format_verified_figures(candidate)
+    # One quote for the whole session: the critic and the reviser argue against the
+    # same price the refined report will print at the top, and the buy case (if the
+    # verdict lands on Watch) sets its triggers against that one too.
+    price = main._price_snapshot(ticker)
+    verified_figures = main._format_verified_figures(candidate, price)
     screen_context = (
         main._format_screen_context(candidate) if candidate.get("ROC_Pct")
         else ("Magic Formula ROC / Earnings Yield could not be recomputed for this "
               "ticker at review time, so no value/quality signal is available to "
               "check the report's use of one against.")
+    )
+    # How old the report is, in the agents' own words. Both of them are shown figures
+    # recomputed TODAY next to prose written days ago, and without this they cannot
+    # tell a stale price from a wrong one — the critic raises "the market cap is not
+    # $164B" as a factual error and the reviser dutifully edits a number that was
+    # correct when written. See the market-derived-figure rules in critic_agent.py.
+    _age = source.get("age_hours")
+    report_vintage = (
+        f"The report under review was written on {(source.get('created_at') or '')[:16]}"
+        f"{f' — about {_age:.0f} hours ago' if isinstance(_age, (int, float)) else ''}. "
+        f"The VERIFIED_FIGURES, the quarterly data and any price shown to you were "
+        f"computed TODAY ({datetime.now().strftime('%Y-%m-%d')}). Balance-sheet figures "
+        f"will normally be identical across that gap; market prices and everything "
+        f"derived from them will not be."
     )
     bear_data = _load_source_case(ticker, src_run, "BEAR_CASE")
     bull_data = _load_source_case(ticker, src_run, "BULL_CASE")
@@ -617,6 +826,7 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
         state = {
             "ticker": ticker,
             "company_name": company_name,
+            "report_vintage": report_vintage,
             "screen_context": screen_context,
             "verified_figures": verified_figures,
             "quarterly_data": quarterly_data,
@@ -767,12 +977,27 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
         main._finalize_run(refine_run_id, usage, "Refinement Run", status="FAILED")
         return
 
+    # The verdict of the report as it now stands. Read before the derived documents
+    # below rather than after, because one of them — the buy case — exists only for a
+    # 'Watch' and a review is entirely capable of moving the verdict onto or off it.
+    verdict = main._extract_verdict(report_body)
+
     # 4a. Give this run its own sale advisory — re-derived if the report changed,
     # carried forward if it did not. See _refresh_sale_advisory for why both cases
     # matter and why leaving it absent broke `--sell-check --run`.
     sale_data, sale_origin = _refresh_sale_advisory(
         ticker, company_name, src_run, refine_run_id, report_body, verified_figures,
         quarterly_data, revised, usage, review_cost, ceiling, prior_day_usd,
+    )
+
+    # 4b. And its buy case, on the same principle and with one extra condition: only
+    # a report that ENDS on 'Watch' gets one. Spend so far is re-read from `usage`
+    # rather than reusing `review_cost`, so the advisory just written is counted
+    # against the ceiling this check applies.
+    buy_origin = _refresh_buy_case(
+        ticker, company_name, src_run, refine_run_id, report_body, verified_figures,
+        quarterly_data, candidate, verdict, revised, usage,
+        main._total_cost(usage), ceiling, prior_day_usd, price,
     )
 
     recon_findings = []
@@ -782,9 +1007,7 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     if recon_findings:
         for f in recon_findings:
             logger.warning(
-                f"[{ticker}] RECONCILIATION: {f['source']} states {f['field']} of "
-                f"{main.format_money(f['stated'])}, but the filings show "
-                f"{main.format_money(f['verified'])} (off by {f['deviation_pct']}%)."
+                main.reconciliation_warning(ticker, f)
             )
     else:
         logger.info(f"[{ticker}] Reconciliation gate passed on the refined report.")
@@ -793,9 +1016,9 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
         _agreed_banner(rounds_done, review_cost, final_findings) if agreed
         else _not_agreed_banner(rounds_done, review_cost, final_findings, stop_reason)
     )
-    verdict = main._extract_verdict(report_body)
     report_stored = main._with_run_header(
-        _assemble(candidate, report_body, recon_findings, critic_section, final_review, agreed),
+        _assemble(candidate, report_body, recon_findings, critic_section, final_review,
+                  agreed, price, ticker),
         refine_run_id, ticker,
     )
 
@@ -806,7 +1029,8 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
                    f"{ticker} refined report")
     main._check_db(
         db_store_ticker_run(refine_run_id, ticker, company_name, verdict,
-                            main._present(candidate.get("Final_Rank"))),
+                            main._present(candidate.get("Final_Rank")),
+                            price.get("price"), price.get("as_of")),
         f"{ticker} ticker_run (refinement)",
     )
     main._check_db(
@@ -839,12 +1063,16 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     status = "COMPLETED" if agreed else ("BUDGET_EXCEEDED" if "ceiling" in stop_reason
                                          else "NOT_AGREED")
     verdict_moved = (source.get("verdict") or "").upper() != verdict.upper()
+    # The two derived documents are named in the closing line because a refinement is
+    # usually run one ticker at a time and read immediately: 'buy case regenerated' is
+    # the difference between `--buy-check --run <this id>` working and not.
+    derived = f"Sale advisory: {sale_origin}. Buy case: {buy_origin}."
     logger.info(
         f"[{ticker}] Refinement finished after {rounds_done} round(s): "
         f"{'AGREED' if agreed else 'NOT AGREED'} ({stop_reason}). "
         f"Verdict {source.get('verdict')} -> {verdict}"
         f"{' (CHANGED by review)' if verdict_moved else ' (unchanged)'}. "
-        f"Saved to {report_path}."
+        f"{derived} Saved to {report_path}."
     )
     main._finalize_run(refine_run_id, usage, "Refinement Run", status=status)
 

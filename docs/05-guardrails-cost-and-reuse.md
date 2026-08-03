@@ -38,12 +38,40 @@ calculation disagrees with.
   `LiveMarketCap`, `EBIT`, `CapitalEmployed`) as a plain `{field: float}` dict.
   This same dict is what the reconciliation gate (below) checks agent prose
   against.
-- `_format_verified_figures(candidate)` (`main.py:1365`) renders it as
+- `_format_verified_figures(candidate, price=None)` (`main.py:1365`) renders it as
   prose for the `VERIFIED_FIGURES` prompt block, including Lynch's P/E,
   growth rate and PEG (spec §10) and the ROC vs.
   goodwill-inclusive-ROIC pairing (§2.F in the spec) and the ROA fallback
   note when ROIC can't be computed (negative invested capital from heavy
   buybacks).
+- **The live share price is the one entry here that is not a filing figure**, and it
+  is included anyway, labelled as live and stamped with its time. Without it each
+  agent reached for a price of its own from news or recollection, and a single report
+  could discuss the stock at two different prices in two sections. `price` is
+  optional so callers with no quote to hand are unaffected.
+
+### The price snapshot, `main.py:_price_snapshot` / `_format_price_section`
+
+Reports used to state valuation only in market capitalisation and enterprise value —
+the right units for the Magic Formula's arithmetic, the wrong ones for a reader, who
+wants to know what a share costs. The price was in the screener CSV (`Live_Price`)
+all along and never reached the report.
+
+It is fetched with `fmp_price_snapshot` rather than read from the candidate, because
+**the two candidate shapes disagree**: the screener CSV carries `Live_Price` and
+`compute_ticker_magic_metrics` carries no price at all, so a candidate-sourced price
+would print "Not available" on exactly the on-demand single-ticker runs that get read
+most closely — §2.I again.
+
+One quote per ticker is fetched in `analyze_ticker` (and per session in `refine.py`)
+and passed to all three consumers: the `## Price` table that now opens every stored
+report, the `VERIFIED_FIGURES` line above, and the buy case's `PRICE_DATA`. Sharing
+the dict rather than re-fetching is what guarantees the price printed on the report
+and the price its buy triggers are measured against are the same number.
+
+Both renderings fail open: a missing quote produces a section that says the price
+could not be retrieved and why it does not affect the ratios, never a blank or a
+fabricated figure.
 
 ## 3. Reconciliation gate, `main.py:1422-1698`
 
@@ -90,6 +118,26 @@ basis," never "everything in this report is true." Regression tests:
 [`src/test_reconciliation.py`](../src/test_reconciliation.py) (38 cases from
 real FISV/VICR/SOLV runs, offline, no API keys).
 
+### Not every verified figure comes from a filing
+
+The gate checks two kinds of number and used to describe both as "the filings show X":
+
+| Basis | Fields | Moves? | A disagreement means |
+| :--- | :--- | :--- | :--- |
+| `filings` | total debt, cash | No — fixed until the next filing | The report is **wrong** |
+| `market price` | market capitalisation, enterprise value | Yes — every session | Possibly just **time**, if the report is older than the check |
+
+That mattered most where the gate is least trustworthy: `refine.py`,
+`sale_advisory.py` and `buy_case.py` all re-check a report against figures recomputed
+**today**, so a market figure is *expected* to have moved. `_finding_basis` tags each
+finding, `reconciliation_warning` phrases the log line accordingly (one function
+replacing four near-identical f-strings — that duplication is how the misleading
+wording came to be in four places at once), and the report's warning table carries a
+**Basis** column plus a note explaining what a `market price` row does and does not
+imply. It is the same distinction the critic is given in `critic_agent.py`, in the
+other place a stale price can be mistaken for a wrong one — see
+[09](09-critic-and-refinement-loop.md).
+
 ## 4. Budget guard, `main.py:594-618` (`_check_budget`)
 
 Checked **between tickers**, never mid-ticker (a partial ticker is still
@@ -106,8 +154,8 @@ analyzed. `--no-budget` disables the guard for one invocation
 
 ```mermaid
 flowchart LR
-    T["_prompt_version()\nmain.py:627\nsha256 of every agent instruction\n+ shared prompt fragments"] --> K
-    B["candidate.BalanceSheetDate"] --> K["_analysis_key()\nmain.py:638\nsha256(ticker | bs_date | prompt_version\n[+ '|no-phase-c' if --skip-sale-advisor])"]
+    T["_prompt_version()\nmain.py:627\nsha256 of every agent instruction\n+ shared prompt fragments\n+ buy-case-instructions.md"] --> K
+    B["candidate.BalanceSheetDate"] --> K["_analysis_key()\nmain.py:638\nsha256(ticker | bs_date | prompt_version\n[+ '|no-phase-c'] [+ '|no-buy-case'])"]
     K --> Lookup["db_find_reusable_report(ticker, key, max_age_hours)"]
     Lookup -->|found & fresh| Copy["db_copy_ticker_outputs()\nzero LLM calls, ~$0"]
     Lookup -->|not found / stale| Fresh["run the full agent graph"]
@@ -116,18 +164,28 @@ flowchart LR
 - `_prompt_version()` (`main.py:627`) hashes every `PIPELINE_AGENTS` agent's
   `instruction` plus the shared fragments — editing any prompt invalidates
   reuse for everyone, rather than silently serving reports written under old
-  rules.
-- `_analysis_key(ticker, candidate, skip_sale_advisor)` (`main.py:638`)
+  rules. It also folds in `_DOWNSTREAM_PROMPTS`, which is
+  `buy-case-instructions.md` read **from disk at import**: the Phase E agent lives in
+  `buy_case_agent.py`, which imports `main`, so `main` cannot reach the agent object
+  at load time — but the file is what actually changes when the prompt is tuned, and
+  a reused report carries the buy case copied alongside it.
+  `buy-check-instructions.md` is deliberately excluded: nothing that command produces
+  is stored under a reuse key.
+- `_analysis_key(ticker, candidate, skip_sale_advisor, skip_buy_case)` (`main.py:638`)
   fingerprints on the **balance-sheet date**, not today's date — two runs a
-  day apart against the same filing are the same analysis. `skip_sale_advisor`
-  is folded into the key so a cheap Phase-B-only report is never reused to
-  satisfy a request for a full Phase-B+C report (or vice versa). Returns
+  day apart against the same filing are the same analysis. Both skip flags are
+  folded into the key so a cheap report is never reused to satisfy a request for a
+  fuller one (or vice versa) — four distinct variants. Note the asymmetry with Phase
+  C: a run *without* `--skip-buy-case` still writes no buy case unless the verdict
+  lands on `Watch`, which is a property of the analysis rather than of the flag, so
+  the variants differ only in what was **asked for**. Returns
   `""` (disabling reuse) when the balance-sheet date is unknown.
 - Reuse is checked at the top of `analyze_ticker` (`main.py:1119-1151`),
   before any billed work — a hit costs one DB read plus a row copy, a miss
   costs nothing extra. `reuse.enabled`/`reuse.max_age_hours` in `config.yaml`;
   `--force` bypasses the check entirely regardless of config.
-- Regression tests: [`src/test_guards.py`](../src/test_guards.py).
+- Regression tests: [`src/test_guards.py`](../src/test_guards.py), and
+  [`src/test_buy_case.py`](../src/test_buy_case.py) for the four skip variants.
 
 ## 6. Cost accounting, `main.py:664-877`
 

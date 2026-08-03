@@ -17,9 +17,9 @@ to — the only thing the two processes share.
 | `GET /api/runs?ticker=` | `:78` | `ticker_runs` ⋈ `pipeline_runs` | One ticker's runs, newest first, with `verdict`. The join supplies `refines_run_id`/`critic_status` so a critic refinement is marked **in the picker** — it is the newest run for its ticker, so it is what the picker selects by default and the distinction has to be visible before the click. |
 | `GET /api/pipeline-runs` | `:101` | `ticker_runs` (`GROUP BY run_id HAVING COUNT(*) > 1`) | Multi-ticker runs only — single-ticker on-demand runs are excluded here by design (browse those "by ticker" instead). |
 | `GET /api/pipeline-run?run_id=` | `:168` | `ticker_runs` | All tickers in one run, ordered Buy→Watch→Avoid then by `magic_rank` (SQL `CASE`, `_VERDICT_ORDER_SQL` at `:137`) — the ordering lives in SQL so the on-screen list and the CSV download can't drift apart. |
-| `GET /download-run?run_id=` | `:184` | `ticker_runs` (via `_fetch_run_tickers`, `:147`) | Same rows, same order, as a `.csv` attachment. |
-| `GET /api/report?ticker=&run_id=` | `:315` | `agent_outputs` (`BEAR_CASE`/`BULL_CASE`/`SALE_CASE`/`CRITIC_REVIEW`) + `final_reports` + `pipeline_runs` | Raw markdown rendered server-side to HTML (`render_md`, `:41`, via `python-markdown` with `extra`+`sane_lists` extensions) — trusted pipeline output, so no sanitization is applied. Also returns `critic_status` / `critic_rounds` / `source_run_id`. |
-| `GET /download?ticker=&run_id=&kind=` | `:338` | same as above | Raw markdown (not HTML) as a `.md` attachment, `kind` ∈ `bear`/`bull`/`sale`/`critic`/`final`. |
+| `GET /download-run?run_id=` | `:184` | `ticker_runs` (via `_fetch_run_tickers`, `:147`) | Same rows, same order, as a `.csv` attachment. Carries `SharePriceAtAnalysis` and `PriceAsOf` alongside the verdict and rank. |
+| `GET /api/report?ticker=&run_id=` | `:315` | `agent_outputs` (`BEAR_CASE`/`BULL_CASE`/`SALE_CASE`/`BUY_CASE`/`CRITIC_REVIEW`) + `final_reports` + `pipeline_runs` | Raw markdown rendered server-side to HTML (`render_md`, `:41`, via `python-markdown` with `extra`+`sane_lists` extensions) — trusted pipeline output, so no sanitization is applied. Also returns `critic_status` / `critic_rounds` / `source_run_id`. |
+| `GET /download?ticker=&run_id=&kind=` | `:338` | same as above | Raw markdown (not HTML) as a `.md` attachment, `kind` ∈ `bear`/`bull`/`sale`/`buy`/`critic`/`final`. |
 
 > **A run can hold more than one row of the same type.** `sale_advisory.py` stores a
 > regenerated advisory on the run whose report it was derived from, alongside the one
@@ -31,8 +31,38 @@ to — the only thing the two processes share.
 
 `_fetch_reports(run_id, ticker)` (`:262`) is the shared helper behind both
 `/api/report` and `/download`. It returns a **dict**, not the original 5-tuple —
-there are now six bodies plus two pieces of run metadata, and a positional tuple
+there are now seven bodies plus two pieces of run metadata, and a positional tuple
 that long is a bug waiting to happen at each call site.
+
+### Borrowable vs own-only case documents
+
+`_CASE_TYPES` (`BEAR_CASE`, `BULL_CASE`, `SALE_CASE`) are **borrowed** by a refinement
+run from the run it reviewed when it has none of its own — a copy at refine time would
+duplicate ~26KB of text and two vectors to say nothing new.
+
+`_OWN_ONLY_TYPES` (`BUY_CASE`) are fetched the same way but **never borrowed**, and
+the distinction is load-bearing rather than tidy. A buy case exists only for a `Watch`,
+and a critic review can move the verdict off it — `refine.py` then deliberately writes
+none. Borrowing the reviewed run's would put an "at what price would I buy this"
+document on a run whose verdict is now `Buy` or `Avoid`, which is the one place it must
+never appear. Absence here is a decision, not a gap to fill. See
+[11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md).
+
+### The price column, and why the viewer does not fetch it
+
+The per-run decisions list and its CSV both show the **share price the ticker was
+analysed at**, read from `ticker_runs.share_price` / `price_as_of`.
+
+Stored rather than fetched live, on purpose. The viewer is read-only, has no FMP
+credential, and is meant to stay that way — but more importantly the useful number in
+a run listing is what the stock cost **when that verdict was reached**, not what it
+costs while you happen to be reading. A live quote in this column would also
+contradict the `## Price` section of the report each row links to.
+
+Rows written before the column existed hold NULL and render as `—` with a tooltip
+saying so. They cannot be backfilled: the price on that day is gone. A reused report
+carries the price of the run it reuses (`db_find_reusable_report` returns it), so the
+listing and the served document never disagree.
 
 ### Critic refinements in the viewer
 
@@ -92,8 +122,9 @@ sequenceDiagram
     App->>DB: SELECT markdown_report, verdict FROM final_reports
     App->>DB: SELECT refines_run_id, status FROM pipeline_runs
     App->>App: if a refinement, borrow bear/bull/sale from the reviewed run
+    App->>App: (never the buy case — see _OWN_ONLY_TYPES)
     App->>App: markdown.markdown(text) — server-side render
-    App-->>UI: JSON (bear/bull/sale/critic/final _html, verdict, critic_status)
+    App-->>UI: JSON (bear/bull/sale/buy/critic/final _html, verdict, critic_status)
 ```
 
 ## Frontend, `templates/index.html`
@@ -113,6 +144,13 @@ calling `fetch()` against the routes above. Three modes toggled by
 
 `refreshAll()` (`:595`) is wired to the "⟳ Refresh" button (`#refreshBtn`,
 `:238`) and re-runs whichever mode's load function is currently active.
+
+**Two conditional tabs.** `renderCriticStanding()` shows the Critic Review tab only
+when the run has reviews, and the Buy Case tab only when it has a `BUY_CASE` — most
+runs have neither, and a permanently empty tab reads as a failure rather than as the
+correct answer (a `Buy` verdict *should* have no buy case). Neither needs a guard
+against being left on a hidden tab: `loadReport()` resets `state.kind` to `final` on
+every report load.
 
 ### The "Learn the terms" tab
 

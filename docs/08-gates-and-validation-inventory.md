@@ -32,10 +32,13 @@ ambiguous combination of flags:
 | Check | Line | Rejects |
 | :--- | ---: | :--- |
 | `--top-n` bounds | `main.py:2562-2563` | `--top-n` below 1 |
-| `--run` requires `--sell-check` | `main.py:2571-2572` | `--run RUN_ID` used without `--sell-check` |
-| `--screen-only` exclusivity | `main.py:2577-2589` | Combined with `--from-csv`, `--sell-check`, `--skip-sale-advisor`, `--force`, or a bare `TICKER` |
+| `--run` requires a check mode | `main.py:2571-2572` | `--run RUN_ID` used without `--sell-check` or `--buy-check` |
+| The two checks are mutually exclusive | after the `--run` check | `--sell-check` together with `--buy-check` — they test different stored conditions for opposite readers and each writes its own report, so one invocation would be ambiguous about which answer it reported |
+| `--screen-only` exclusivity | `main.py:2577-2589` | Combined with `--from-csv`, `--sell-check`, `--buy-check`, `--skip-sale-advisor`, `--skip-buy-case`, `--force`, or a bare `TICKER` |
 | `--sell-check` requires a ticker | `main.py:2594-2595` | `--sell-check` with no `TICKER` argument |
+| `--buy-check` requires a ticker | dispatch chain | `--buy-check` with no `TICKER` argument |
 | `--skip-sale-advisor` + `--sell-check` | `main.py:2596-2597` | Combining them (sell-check never runs Phase C anyway) |
+| `--skip-buy-case` + `--buy-check` | dispatch chain | Combining them (buy-check never runs Phase E anyway) |
 
 ## B. Screener eligibility gates (Phase A) — `magic_formula_starter_screener.py`
 
@@ -92,10 +95,14 @@ misconfigured or the data provider may have changed behavior:
 
 | Gate | Line | Checks | On failure |
 | :--- | ---: | :--- | :--- |
-| Reconciliation gate (`_reconcile_agent_figures`) | `:1704-1785` | Agent-written debt/cap/EV figures against `VERIFIED_FIGURES`, tolerance per field | Logged as WARNING + appended to the report as `## Data Reconciliation Warnings` — never blocks persistence |
+| Reconciliation gate (`_reconcile_agent_figures`) | `:1704-1785` | Agent-written debt/cap/EV figures against `VERIFIED_FIGURES`, tolerance per field (debt 10%, EV 20%, market cap 25%) | Logged as WARNING + appended to the report as `## Data Reconciliation Warnings` — never blocks persistence |
+| Finding provenance (`_finding_basis`) | with the gate | Whether the verified figure came from a **filing** (debt, cash — fixed until the next one) or from the **market price** (market cap, EV — moves every session) | Not a gate but a qualifier on one: it decides the wording of the warning and adds a `Basis` column to the report table, so a market figure that has merely moved is not read as an error. Matters wherever a report is re-checked later than it was written |
+| Price snapshot (`_price_snapshot` / `_format_price_section`) | with the gathering step | Whether a live quote could be fetched | **Fails open, visibly**: the report's `## Price` section says the price could not be retrieved and that the filing-derived ratios are unaffected — never a blank, a zero, or a guess |
 | Verified-figures completeness check | `:1181-1188` | Whether the candidate has `TotalDebt`/`Cash`/`EnterpriseValue` (older CSVs may lack these columns) | WARNING logged; reconciliation gate is silently weaker for that ticker (documented, not hidden) |
 | Verdict extraction (`_extract_verdict`) | `:1092-1105` | Parses `"Verdict: Buy/Watch/Avoid"` from the analyst's `## Final Verdict` section via regex, anchored (not a naive substring search — the prose often says "buy" while weighing the bull case) | Falls back to whichever of buy/watch/avoid appears earliest in the section; defaults to `WATCH` if none found |
 | Sell recommendation extraction (`_extract_recommendation`) | `:2426-2429` | Parses `"Recommendation: SELL/HOLD"` | Defaults to `"UNKNOWN"` if not found |
+| Buy recommendation extraction (`buy_case_agent.extract_buy_recommendation`) | `buy_case_agent.py` | Parses `"Recommendation: BUY/WAIT"`, anchored for the same reason — a buy-check's justification paragraph routinely says "buy" while explaining why not to | Defaults to `"UNKNOWN"` if not found |
+| **The Watch gate** (`buy_case_agent.is_watch`) | `buy_case_agent.py` | Whether a verdict earns a buy case. Used by the pipeline, the critic loop and the standalone command, so the three cannot disagree | Fails **closed**: anything unrecognisable is treated as not-a-Watch. A missing buy case is a gap `buy_case.py` repairs; a buy case on an `Avoid` is a defect already published |
 
 ## F. Runtime resilience gates (fail-open or halt-and-preserve, by design) — `main.py`
 
@@ -124,6 +131,21 @@ Only active under `python refine.py TICKER`. Full walkthrough:
 | Sale-advisory freshness (`_refresh_sale_advisory`) | `refine.py:330-427` | Whether the report was actually revised, and whether re-deriving the advisory fits the ceiling | No revision → carried forward unchanged (valid, since the prose did not move). Revision → re-derived against the refined report. Revision but unaffordable → **should be unreachable** (the cost is reserved before the revision is committed to); if reached, carried with a visible staleness warning and a loud log, never silently, because its sell triggers may be anchored to a figure the critic corrected. |
 | Source-case availability (`_load_source_case`) | `refine.py:163-184` | Whether the reviewed run still has `BEAR_CASE`/`BULL_CASE` stored | **Fails open with an explicit prompt note** telling the critic the case is unavailable and not to read its absence as evidence the summary is wrong. |
 
+## G1b. Stale-figure guards in the critic loop — `critic_agent.py` / `refine.py`
+
+A review runs LATER than the report it reviews, against figures recomputed today.
+These three stop that gap producing a false finding — a correct-at-the-time price
+being "corrected" to today's. Prompt rules rather than code, so what is enforced in
+code is that the rules are present and that both agents get the vintage they need.
+
+| Gate | Where | Checks | On failure |
+| :--- | :--- | :--- | :--- |
+| `report_vintage` seeded | `refine.run_refinement_loop` | Both agents are told when the report was written and that the figures are from today | ADK fails the run at template time if the key is missing — the instruction references it, so it cannot silently go unseeded |
+| Moved ≠ wrong (critic) | `critic_agent.py` agent block | A market-derived figure that has only moved must not be raised as a factual error; a filing-derived mismatch still must | Prompt rule. If the valuation moved enough to matter, it is to be raised as a finding about the reasoning instead |
+| Do not re-price (reviser) | `critic_agent.py` agent block | The reviser leaves prices in the prose as they were | Prompt rule. The pipeline re-stamps a fresh timestamped price section around the revised text |
+
+Regression coverage: `_staleness_cases` in [`src/test_critic.py`](../src/test_critic.py).
+
 ## G2. Standalone sale-advisory gates — `sale_advisory.py`
 
 Only active under `python sale_advisory.py TICKER`. Walkthrough:
@@ -136,6 +158,21 @@ Only active under `python sale_advisory.py TICKER`. Walkthrough:
 | Rolling daily ceiling | `:114-127` | `prior day spend + ~$0.12` against `budget.per_day_usd` | Refuses to start, naming the figures. `--no-budget` overrides. No per-invocation ceiling by design — one deliberate call for a known artefact. |
 | Empty advisor output | `:159-164` | Whether the advisor returned anything | Nothing stored; the run is finalized `FAILED` **and the attempt's cost is still reported**, because it was still billed. |
 | Reconciliation gate | `:166-176` | The new advisory's thresholds against `VERIFIED_FIGURES` | Same as §E — warnings logged, never blocks persistence. |
+
+## G3. Phase E gates (the buy case) — `buy_case_agent.py` / `buy_case.py`
+
+Walkthrough: [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md).
+
+| Gate | Where | Checks | On failure |
+| :--- | :--- | :--- | :--- |
+| Watch-only gate | `analyze_ticker`, `refine._refresh_buy_case`, `buy_case.generate_buy_case` | `is_watch(verdict)` | No buy case is written, and the reason is logged at INFO — this is a decision, not a failure. `buy_case.py` errors out naming the verdict and pointing at `refine.py`, with **no override flag** |
+| Report exists / has analyst prose | `buy_case.py` | Same two checks `sale_advisory.py` makes | Errors out rather than paying to summarise nothing |
+| Rolling daily ceiling | `buy_case.py` | `prior day spend + ~$0.18` against `budget.per_day_usd` | Refuses to start, naming the figures. `--no-budget` overrides |
+| Price availability | `price_data_block` | Whether a live quote came back | **Fails open, loudly**: the block tells the agent to express the price trigger against a valuation multiple instead and to quote no price as current. The event triggers still stand |
+| Empty advisor output | `write_buy_case` | Whether the agent returned anything | Nothing stored; the cost of the attempt is still reported, because it was still billed |
+| Reconciliation gate | `write_buy_case` | The buy case's thresholds against `VERIFIED_FIGURES` | Warnings logged **and appended to the document itself** — a log line is seen once by whoever ran the pipeline, the document is read later by whoever is deciding |
+| Buy-case reservation | `refine._Estimator.full_round` | That a revision's committed cost includes the buy case | Unconditional, because whether it will be needed depends on a verdict that does not exist yet. `refinement.max_budget_usd` was raised 2.25 → 2.45 to absorb it |
+| Unaffordable regeneration | `refine._refresh_buy_case` | `_affordable(...)` before re-deriving | Carries the previous buy case with a visible staleness label, or — with nothing to carry — ends honestly with none and names the repair command |
 
 ## H. Persistence-layer gates — `mcp_server.py` / `sql-schema.sql`
 

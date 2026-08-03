@@ -6,17 +6,28 @@ This specification guides the Coding Agent in implementing a multi-agent investm
 
 ## 1. System Overview & Sequence Workflow
 
-The application supports five execution modes (see §8.A for the full list —
-full pipeline, screen-only, from-CSV, on-demand single-ticker, and sell-check):
+The application supports six execution modes (see §8.A for the full list —
+full pipeline, screen-only, from-CSV, on-demand single-ticker, sell-check and
+buy-check):
 
-- **Full pipeline run** — Phase A screener feeds the Top N candidates into Phase B/C.
+- **Full pipeline run** — Phase A screener feeds the Top N candidates into Phase B/C,
+  and Phase E for the candidates whose verdict is `Watch`.
 - **Screen-only run** — Phase A alone; refreshes the rankings CSV and stops (no cost).
-- **CSV run** — skips Phase A, reusing a previous rankings CSV, then runs Phase B/C.
-- **On-demand single-ticker run** — Phase B/C runs directly on one user-supplied
+- **CSV run** — skips Phase A, reusing a previous rankings CSV, then runs Phase B/C/E.
+- **On-demand single-ticker run** — Phase B/C/E runs directly on one user-supplied
   ticker, bypassing Phase A. It is still recorded as its own `pipeline_runs`
   entry (containing just that one ticker) for full traceability.
 - **Sell-condition check** — a Phase C follow-up for a single already-owned
   ticker; does not create a `pipeline_runs` row.
+- **Buy-condition check** — the mirror image: a Phase E follow-up for a single ticker
+  the investor does **not** own, testing whether a stored buy case's price range and
+  triggers are now met. Also creates no `pipeline_runs` row.
+
+**A note on the phase letters.** A = screener, B = bear/bull/analyst reasoning,
+C = sale advisor, D = the critic refinement loop (§11), E = the buy case (§12). D and
+E are numbered in the order they were added, not in pipeline order: D runs entirely
+outside the pipeline from its own entry point, while E runs **inside** it, immediately
+after Phase C, for a `Watch` verdict only.
 
 The application executes up to a 4-stage workflow (screening, then three
 per-ticker phases) managed by `main.py`'s orchestration functions (there is no
@@ -32,6 +43,7 @@ flowchart TD
     Mode -->|"--screen-only"| ScreenOnly["Phase A only\nwrite rankings CSV, stop"]
     Mode -->|"TICKER"| OnDemand["On-demand single ticker\ncompute_ticker_magic_metrics"]
     Mode -->|"--sell-check TICKER"| SellCheck["Sell-Condition Check\n(standalone, Phase C follow-up)"]
+    Mode -->|"--buy-check TICKER"| BuyCheck["Buy-Condition Check\n(standalone, Phase E follow-up)"]
 
     PhaseA --> TopN["Top N candidates\n(config top_n_candidates / --top-n)"]
     TopN --> PhaseB
@@ -48,11 +60,18 @@ flowchart TD
 
     PhaseB --> PerTicker
     PerTicker --> Persist["Persist to Postgres:\nagent_outputs, final_reports,\nticker_runs"]
-    Persist --> Reports["Write reports/*.md"]
+    Persist --> VerdictGate{"Verdict == Watch?"}
+    VerdictGate -->|"yes (and not --skip-buy-case)"| BuyCase["Phase E: Buy Case Agent\n(buy-case-instructions.md)\nforward estimates, earnings calendar,\nsegments, M&A filings, live price"]
+    VerdictGate -->|"Buy / Avoid"| Reports
+    BuyCase --> Reports["Write reports/*.md"]
 
     SellCheck --> LoadCase["Load stored SALE_CASE\n(db_get_sale_case)"]
     LoadCase --> Evaluate["Sell Check Agent\ncompares current data vs conditions"]
     Evaluate --> SellReport["reports/TICKER_Sell_Check.md\n(SELL / HOLD)"]
+
+    BuyCheck --> LoadBuy["Load stored BUY_CASE\n(db_get_buy_case)"]
+    LoadBuy --> EvaluateBuy["Buy Check Agent\ncompares today's price + data\nvs the stored triggers"]
+    EvaluateBuy --> BuyReport["reports/TICKER_Buy_Check.md\n(BUY / WAIT)"]
 
     ScreenOnly --> CSVFile[("magic_formula_rankings_live.csv")]
     CSVFile -.->|"--from-csv reads this later"| PhaseA
@@ -71,6 +90,7 @@ flowchart TD
    - **FMP quarterly trends** (`fmp_quarterly_trends`): the last **8 quarters** of income statement, cash flow, and balance sheet, plus an explicit **year-over-year comparison of each recent quarter against the same quarter one year earlier** (Q vs Q−4, so seasonality is already aligned). See §2.D for why this is a separate, mandatory feed.
    - **Magic Formula value/quality signal** (`screen_context`): ROC + Earnings Yield + rank. For on-demand single tickers (where the screener didn't run), `compute_ticker_magic_metrics` computes ROC/EY on the fly.
    - **Verified figures** (`verified_figures`): the deterministic balance-sheet ground truth — total debt, cash, market cap, enterprise value, equity, total assets, goodwill/intangibles, EBIT — plus the goodwill-inclusive ROIC companion to ROC. See §2.E.
+   - **The current share price** (`_price_snapshot`, one `fmp_price_snapshot` call): fetched once per ticker and used in three places — the `## Price` table that opens the stored report, a labelled live-figure line inside `VERIFIED_FIGURES`, and (on a `Watch`) the buy case's `PRICE_DATA`. See §2.E2.
 
    These are gathered once and seeded into session state (`sec_data`, `metrics_data`, `quarterly_data`, `verified_figures`, `screen_context`) for the three reasoning agents below.
 
@@ -125,11 +145,50 @@ flowchart TD
    - **Agent: Sale Advisor agent**: - instruction = `sale-advisor-instructions.md`. Uses `fmp_stock_news` + `web_search_tool` (Tavily)
    - **Thresholds must be anchored.** Every numeric sell trigger has to be derived from `verified_figures` or `quarterly_data`, and the report must print the **current actual value beside each threshold** ("total debt above $32B — currently $29.3B"). A trigger calibrated off a wrong baseline is worse than no trigger: it silently cannot fire. This is not hypothetical — see §2.E.
 
+3b. **Phase E: Buy Case** (per ticker, `Watch` verdict ONLY — see §12)
+   **Buy-case advisor — the entry conditions a 'Watch' leaves unstated:**
+   - **Agent: Buy Case Agent** (`src/buy_case_agent.py`) — instruction =
+     `buy-case-instructions.md`. Runs AFTER the reasoning graph, not inside it, because
+     it is conditional on a verdict that only exists once `_extract_verdict` has read
+     the analyst's finished prose. Skippable with `--skip-buy-case`.
+   - **The only forward-looking role in the system.** It reads analyst consensus
+     estimates, the implied forward P/E **with its analyst counts and estimate
+     spread**, the earnings calendar for the subject *and* for the companies whose
+     results drive its revenue, segment disclosure, SEC merger filings, and a freshly
+     fetched live price. Those feeds are deliberately withheld from the bear/bull/
+     analyst chain, which weighs realised results and may not rest a `Buy` on a
+     projection (§2.C, and the CONFIRMED/SPECULATIVE rule in Phase B).
+   - **Triggers must be anchored and checkable**, on the same rule as Phase C: a
+     derived price range showing its arithmetic, every numeric threshold tied to
+     `verified_figures` / `quarterly_data` / the forward estimates, the current actual
+     value printed beside it, and a date or named event by which it can be observed.
+   - **Output:** `BUY_CASE` in `agent_outputs` + `reports/{Ticker}_Buy_Case.md`.
+
 4. **Sell-Condition Check** (on-demand, single stock — Phase C follow-up)
    **Sell-condition evaluator - tests whether the prior sale conditions are now met:**
    - **Agent: Sell Check agent** — no instruction file; carries a self-contained prompt. Loads a stored `SALE_CASE` via `db_get_sale_case(ticker, run_id)` (a **specific run's** conditions when a run is pinned, otherwise the **most recent**), gathers **current** FMP metrics (`fmp_metrics_extractor`) **and quarterly trends (`fmp_quarterly_trends`)** by direct call, plus live `fmp_stock_news` + `web_search_tool` research, then marks each sale condition **MET / NOT MET / UNCLEAR** with sourced evidence and emits a `## Sell Recommendation` (`SELL` if **any** condition is clearly met, else `HOLD`).
    - Sale conditions are routinely written in quarterly terms ("two consecutive quarters of negative growth"), which annual metrics cannot answer either way — hence the quarterly feed here as well as in Phase B.
    - Runs standalone for one ticker (not in the analysis graph). It is a lightweight flow: it reads the prior conditions and writes `reports/{Ticker}_Sell_Check.md`, but does **not** create a `pipeline_runs`/`ticker_runs` record, so it never appears in the web UI's run lists.
+
+5. **Buy-Condition Check** (on-demand, single stock — Phase E follow-up)
+   **Buy-condition evaluator — tests whether the stored buy triggers are now met:**
+   - **Agent: Buy Check Agent** — instruction = `buy-check-instructions.md`. Loads a
+     stored `BUY_CASE` via `db_get_buy_case(ticker, run_id)`, fetches the **current
+     price** by direct call (the authority for the price trigger — never a price
+     quoted inside the stored buy case, which is the baseline it was written at),
+     plus current fundamentals and quarterly trends, then marks each trigger
+     **MET / NOT MET / UNCLEAR** with sourced evidence and emits a
+     `## Buy Recommendation` (`BUY` when the buy case's own stated firing condition is
+     satisfied, else `WAIT`).
+   - **The asymmetry with the sell-check is deliberate.** A sell-check defaults to
+     the `SALE_CASE` of the run you *purchased* under, because sale conditions are
+     exit criteria for a specific entry thesis (§8.D). A buy-check defaults to the
+     **most recent** buy case, because you are deciding today against the newest
+     reading of the company. `--run` pins either.
+   - **Unavailable is never met.** A condition that cannot be established is UNCLEAR,
+     and the recommendation may not be reached by resolving a gap in favour of buying.
+   - Writes `reports/{Ticker}_Buy_Check.md`, creates no run records. Warns (but does
+     not refuse) when a newer report has moved the ticker off `Watch`.
 ---
 
 ## 2. MCP Tools & Analytical Guardrails
@@ -178,6 +237,29 @@ Rule of thumb: **FMP answers "what happened to this company?"; Tavily answers
 - Design the `web_search_tool` interface to allow swapping backend adapters (e.g.,
   Google Custom Search, Serper, Exa) without modifying agent instruction code.
   Brave Search was the original adapter and has been removed in favor of Tavily.
+
+### C2. Forward-looking feeds — Phase E only
+
+Every tool above is BACKWARD-looking: filings, realised quarters, annual ratios.
+That is the correct bias for a verdict and the wrong one for the question a `Watch`
+leaves open — *at what price, or on what evidence, does this become a Buy?* Five
+tools exist for that question, and they are given **only** to the buy-case and
+buy-check agents. Handing analyst projections to the bear/bull/analyst chain would
+undercut the rule that a `Buy` may not rest on a speculative catalyst.
+
+| Tool | Returns | Why it is separate |
+| :--- | :--- | :--- |
+| `fmp_price_snapshot(ticker)` | Live price, previous close, day range, 52-week range, 50/200-day averages, market cap, and the computed distance from the 52-week high/low | The level every price trigger is measured from. Also seeded deterministically into the prompt as PRICE_DATA, so the number the whole document turns on never depends on a tool call the model might skip |
+| `fmp_forward_estimates(ticker)` | Consensus revenue / EBIT / net income / EPS (mean, low, high) per FUTURE fiscal year, the implied forward P/E at today's price and its range across the low/high EPS, **the analyst count per figure**, growth against the last ACTUAL fiscal year with the number of years it spans, past-year estimates, the consensus price target, recent individual target changes with the price when posted, and the grade split | The analyst counts and the spread are the point. A forward P/E from one analyst's estimate is one opinion dressed as a consensus; the payload flags thin coverage (≤2 analysts) and wide spreads (high/low ≥ 1.5x) so the prose has to say so |
+| `fmp_earnings_calendar(ticker)` | Next scheduled report date with EPS/revenue estimates, and the last four reported with computed surprise percentages | Works for **any** symbol. That is what turns "watch what the hyperscalers guide to" into a checkable date. Scheduled dates are provisional and the payload says so |
+| `fmp_revenue_segments(ticker)` | Product and geographic revenue splits for the last two fiscal years, each line as a share of total with its year-over-year change | Tests an ecosystem claim against the revenue line before it is asserted. Warns when the disclosure is years stale — companies stop reporting a split and the provider keeps serving the last one (H&R Block's geographic split ends in FY2016) |
+| `fmp_pending_ma_filings(ticker)` | SEC merger registrations (S-4 and similar) naming the company as acquirer or target | A company under an agreed bid trades on the offer, which makes a valuation-derived price range meaningless. Coverage is filings only — the payload states plainly that an empty result is not evidence no deal is pending |
+
+Plan note: on the FMP Starter plan `analyst-estimates` is **annual only** (the
+quarterly variant answers 402), and `mergers-acquisitions-search` is restricted while
+`mergers-acquisitions-latest` is not, which is why the M&A filter is applied
+client-side over two pages. Re-check both before assuming a quarterly estimate path
+exists.
 
 ### D. Quarterly Trends MCP Tool (`fmp_quarterly_trends`) — the recency feed
 
@@ -296,6 +378,62 @@ entirely correct. When a warning appears, read the flagged sentence before actin
 on it: the failure mode of a text-matching checker is misreading a correct
 sentence, not inventing a wrong one. `VERIFIED_FIGURES` (§2.E mechanism 1) is what
 actually prevents bad numbers; the gate is a backstop with known blind spots.
+
+### E1. Two kinds of verified figure, and why the gate says which
+
+The reconciliation gate checks agent prose against figures of two different
+provenances, and reported both as "the filings show X" until it was split:
+
+| Basis | Fields | Fixed until | A disagreement means |
+| :--- | :--- | :--- | :--- |
+| `filings` | total debt, cash | the next filing | the report is **wrong** |
+| `market price` | market capitalisation, enterprise value | the next tick | possibly just **time** |
+
+The distinction is inert inside a pipeline run, where the prose and the figures are
+minutes apart. It matters everywhere a report is re-checked LATER — `refine.py`,
+`sale_advisory.py`, `buy_case.py` — because those recompute the figures against
+today's price, so a market figure is *expected* to disagree with a report written last
+week. Calling that "the filings show a different number" invites a correct figure to
+be corrected.
+
+Each finding therefore carries a `basis`, `main.reconciliation_warning` phrases the
+log line for it, and the report's warning table gains a **Basis** column and a note
+saying what a `market price` row does not imply. This is the deterministic half of the
+same guard the critic gets in prose (§11.G6): a moved price is not a wrong price.
+
+### E2. The share price — one quote, three consumers
+
+Reports discussed valuation exclusively in market capitalisation and enterprise
+value. Those are the correct units for the Magic Formula's arithmetic and the wrong
+ones for a reader: "$164.26B market cap at 65x trailing earnings" does not answer
+*what would I pay for one share, and is that a lot?* The price was in the screener's
+CSV (`Live_Price`) the whole time and never reached the report.
+
+**Why it is fetched rather than read from the candidate.** The two candidate shapes
+disagree (§2.I): the screener CSV carries `Live_Price`, and
+`compute_ticker_magic_metrics` carries no price at all. A candidate-sourced price
+would therefore print "Not available" on exactly the on-demand single-ticker runs a
+reader studies most closely — the same class of silent failure §2.I exists to
+document. One `fmp_price_snapshot` call is deterministic, token-free and
+subscription-metered.
+
+**Why one quote, shared.** `analyze_ticker` (and `refine.py`, per session) fetches it
+once and passes the dict to every consumer:
+
+| Consumer | Rendering | Why it needs it |
+| :--- | :--- | :--- |
+| The stored report | `_format_price_section` — a one-row table: price, as-of, 52-week range, distance off the high, 50/200-day averages, market value | The reader's starting point, and the bridge to every ratio below it |
+| The agent prompts | a `CURRENT SHARE PRICE` line inside `VERIFIED_FIGURES`, labelled as a LIVE figure rather than a filing one | Without it each agent reaches for its own price from news or recollection, and one report discusses the stock at two prices in two sections |
+| The buy case | `price_data_block` (`PRICE_DATA`) | Its first trigger is a price range; that range and the price printed on the report must be the same number, not two quotes a minute apart |
+
+**The as-of stamp is load-bearing.** A stored report is a point-in-time document and
+this is the one figure in it that was stale before anyone read it. Stamped and
+captioned, it is strictly more useful than no price: reading an old `Watch` and
+knowing what the stock cost when that verdict was written is most of the context for
+deciding whether it still holds.
+
+Both renderings fail open — a missing quote produces a section that says so, and says
+that the filing-derived ratios are unaffected, rather than a blank or a guess.
 
 ### F. Two return-on-capital figures, always reported together
 
@@ -553,7 +691,7 @@ The coding agent should construct the main program using `google-adk` as follows
 > the screener runs as a direct call to `run_magic_formula_screener()` inside
 > `run_orchestrator`/`run_screen_only`. The actual reasoning agents are `bear_agent`,
 > `bull_agent`, `analyst_agent`, `sale_advisor_agent`, and `sell_check_agent`,
-> defined in `main.py` (see [`docs/02-agents-and-prompts.md`](../../docs/02-agents-and-prompts.md)
+> defined in `main.py` (see [`docs/02-agents-and-reasoning-graph.md`](../../docs/02-agents-and-reasoning-graph.md)
 > for the real definitions with line references). Kept here only as historical
 > context for the original design intent.
 
@@ -621,9 +759,9 @@ The system stores all intermediate outputs and final reports in a PostgreSQL dat
 
 ### A. Tables
 1. `pipeline_runs` — one row per run: status, tickers, and aggregated token/search usage + estimated cost.
-2. `agent_outputs` — raw per-step outputs, keyed by `(run_id, ticker, agent_type)`; `agent_type` ∈ `SEC_DATA`, `QUANT_METRICS`, `BEAR_CASE`, `BULL_CASE`, `SALE_CASE`. Optional `embedding vector(768)`.
+2. `agent_outputs` — raw per-step outputs, keyed by `(run_id, ticker, agent_type)`; `agent_type` ∈ `SEC_DATA`, `QUANT_METRICS`, `BEAR_CASE`, `BULL_CASE`, `SALE_CASE`, `BUY_CASE` (Watch verdicts only), `CRITIC_REVIEW`. Optional `embedding vector(768)`.
 3. `final_reports` — the neutral analyst's combined report + `verdict` (`BUY`/`WATCH`/`AVOID`; legacy `HOLD`/`SELL` still valid) + embedding + `analysis_key` (the reuse fingerprint).
-4. `ticker_runs` — a lean per-ticker index of runs (`ticker`, `run_id`, `company_name`, `verdict`, `run_date`, `magic_rank`), **built to drive the web UI**. No report text is duplicated here; the UI joins back to `agent_outputs`/`final_reports` on `run_id`. `initialize_database()` backfills it from existing `final_reports`.
+4. `ticker_runs` — a lean per-ticker index of runs (`ticker`, `run_id`, `company_name`, `verdict`, `run_date`, `magic_rank`, `share_price`, `price_as_of`), **built to drive the web UI**. The price is the quote the analysis was written against, stored so the read-only viewer can show a price column without a market-data credential of its own, and so a run listing shows what a stock cost **when the verdict was reached** rather than while you are reading. Pre-existing rows keep NULL and render as a dash: that day's price is not recoverable. No report text is duplicated here; the UI joins back to `agent_outputs`/`final_reports` on `run_id`. `initialize_database()` backfills it from existing `final_reports`.
 
 ```mermaid
 erDiagram
@@ -643,7 +781,7 @@ erDiagram
         uuid output_id PK
         uuid run_id FK
         varchar ticker
-        varchar agent_type "SEC_DATA / QUANT_METRICS / BEAR_CASE / BULL_CASE / SALE_CASE"
+        varchar agent_type "SEC_DATA / QUANT_METRICS / BEAR_CASE / BULL_CASE / SALE_CASE / BUY_CASE / CRITIC_REVIEW"
         text raw_content
         jsonb metadata
         vector embedding "768 dims, zero-vector on failure"
@@ -996,14 +1134,14 @@ the screener's universe loop, which only needs success/failure.
 ### A. Execution Modes
 
 1. **Full pipeline run** (`run_orchestrator`)
-   - Runs Phase A (screener → writes the rankings CSV), then Phase B, followed by Phase C over the Top N.
+   - Runs Phase A (screener → writes the rankings CSV), then Phase B, followed by Phase C over the Top N, and Phase E for each candidate whose verdict is `Watch`.
 2. **CSV run — skip Phase A** (`run_from_csv`)
    - Phase A (the full FMP universe scan) is slow. This mode **reuses the
-     rankings CSV from a previous run**, picks the Top N, and runs Phase B and Phase C — no
+     rankings CSV from a previous run**, picks the Top N, and runs Phase B, Phase C and Phase E — no
      screener re-run. Accepts an optional CSV path (defaults to the screener's
      `magic_formula_rankings_live.csv`).
 3. **On-demand single-ticker run** (`run_single_ticker`)
-   - Skips Phase A entirely for a single user-supplied ticker. Only runs Phase B and Phase C
+   - Skips Phase A entirely for a single user-supplied ticker. Only runs Phase B, Phase C and (on a `Watch`) Phase E
 
 The three modes above create a `pipeline_runs` row and produce records that are
 structurally identical and fully queryable by `run_id`.
@@ -1022,9 +1160,9 @@ structurally identical and fully queryable by `run_id`.
    - Warns when fewer candidates cleared the gates than `top_n_candidates`, so that
      is discovered before a paid run is scheduled rather than after it produces a
      short list.
-   - Rejects combination with any Phase B/C flag (`--from-csv`, `TICKER`,
-     `--sell-check`, `--skip-sale-advisor`, `--force`) rather than silently ignoring
-     it.
+   - Rejects combination with any Phase B/C/E flag (`--from-csv`, `TICKER`,
+     `--sell-check`, `--buy-check`, `--skip-sale-advisor`, `--skip-buy-case`,
+     `--force`) rather than silently ignoring it.
 
 4. **On-demand sell-condition check** (`run_sell_check`)
    - A separate single-stock flow (Phase C follow-up). Loads a stored `SALE_CASE`
@@ -1033,6 +1171,14 @@ structurally identical and fully queryable by `run_id`.
      now met against current data, advising `SELL`/`HOLD`. It does **not** create a
      `pipeline_runs`/`ticker_runs` row (nothing new appears in the web UI); it only
      reads the prior conditions and writes `reports/{Ticker}_Sell_Check.md`.
+
+5. **On-demand buy-condition check** (`run_buy_check`)
+   - The mirror image (Phase E follow-up), for a stock the investor does **not** own.
+     Loads a stored `BUY_CASE` — a **specific run's** when `run_id` is passed,
+     otherwise the ticker's most recent (see §8.D2 for why the default differs from
+     the sell-check's) — fetches today's price by direct call, and evaluates whether
+     the stored price range and triggers are now met, advising `BUY`/`WAIT`. Creates
+     no run records; writes `reports/{Ticker}_Buy_Check.md`.
 
 ### B. Invocation
 
@@ -1045,9 +1191,13 @@ python main.py TICKER                # on-demand Phase B/C for one ticker
 python main.py TICKER "Company"      # on-demand with an explicit company name
 python main.py --sell-check TICKER            # test if TICKER's latest sale conditions are now met (Sell/Hold)
 python main.py --sell-check TICKER --run RUN_ID  # ...against a SPECIFIC run's conditions (the run you bought under)
+python main.py --buy-check TICKER             # test if TICKER's buy conditions are now met (Buy/Wait)
+python main.py --buy-check TICKER --run RUN_ID   # ...against a SPECIFIC run's buy case
 
 # Phase C is optional on ANY Phase B mode (~1/4 of the per-ticker cost):
 python main.py --from-csv --skip-sale-advisor    # bear -> bull -> analyst, no sale advisor
+# Phase E runs only for a Watch verdict, and can be dropped entirely:
+python main.py --from-csv --skip-buy-case        # no buy case, even for a Watch
 python main.py --from-csv --top-n 12             # analyze only the top 12 this run
 ```
 
@@ -1109,6 +1259,27 @@ That app then drives the sell-check by passing the stored `run_id` — either vi
 CLI (`--run RUN_ID`) or by importing `run_sell_check(ticker, company_name, run_id)`.
 The agent stays ignorant of the positions schema.
 
+### D2. Which `BUY_CASE` should the buy-condition check use? (the opposite default)
+
+The buy-check defaults to the ticker's **most recent** `BUY_CASE` and is right to.
+The two commands answer questions with different anchors:
+
+| | Sell-check | Buy-check |
+| :--- | :--- | :--- |
+| Reader | owns the stock | does not own it |
+| The question | "has the thesis I bought under broken?" | "has this become worth buying?" |
+| Correct anchor | the run **purchased under** — a past commitment | **today** — the newest reading of the company |
+| Default | most recent, with `--run` the correction for a re-analysed holding | most recent, which is already the right one |
+
+Pinning is still useful here, just for a different purpose: `--run` lets you test the
+conditions a *particular* report set — "would the case I passed on in March have fired
+by now?" — rather than correcting a wrong default.
+
+One consequence to be aware of: because the default is the newest buy case, a ticker
+re-analysed since can have a buy case whose report is no longer the latest word on it.
+`run_buy_check` loads the ticker's most recent report and **warns** when its verdict
+has moved off `Watch`, but does not refuse — the operator asked for those conditions
+to be checked, and the newer verdict is information rather than an error.
 
 ## 9. WEB UI (Report Viewer)
 
@@ -1928,6 +2099,81 @@ revision → carry forward" rule carries the stale advisory forward again — th
 without its staleness warning. That is precisely why the repair is a separate
 command rather than a flag on the loop.
 
+### G4. The buy case after a review (`refine._refresh_buy_case`)
+
+Same problem as §G2 — a document derived FROM the report, which the critic never
+sees, left describing a thesis a revision has changed — with one structural
+difference: **the buy case exists only for a `Watch`**, and a review can move the
+verdict *onto* Watch or *off* it. So there are four outcomes rather than two:
+
+| Refined verdict | Reviewed run had a buy case | What happens |
+| :--- | :--- | :--- |
+| not `Watch` | either | nothing is written. The reviewed run's own buy case is left where it is — it still correctly describes *that* report — and is deliberately **not** borrowed by the viewer (§9) |
+| `Watch` | no | one is **written**. This is the review having created the need: either it moved the verdict onto `Watch`, or it is repairing a `--skip-buy-case` gap |
+| `Watch` | yes, and a revision ran | re-derived against the revised text and re-anchored to the current price |
+| `Watch` | yes, no revision | carried forward unchanged, for $0, so `--buy-check --run <refinement id>` works |
+
+**The reservation is unconditional, and cannot be otherwise.** `_Estimator.full_round`
+holds back the buy case's cost before the loop commits to a revision, exactly as it
+does the advisory's — but whether it will be *needed* depends on the verdict of a
+report that does not exist yet. Reserving conditionally is therefore impossible, so
+it is reserved for every session and `refinement.max_budget_usd` was raised (2.25 →
+2.45) to absorb it. A session whose verdict lands on `Buy` or `Avoid` simply does not
+spend it.
+
+### G5. Repairing a buy case outside the loop — `buy_case.py`
+
+`python buy_case.py TICKER [--run RUN_ID]` is to Phase E what `sale_advisory.py` is
+to Phase C, with the same two placement rules (artefact on the target run, cost on its
+own row) and two differences:
+
+- **It refuses on a report whose verdict is not `Watch`**, in the same words the
+  pipeline uses and from the same function (`buy_case_agent.is_watch`). There is no
+  override flag: if you think the verdict is wrong, the answer is `refine.py`, not a
+  buy case written underneath a verdict that says no.
+- **Refreshing is the normal use, not the exception.** A sale advisory written against
+  last quarter's filings is still broadly valid this quarter; a buy range derived from
+  a $44 price and a $5.86 consensus is not, once either has moved. Re-deriving one is
+  ordinary watchlist maintenance.
+
+### G6. A review happens later than the report — the stale-price guard
+
+`_load_candidate` recomputes the verified figures **at review time**, so a report
+refined a week after it was written is critiqued against today's market cap,
+enterprise value and share price. That is the right basis for a critique — the reader
+is deciding today — but it manufactures one specific false finding, and it is the
+easiest one in the whole review to raise by mistake:
+
+> the report says the market capitalisation is $164B; VERIFIED_FIGURES says $131B;
+> therefore the report contains a factual error.
+
+It does not. It contains a figure that was correct on its own date. Unguarded, the
+critic raises it, the reviser "fixes" it, and the result is a report whose numbers
+come from two different days with nothing saying which is which — strictly worse than
+the report it replaced.
+
+Three things prevent it, and they are deliberately in three different places:
+
+1. **`report_vintage`** — a state key seeded by `run_refinement_loop` and templated
+   into **both** agents, stating when the report was written and that the figures were
+   computed today. It is the only signal available: `strip_generated_sections` removes
+   the report's own `## Price` section before review, so without this neither agent can
+   tell that the prose and the figures are from different days.
+2. **A rule in `critic-instructions.md`'s agent block** — a market-derived figure that
+   has merely *moved* is not an error and must not be raised as one, however large the
+   gap; a mismatch in a filing-derived figure still is. Where the valuation has moved
+   far enough to change the argument, that is a finding about the **reasoning**, not a
+   wrong number.
+3. **A matching rule for the reviser** — do not re-price the prose. The pipeline
+   re-stamps a fresh, timestamped price section around the revised text (§2.E2), so
+   editing prices inside it defeats the mechanism that keeps the document coherent.
+
+The deterministic gate carries the same distinction (§2.E1): a market-derived finding
+is reported against "the CURRENT share price" with a note that it may be the passage
+of time, and market cap's tolerance is 25% against debt's 10%. Regression coverage:
+`_staleness_cases` in `test_critic.py`, and the provenance block in
+`test_reconciliation.py`.
+
 ### H. Why it is not in the pipeline
 
 It costs several times what producing the report cost, and takes as long. Putting a
@@ -1964,3 +2210,127 @@ comment in `config.yaml`'s `refinement:` block records the recalibration
 run: the un-agreed path (a session ending on the round/budget ceiling with
 objections still standing) — every run so far has reached AGREE within the default
 ceiling.
+
+---
+
+## 12. Phase E — the buy case
+
+### A. The gap it closes
+
+`Watch` is the pipeline's most common verdict and its least actionable one. It says
+the company cleared a value-and-quality screen, that both cases were argued, and that
+the balance did not tip — so: not at this price, not on this evidence, not today. The
+reader is left holding a name and **no statement of what they are waiting for**.
+
+That gap has a cost in both directions. A watchlist with no entry conditions decays
+into a list of tickers nobody revisits, so the opportunity is missed; or it gets
+revisited on a hunch when the price has fallen, which is buying on price alone —
+precisely what the `Watch` was warning against. Phase E finishes the sentence: **at
+what price, or on what observable evidence, does this become a Buy?**
+
+It is the exact mirror of Phase C. The sale advisory assumes the stock is owned and
+names the events that would break the thesis; the buy case assumes it is **not**
+owned and names the events that would make it worth owning. The symmetry is
+deliberate down to the shape of the output, because the two are consumed the same
+way: `--sell-check` tests a stored `SALE_CASE`, `--buy-check` tests a stored
+`BUY_CASE`.
+
+### B. Why `Watch` only
+
+- A **`Buy`** needs no entry conditions. The entry condition is now.
+- An **`Avoid`** must not be given any. Writing entry conditions for a company the
+  analysis argued against manufactures a route back into it, and a reader scanning for
+  the encouraging document would find one attached to every ticker in the run.
+- `Watch` is the only verdict whose entire content is a deferral, so it is the only
+  one with a question left open.
+
+`buy_case_agent.is_watch` is the single expression of that rule, used by the pipeline,
+by the refinement loop, and by the standalone command, so the three cannot disagree
+about what a `Watch` is. It fails **closed**: anything unrecognisable is treated as
+not-a-Watch, because a missing buy case is a gap `buy_case.py` repairs while a buy
+case on an `Avoid` is a defect that has already been published.
+
+### C. Why it is not the fifth agent in the reasoning graph
+
+The sale advisor runs inside `_run_pipeline_async` because it applies to every
+verdict. Phase E is conditional on a verdict that only exists once `_extract_verdict`
+has read the analyst's finished prose — a decision made in Python, after the graph has
+finished. Adding a conditional edge to the graph would mean the graph knowing about
+verdict parsing; running it as a post-step in `analyze_ticker` keeps that knowledge in
+one place. It costs one extra ADK session for the tickers that need it and nothing at
+all for the rest.
+
+Practical consequence: the report is already persisted when Phase E starts, so a
+failure in the buy case costs the buy case and nothing else.
+
+### D. What it reads that nothing else does
+
+See §2.C2 for the five forward-looking tools. The design rule is that **projections
+stay out of the verdict**: the bear/bull/analyst chain weighs realised results and may
+not rest a `Buy` on a speculative catalyst, so handing it analyst estimates would
+undercut a constraint the pipeline depends on. Phase E is downstream of the verdict,
+so it can use them without contaminating it — and it inherits the same discipline in
+its own vocabulary (CONFIRMED vs SPECULATIVE, and a trigger may reference a
+speculative event only in the form of its confirmation).
+
+The current price is fetched deterministically and seeded as `PRICE_DATA` as well as
+being available as a tool, for the same reason `verified_figures` is: the number the
+whole document turns on must not depend on a tool call the model might skip, or
+paraphrase from memory three sections later.
+
+### E. The output contract
+
+Seven sections, fixed (`buy-case-instructions.md`): why this is a Watch; the forward
+valuation; what analysts expect (growth and deals); the ecosystem; **the buy
+triggers**; what would take it off the watchlist; how to use it. Section 5 is the one
+that gets checked later, and the rules that make it checkable are:
+
+- **The price trigger is first and mandatory, and derived rather than chosen** — the
+  arithmetic is shown (a multiple applied to a stated forward EPS, a discount to a
+  stated target, a level in the 52-week range).
+- **Every threshold prints the current actual value beside it**, so a reader sees the
+  distance, and a threshold already satisfied by today's figures is rejected rather
+  than written.
+- **Every numeric threshold is anchored** to `verified_figures`, `quarterly_data` or
+  the forward estimates — the same anchoring rule as Phase C, and for the same reason:
+  a trigger calibrated off a wrong baseline silently cannot fire.
+- **Quarterly triggers compare like with like** (a quarter against the same quarter a
+  year earlier), tested against the eight quarters supplied, so a seasonal business
+  does not fire one every year.
+- **Every trigger carries a date or a named event**, so it can be declared failed.
+- **The document states how many must fire**, and whether the price trigger alone is
+  sufficient. `--buy-check` applies that rule; where it is missing, the checker falls
+  back to "price plus at least one event trigger" and says that it is doing so.
+
+The reconciliation gate (§2.E) runs over the finished buy case, and its findings are
+**appended to the document** as well as logged — a log line is seen once by whoever
+ran the pipeline, while the document is read later by whoever is deciding.
+
+### F. First live runs (2026-08-02/03, gemini-3.6-flash)
+
+| Run | Cost | Calls | Notes |
+| :--- | ---: | ---: | :--- |
+| `buy_case.py MRVL` (standalone, against a stored `Watch`) | $0.1349 | 4 | 68.9k tokens, 24.4k cached; 4 triggers |
+| `main.py --buy-check MRVL` immediately after | $0.0779 | 2 | `WAIT` — 0 of 4 triggers met, correctly applying the buy case's own rule that price must fire alongside at least two event triggers |
+| `main.py MRVL` (in-pipeline, after the guards below were added) | $0.1751 | 5 | 3 triggers; 1 Tavily search. The ticker's whole run came to $0.5313, of which Phase B/C was $0.3544 |
+
+All three sit at or under `seed_buy_case_usd: 0.18`. The in-pipeline figure is the
+dearest of the three because the added web-search requirement costs a Tavily credit
+and a tool round trip — deliberately.
+
+Two things the first run surfaced, both now guarded:
+
+- The advisor wrote its triggers as `### Trigger 1 — Price` headings rather than the
+  bolded list the instructions ask for, which the first trigger counter (anchored on
+  `**Trigger N`) reported as zero. The counter is a log figure, not a gate, and is now
+  tolerant of both; the buy-check agent re-reads the document as prose either way. It
+  is a good illustration of why the machine-readable half of this design is "a later
+  LLM re-reads it", not "a parser must accept it".
+- It made **no** web searches, filling Section 3's deal history from background
+  knowledge and labelling it CONFIRMED. The instruction now requires at least one
+  `web_search_tool` and one `fmp_stock_news` call before that section is written, and
+  reserves the word CONFIRMED for something a source in front of it actually says;
+  anything else must be labelled UNVERIFIED or left out. The next run's Section 3
+  carried named publishers and dates for every transaction (*Business Wire*, 6 January
+  2026; *Reuters*, 29 July 2026), which is the difference between a claim a reader can
+  check and one they cannot.

@@ -37,13 +37,23 @@ tool detail):
 | `analyst_agent` | *(none — `tools=[]`)* | — | `bear_data`, `bull_data`, Magic Formula context, verified figures, quarterly trends |
 | `sale_advisor_agent` | `fmp_stock_news`, `web_search_tool` | FMP `/stable/news/stock`; Tavily Search API | `final_report` (the analyst's verdict + reasoning), verified figures, quarterly trends |
 | `sell_check_agent` | `fmp_stock_news`, `web_search_tool` | FMP `/stable/news/stock`; Tavily Search API | Stored sale conditions (from PostgreSQL `agent_outputs`), freshly-fetched current metrics + quarterly trends (FMP) |
+| `buy_case_agent` *(in `buy_case_agent.py`)* | `fmp_forward_estimates`, `fmp_price_snapshot`, `fmp_earnings_calendar`, `fmp_revenue_segments`, `fmp_pending_ma_filings`, `fmp_company_profile`, `fmp_stock_news`, `web_search_tool` | FMP `/stable` (analyst estimates, quote, earnings calendar, segments, M&A filings, news); Tavily | `final_report`, verified figures, quarterly trends, **and a freshly fetched current price (PRICE_DATA)** |
+| `buy_check_agent` *(in `buy_case_agent.py`)* | `fmp_forward_estimates`, `fmp_price_snapshot`, `fmp_earnings_calendar`, `fmp_pending_ma_filings`, `fmp_stock_news`, `web_search_tool` | same | Stored buy conditions (PostgreSQL `agent_outputs`), freshly-fetched price + metrics + quarterly trends |
 
 Every agent's data — whether tool-fetched live or pre-fetched into the
 prompt — ultimately comes from one of four external systems: **FMP**
 (financials, news, screener), **SEC EDGAR** (filing text), **Tavily**
 (open-web search), or the pipeline's own **PostgreSQL** database (prior
-`SALE_CASE` conditions). No agent has direct database or filesystem access —
-all persistence happens in `analyze_ticker` after the agents return.
+`SALE_CASE` / `BUY_CASE` conditions). No agent has direct database or filesystem
+access — all persistence happens in `analyze_ticker` (or, for Phase E,
+`buy_case_agent.write_buy_case`) after the agents return.
+
+**One asymmetry is deliberate: only the two buy-side agents get forward-looking
+data.** Analyst consensus estimates, the implied forward P/E, and the earnings
+calendar are withheld from the bear/bull/analyst chain, which weighs realised results
+and may not rest a `Buy` on a speculative catalyst. Phase E sits downstream of the
+verdict, so it can use projections without contaminating the verdict that produced
+it. See [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md).
 
 ## Shared prompt fragments, `main.py:142-241`
 
@@ -140,9 +150,9 @@ sequenceDiagram
 - Dropped by `--skip-sale-advisor` (`main.py:927-928` filters it out of the
   agent list before the loop runs) — see `_run_pipeline_async`.
 
-## The standalone follow-up role, `main.py:471-507`
+## The standalone follow-up roles
 
-### `sell_check_agent`
+### `sell_check_agent` — `main.py:471-507`
 
 - Not in `PIPELINE_AGENTS`; run only by `_run_sell_check_async`
   (`main.py:995-1031`), invoked from `run_sell_check` (`main.py:2200`).
@@ -152,6 +162,26 @@ sequenceDiagram
 - Marks each condition MET / NOT MET / UNCLEAR and writes a single
   `Recommendation: SELL` (any condition clearly met) or `Recommendation:
   HOLD` line, parsed by `_extract_recommendation` (`main.py:2194`).
+
+### `buy_case_agent` and `buy_check_agent` — `buy_case_agent.py`
+
+Both live outside `main.py`, and the reason is structural rather than stylistic:
+Phase E is conditional on a verdict `_extract_verdict` reads *after* the reasoning
+graph has finished, so it cannot be a graph member, and its module imports `main` for
+the shared cost/logging plumbing exactly as `critic_agent` does.
+
+- `buy_case_agent` reads `{final_report}`, `{verified_figures}`, `{quarterly_data}`
+  and `{price_data}`, and writes the seven-section buy case (why this is a Watch, the
+  forward valuation, what analysts expect, the ecosystem, the buy triggers, what would
+  take it off the watchlist, how to use it). Instruction file:
+  `buy-case-instructions.md`.
+- `buy_check_agent` reads `{buy_conditions}` (a stored `BUY_CASE`), plus freshly
+  fetched `{price_data}`, `{metrics_data}` and `{quarterly_data}`, marks each trigger
+  MET / NOT MET / UNCLEAR, and writes a single `Recommendation: BUY` or
+  `Recommendation: WAIT` line, parsed by `buy_case_agent.extract_buy_recommendation`.
+  Instruction file: `buy-check-instructions.md`.
+- Both are run through `critic_agent.run_agent` (one throwaway ADK session per turn,
+  with the same 429 backoff), not through `_run_pipeline_async`.
 
 ## Rate-limit handling shared by every agent call
 
@@ -170,3 +200,5 @@ sequenceDiagram
   [03-mcp-tools-and-persistence.md](03-mcp-tools-and-persistence.md).
 - How `_extract_verdict`, the reconciliation gate, and verified figures work:
   [05-guardrails-cost-and-reuse.md](05-guardrails-cost-and-reuse.md).
+- The two buy-side agents in full, and why they are the only forward-looking role:
+  [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md).

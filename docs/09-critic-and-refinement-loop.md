@@ -68,6 +68,7 @@ and money in the other.
 | `_agreed_banner` / `_not_agreed_banner` | `:233` / `:283` | The reader-facing standing block, including unfixed MINOR findings. |
 | `_demote_headings` | `:430` | Pushes an inlined review's headings down so they nest under their container. |
 | `_ADVISORY_NOTE` / `_refresh_sale_advisory` | `:310` / `:330` | Gives the refinement its own `SALE_CASE` — carried forward or re-derived. See below. |
+| `_BUY_CASE_NOTE` / `_refresh_buy_case` | after `_refresh_sale_advisory` | The same for `BUY_CASE`, with a verdict condition on top: four outcomes, not two. See below. |
 | `_assemble` | `:442` | Deterministic sections + analyst prose + reconciliation + critic standing. |
 | `run_refinement_loop` | `:460` | **The entry point.** Traced step by step below. |
 
@@ -171,9 +172,52 @@ declared verdict and the severities it assigned itself:
 the budget and leaves the reader with a report stamped un-agreed for nothing —
 `critic-instructions.md` says so in as many words, and this code enforces it.
 
+## The report is older than the figures beside it
+
+`_load_candidate` recomputes the Magic Formula figures **live at review time**, so a
+report refined a week later is critiqued against today's market cap, enterprise value
+and (since the price section was added) today's share price. That is the right basis
+for a critique — the reader is deciding today — but it manufactures one specific false
+finding, and it is the easiest one in the whole review to raise by mistake:
+
+> the report says the market capitalisation is $164B; VERIFIED_FIGURES says $131B;
+> therefore the report contains a factual error.
+
+It does not. It contains a figure that was correct on its own date. Left unguarded,
+the critic raises it, the reviser dutifully "fixes" it, and the result is a report
+whose numbers come from two different days with nothing to say which is which.
+
+Three things now prevent that:
+
+1. **`report_vintage`** — a state key seeded by `run_refinement_loop` and templated
+   into *both* agents, saying when the report was written and that the figures were
+   computed today. Without it neither agent can tell a stale figure from a wrong one:
+   `strip_generated_sections` removes the report's own `## Price` section before
+   review, so the vintage line is the only signal that the two are from different days.
+2. **A rule in the critic's instruction** — a market-derived figure (share price,
+   market cap, enterprise value, and every multiple built on them) that has merely
+   *moved* is not an error and must not be raised as one, however large the gap.
+   Filing-derived figures — debt, cash, equity, assets, operating profit — do not move
+   between filings, so a mismatch there **is** a finding. If the valuation has moved
+   far enough to change the argument, that is a finding about the *reasoning* and is
+   to be written as one: "the report reasoned at the price of its date, the stock is
+   elsewhere today, and this part of the thesis no longer follows."
+3. **A matching rule in the reviser's instruction** — do not re-price the prose. The
+   pipeline re-stamps a fresh, timestamped price section around the revised text; a
+   reviser editing prices inside it would defeat that.
+
+The deterministic reconciliation gate is looser here for the same reason: market cap
+carries a 25% tolerance against debt's 10%. It now also **says which kind of figure it
+flagged** — a market-derived finding is reported against "the CURRENT share price"
+with a note that this may be the passage of time rather than an error, while a
+filings finding still says "the filings show" and carries no such excuse. See
+[05](05-guardrails-cost-and-reuse.md) §3.
+
+Regression coverage: `_staleness_cases` in [`src/test_critic.py`](../src/test_critic.py).
+
 ## Spend control, `refine.py:_Estimator` / `_affordable`
 
-Two ceilings apply: `refinement.max_budget_usd` (or `--max-budget`, $2.25 by
+Two ceilings apply: `refinement.max_budget_usd` (or `--max-budget`, $2.45 by
 default) for the session, and the existing rolling `budget.per_day_usd` window from
 [05](05-guardrails-cost-and-reuse.md) §4 — an ad-hoc command must not route around
 the guard that exists to stop exactly this kind of spending.
@@ -181,8 +225,9 @@ the guard that exists to stop exactly this kind of spending.
 - **Checked between rounds, never mid-round** (`refine.py:559` pre-flight, `:661` per round). An abandoned round has been billed
   and produces nothing, which is worse than the overspend it prevents. Same rule
   `_check_budget` follows between tickers.
-- **A round is priced as revision + the critique that follows it + the sale
-  advisory it invalidates** (`_Estimator.full_round`, `refine.py:205`). Shipping a
+- **A round is priced as revision + the critique that follows it + the two derived
+  documents it invalidates — the sale advisory and the buy case**
+  (`_Estimator.full_round`, `refine.py:205`). Shipping a
   revision nobody reviewed would attach the *previous* round's objections to text
   that no longer says what they object to, so the loop always ends on a critique.
   And the moment a revision happens the existing advisory describes a thesis that no
@@ -190,6 +235,12 @@ the guard that exists to stop exactly this kind of spending.
   than discovering the shortfall afterwards is what keeps the ceiling honest. A
   session that agrees first time never pays the reservation, because no revision was
   ever committed to.
+- **The buy case is reserved unconditionally, and cannot be otherwise.** It is only
+  written when the refined report ends on `Watch` — and that is not knowable until
+  the revision exists, which is after the money would have had to be set aside. So
+  every session reserves it and a session ending on `Buy` or `Avoid` simply does not
+  spend it. `max_budget_usd` went 2.25 → 2.45 to absorb the reservation rather than
+  letting it quietly buy fewer review rounds.
 - `_Estimator` (`refine.py:186`) keeps **per-role** estimates (the critic makes tool calls, the
   reviser does not), seeded from config and then replaced by what each role
   actually cost × `estimate_headroom`. A zero measurement is ignored — a turn that
@@ -298,6 +349,37 @@ usable. Unpinned `--sell-check` also silently resolved to the pre-critique
 conditions; it now finds the refinement's own.
 
 Set `refinement.regenerate_sale_advisory: false` to restore the old behaviour.
+
+## The buy case after a review
+
+Everything above applies again, with one structural difference: a buy case exists
+**only for a `Watch`**, and a review can move the verdict onto it or off it. So
+`_refresh_buy_case` has four outcomes rather than three:
+
+| Refined verdict | Reviewed run had a buy case | What happens | Cost |
+| :--- | :--- | :--- | ---: |
+| not `Watch` | either | Nothing is written. The reviewed run's own buy case stays where it is — it still describes *that* report — and the viewer deliberately does **not** borrow it (`_OWN_ONLY_TYPES`, [06](06-webapp.md)) | $0 |
+| `Watch` | no | One is **written**: the review either moved the verdict onto `Watch` or is repairing a `--skip-buy-case` gap | ~$0.13–0.18 |
+| `Watch` | yes, revision ran | Re-derived against the revised text and re-anchored to today's price | ~$0.13–0.18 |
+| `Watch` | yes, no revision | Carried forward unchanged, stamped "carried over … unchanged" | $0 |
+
+The "created" row is the one with no counterpart in the sale advisory, and it is the
+reason this is not a copy of `_refresh_sale_advisory` with the nouns changed: a review
+that upgrades an `Avoid` to a `Watch`, or downgrades a `Buy` to one, has *created* the
+need for entry conditions that never existed.
+
+Carrying forward closes the same bug the advisory had: the refined report stamps the
+refinement's `run_id` and tells the reader to record it, so without it
+`--buy-check TICKER --run <that id>` would fail outright.
+
+The budget-exhausted path behaves identically to the advisory's — carry with a visible
+staleness label, or, with nothing to carry, end honestly with no buy case and name the
+repair command (`python buy_case.py TICKER --run <refinement_run_id>`). All six rows of
+the decision table, plus both budget-exhausted paths, are covered offline by
+[`src/test_buy_case.py`](../src/test_buy_case.py).
+
+Set `refinement.regenerate_buy_case: false` to disable. Full walkthrough:
+[11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md).
 
 ## What the reader gets
 

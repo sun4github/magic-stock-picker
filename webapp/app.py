@@ -168,7 +168,8 @@ def _fetch_run_tickers(run_id: str):
     conn = get_conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cur.execute(
-        f"""SELECT ticker, company_name, verdict, run_date, magic_rank
+        f"""SELECT ticker, company_name, verdict, run_date, magic_rank,
+                   share_price, price_as_of
             FROM ticker_runs WHERE run_id = %s
             ORDER BY {_VERDICT_ORDER_SQL}, magic_rank ASC NULLS LAST, ticker""",
         (run_id,),
@@ -191,6 +192,10 @@ def api_pipeline_run():
     for r in rows:
         d = dict(r)
         d["run_date"] = d["run_date"].isoformat() if d["run_date"] else None
+        # NUMERIC comes back as Decimal, which json cannot serialise. None stays None:
+        # a run analysed before prices were recorded has no price, and the UI shows a
+        # dash rather than a zero.
+        d["share_price"] = float(d["share_price"]) if d["share_price"] is not None else None
         out.append(d)
     return jsonify(out)
 
@@ -208,11 +213,17 @@ def download_run():
     writer = csv.writer(buf)
     # Rows come out of _fetch_run_tickers already in Buy/Watch/Avoid then rank order,
     # so the download reads the same way the on-screen list does.
-    writer.writerow(["Ticker", "Company", "Recommendation", "MagicFormulaRank"])
+    # SharePrice is the price the ANALYSIS was written against, not today's — the
+    # column header says so, and PriceAsOf carries the timestamp so a spreadsheet can
+    # tell how old it is. Both are blank for runs recorded before prices were stored.
+    writer.writerow(["Ticker", "Company", "Recommendation", "MagicFormulaRank",
+                     "SharePriceAtAnalysis", "PriceAsOf"])
     for r in rows:
         writer.writerow(
             [r["ticker"], r["company_name"] or "", (r["verdict"] or "").upper(),
-             r["magic_rank"] if r["magic_rank"] is not None else ""]
+             r["magic_rank"] if r["magic_rank"] is not None else "",
+             f"{float(r['share_price']):.2f}" if r["share_price"] is not None else "",
+             r["price_as_of"] or ""]
         )
     run_date = rows[0]["run_date"]
     stamp = run_date.strftime("%Y%m%d") if run_date else "run"
@@ -224,7 +235,17 @@ def download_run():
     )
 
 
+# Case documents a refinement run may BORROW from the run it reviewed when it has
+# none of its own (see `_fetch_reports`).
 _CASE_TYPES = ("BEAR_CASE", "BULL_CASE", "SALE_CASE")
+
+# Fetched the same way, but NEVER borrowed. A buy case exists only for a 'Watch', and
+# a critic review is entirely capable of moving the verdict off Watch — `refine.py`
+# then deliberately writes no BUY_CASE for its run. Borrowing the reviewed run's would
+# put an "at what price would I buy this" document on a run whose verdict is now Buy
+# or Avoid, which is the one place it must never appear. Absence here is a decision,
+# not a gap to be filled.
+_OWN_ONLY_TYPES = ("BUY_CASE",)
 
 _HEADING_RE = re.compile(r"^(#{1,5})(?=\s)", re.MULTILINE)
 
@@ -304,7 +325,7 @@ def _fetch_reports(run_id: str, ticker: str):
         """SELECT agent_type, raw_content FROM agent_outputs
            WHERE run_id = %s AND ticker = %s AND agent_type = ANY(%s)
            ORDER BY created_at ASC""",
-        (run_id, ticker, list(_CASE_TYPES)),
+        (run_id, ticker, list(_CASE_TYPES + _OWN_ONLY_TYPES)),
     )
     parts = {t: c for t, c in cur.fetchall()}
 
@@ -353,6 +374,7 @@ def _fetch_reports(run_id: str, ticker: str):
         "bear": parts.get("BEAR_CASE", ""),
         "bull": parts.get("BULL_CASE", ""),
         "sale": parts.get("SALE_CASE", ""),
+        "buy": parts.get("BUY_CASE", ""),
         "critic": critic,
         "final": fr[0] if fr else "",
         "verdict": fr[1] if fr else "",
@@ -378,7 +400,7 @@ def api_report():
         "critic_rounds": r["critic_rounds"],
         "source_run_id": r["source_run_id"],
     }
-    for kind in ("bear", "bull", "sale", "critic", "final"):
+    for kind in ("bear", "bull", "sale", "buy", "critic", "final"):
         payload[f"{kind}_html"] = render_md(r[kind])
         payload[f"has_{kind}"] = bool(r[kind])
     return jsonify(payload)
@@ -389,7 +411,7 @@ def download():
     """Download a report's raw markdown to the viewing device."""
     run_id = request.args.get("run_id")
     ticker = (request.args.get("ticker") or "").strip().upper()
-    kind = (request.args.get("kind") or "final").lower()  # bear|bull|sale|critic|final
+    kind = (request.args.get("kind") or "final").lower()  # bear|bull|sale|buy|critic|final
     if not run_id or not ticker:
         abort(400)
     r = _fetch_reports(run_id, ticker)
@@ -401,6 +423,7 @@ def download():
         "bear": "Bear_Case",
         "bull": "Bull_Case",
         "sale": "Sale_Advisory",
+        "buy": "Buy_Case",
         "critic": "Critic_Review",
         "final": f"Final_Report_{(verdict or 'NA').title()}",
     }.get(kind, "Report")

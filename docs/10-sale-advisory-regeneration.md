@@ -91,6 +91,16 @@ report was written against**. Without that, an advisory generated days after its
 report is indistinguishable from one written alongside it, and the difference is
 exactly what a reader needs to judge how much to trust a numeric trigger.
 
+## The same pattern, one artefact along
+
+[`src/buy_case.py`](../src/buy_case.py) is this command's twin for Phase E: it
+generates or repairs the **buy case** for a stored `Watch` report, with the same split
+(artefact on the target run, cost on its own row) and the same provenance note. Two
+differences: it refuses on a report whose verdict is not `Watch`, and refreshing is
+the *normal* use rather than the exception — its first trigger is a price range
+measured against a quote that moves every session. See
+[11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md).
+
 ## Where to look next
 
 - The critic loop whose `carried_stale` branch this repairs, and the reservation that

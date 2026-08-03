@@ -31,6 +31,13 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     And the omission is reported as deliberate rather than logged as a failure
     And a report produced without Phase C is fingerprinted separately, so it is never reused to satisfy a later full run
 
+  Scenario: Run Phase B without Phase E
+    Given the investor wants the reasoning and the sale advisory but not the buy case
+    When they run any Phase B mode with the buy case skipped
+    Then no BUY_CASE is stored even for a ticker whose verdict is "Watch", so a later buy-condition check has no triggers from it to test
+    And the omission is reported as deliberate rather than logged as a failure
+    And a report produced without Phase E is fingerprinted separately, so it is never reused to satisfy a later full run
+
   Scenario: Apply Greenblatt's step-by-step eligibility gates before ranking
     Given the screener has fetched the stock universe from FMP
     Then it eliminates financial stocks, including banks, insurers, asset managers and mutual-fund-like vehicles
@@ -125,6 +132,16 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
   # Deliberately NOT part of a pipeline run: it costs several times what producing
   # the report cost, so it is a separate command aimed at names about to be acted on.
 
+  Scenario: Do not mistake a moved price for a wrong one
+    Given a report is reviewed some days after it was written
+    And the verified figures, including the share price, are recomputed at review time
+    When the critic compares the report against them
+    Then it is told when the report was written and that the figures are from today
+    And a market-derived figure that has merely moved — share price, market capitalisation, enterprise value, or a multiple built on them — is not raised as a factual error
+    But a mismatch in a filing-derived figure — debt, cash, equity, assets, operating profit — still is, because those do not move between filings
+    And where the valuation has moved far enough to change the argument, that is raised as a finding about the reasoning rather than as a wrong number
+    And the reviser leaves the prices in the prose as they were, because the pipeline re-stamps a fresh timestamped price section around the revised text
+
   Scenario: Review a finished report with an independent critic
     Given a previous run produced and stored a final report for a ticker
     When the investor runs the critic refinement loop for that single ticker
@@ -214,4 +231,76 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     And where a run holds more than one advisory, every reader takes the newest
     But the cost is recorded as its own run, because adding it to a finished run's totals would rewrite the record of what that run cost
     And that cost run is not browsable and is never mistaken for a critic review
+    And the spend still counts against the rolling daily ceiling
+
+  # --- Phase E: the buy case (buy_case_agent.py, buy_case.py) ---
+  # A 'Watch' is the pipeline's most common verdict and its least actionable one: it
+  # tells the reader to wait without saying what for. Phase E finishes that sentence.
+
+  Scenario: Write a buy case for a Watch verdict, and only for a Watch verdict
+    Given the analyst's final report for a candidate reaches a verdict
+    When the verdict is "Watch"
+    Then the pipeline runs the buy-case advisor for that ticker using buy-case-instructions.md
+    And it stores the result as a BUY_CASE against the same run as the report
+    And it writes "reports/{Ticker}_Buy_Case.md"
+    But when the verdict is "Buy" or "Avoid" no buy case is written at all
+    And the reason is logged, because an absent buy case on a Buy is a decision rather than a failure
+    And the same rule applies to a screener run, a CSV run, and a single on-demand ticker
+
+  Scenario: Ground the buy case in forward-looking evidence the rest of the pipeline never sees
+    Given the buy-case advisor has the finished report, the verified figures, the quarterly feed and a freshly fetched current price
+    When it researches the case
+    Then it reads analyst consensus revenue and earnings estimates for future fiscal years
+    And it reports the implied forward price-to-earnings at today's price together with its basis: the price, the fiscal-year end, the consensus earnings per share, and how many analysts contributed
+    And it says so explicitly where coverage is thin or the low-to-high estimate spread is wide, because a mean of two opinions is not a market consensus
+    And it separates CONFIRMED developments from SPECULATIVE ones, and never rests a trigger on a rumour alone
+    And it reports pending deals, checking the SEC merger filings before writing any price-based trigger
+    And it names the outside companies whose results drive this company's revenue — customers, suppliers, close competitors — verifying what each actually does before naming it
+    And it gives the next scheduled earnings date for each of those companies as well as for the subject
+
+  Scenario: State the entry conditions so they can be checked later without re-reading the argument
+    Given the buy-case advisor has finished its research
+    When it writes the buy triggers
+    Then the first trigger is always a price range, derived by stated arithmetic rather than chosen
+    And every trigger carries its threshold, the current actual value beside it, and where and when it can be observed
+    And every numeric threshold is anchored to the verified figures, the quarterly feed, or the forward estimates
+    And a threshold already satisfied by today's figures is rejected as a trigger rather than written as one
+    And quarterly triggers are compared with the same quarter a year earlier, so a seasonal business does not fire one every year
+    And the document states how many triggers must fire, and whether the price trigger alone is sufficient
+    And it closes with the developments that would take the name off the watchlist entirely
+    And the same reconciliation gate the rest of the pipeline uses is run over it, with any finding appended to the document as well as logged
+
+  Scenario: Check whether a stock's buy conditions are now met (on-demand)
+    Given a previous run produced and stored a BUY_CASE for a ticker the investor does not own
+    When the investor runs the buy-condition check for that single ticker
+    Then it loads a stored BUY_CASE via "db_get_buy_case" (a specific run when pinned with --run, else the most recent)
+    And it fetches the current price directly, so the price trigger is tested against today's quote rather than the one the buy case was written at
+    And it gathers current fundamentals and quarterly trends by direct call
+    And it marks each trigger as MET, NOT MET, or UNCLEAR with sourced evidence, keeping the original numbering
+    And it reports what has changed since the buy case was written, including movement in the consensus estimates and the analyst price targets
+    And it recommends BUY only when the buy case's own stated firing condition is satisfied, otherwise WAIT
+    And where the buy case did not state one, it requires the price trigger plus at least one event trigger and says that it is applying that default
+    And an unavailable figure is UNCLEAR and never resolved in favour of buying
+    And it writes the evaluation to "reports/{Ticker}_Buy_Check.md" without creating a new pipeline run
+    And it warns when a newer report for the ticker has moved off "Watch", without refusing to run the check
+
+  Scenario: Keep the buy case consistent with the reviewed report
+    Given the buy case was written against the report as it stood before the critic review
+    And the buy case exists only for a "Watch" verdict, which a review is capable of changing in either direction
+    When the refinement finishes
+    Then a refined report that still reaches "Watch" gets a buy case under the refinement's own run id
+    And it is re-derived against the revised text when a revision ran, and carried forward unchanged when none did
+    And one is written from scratch when the reviewed run had none, which is what happens when the review moved the verdict onto "Watch"
+    And a refined report that no longer reaches "Watch" gets no buy case, and the reviewed run's own buy case is left where it is rather than carried forward
+    And the money for it is reserved before the loop commits to the revision, since whether it will be needed is not knowable until the revision exists
+    And if it was revised but the budget cannot cover re-deriving it, the previous buy case is carried with a visible staleness warning rather than shipped silently
+
+  Scenario: Generate a buy case for any stored Watch report on demand
+    Given a run has a final report whose buy case is missing, stale, or written against a price the market has left behind
+    When the investor runs the standalone buy case command for that ticker
+    Then it refuses if that report's verdict is not "Watch", and says why, rather than writing entry conditions for a company the analysis argued against
+    And it derives the buy case from that run's report, whether that run came from the pipeline or from a critic review
+    And it anchors the triggers to the price and figures current at generation time, and says so on the document itself
+    And the buy case is stored against the run it was derived from, so the buy-condition check pinned to that run finds it
+    But the cost is recorded as its own run, so the named run's totals are not rewritten
     And the spend still counts against the rolling daily ceiling

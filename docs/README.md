@@ -23,7 +23,7 @@ Come here once you need to change or extend the code.
 | Doc | Covers | Primary source files |
 | :--- | :--- | :--- |
 | [01-orchestration-and-cli.md](01-orchestration-and-cli.md) | CLI entry point, the five execution modes, and the per-ticker control flow that ties everything together | `src/main.py` |
-| [02-agents-and-reasoning-graph.md](02-agents-and-reasoning-graph.md) | The five `LlmAgent` definitions, their prompts, and how they hand off state | `src/main.py`, `src/research-instructions.md`, `src/bullish-research-instructions.md`, `src/sale-advisor-instructions.md` |
+| [02-agents-and-reasoning-graph.md](02-agents-and-reasoning-graph.md) | The `LlmAgent` definitions, their prompts, and how they hand off state | `src/main.py`, `src/research-instructions.md`, `src/bullish-research-instructions.md`, `src/sale-advisor-instructions.md` |
 | [03-mcp-tools-and-persistence.md](03-mcp-tools-and-persistence.md) | Every MCP tool (data fetch + database) the agents and orchestrator call | `src/mcp_server.py` |
 | [04-screener-internals.md](04-screener-internals.md) | Phase A: universe fetch, Greenblatt's eligibility gates, ranking, CSV output | `src/magic_formula_starter_screener.py` |
 | [05-guardrails-cost-and-reuse.md](05-guardrails-cost-and-reuse.md) | Verified figures, the reconciliation gate, budget ceilings, duplicate-run reuse, and cost accounting | `src/main.py` |
@@ -32,6 +32,7 @@ Come here once you need to change or extend the code.
 | [08-gates-and-validation-inventory.md](08-gates-and-validation-inventory.md) | Every validation/eligibility/integrity/resilience gate in the system, consolidated into one table by category, with fail-loud-vs-fail-open behavior called out | all of the above |
 | [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md) | Phase D: the independent critic, the analyst/critic feedback loop, its spend ceiling, and the cross-run critic memory that keeps it from relitigating settled points | `src/critic_agent.py`, `src/refine.py`, `src/critic-instructions.md` |
 | [10-sale-advisory-regeneration.md](10-sale-advisory-regeneration.md) | The standalone `sale_advisory.py` command: generating or repairing a Phase C sale advisory for any stored report, and why its artefact and its cost land on different runs | `src/sale_advisory.py` |
+| [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md) | Phase E: the buy case written for a `Watch` verdict (the entry price range and the triggers that would make it a Buy), the forward-looking feeds only it reads, and the `--buy-check` command that tests it later | `src/buy_case_agent.py`, `src/buy_case.py`, `src/buy-case-instructions.md`, `src/buy-check-instructions.md` |
 
 ## What is *not* in the runtime path
 
@@ -61,6 +62,9 @@ not. Put anything similar there rather than in `src/`.
 8. **10** for the standalone sale-advisory command
    (`python sale_advisory.py TICKER`) — a small repair tool, also outside the
    pipeline, for reports whose advisory is missing or out of date.
+9. **11** for Phase E, the buy case. Unlike **09** and **10** this one *is* part of a
+   pipeline run — but only for the tickers whose verdict is `Watch`, so it is easy to
+   read **01** end to end without noticing it exists.
 
 ## Conventions used in these docs
 
@@ -70,7 +74,9 @@ not. Put anything similar there rather than in `src/`.
   trusting the number blindly.
 - Diagrams are [Mermaid](https://mermaid.js.org/); they render directly in
   GitHub and most Markdown viewers.
-- "Phase A/B/C" match the terms used in `agent_architecture.md`: A = screener,
-  B = bear/bull/analyst reasoning, C = sale advisor. "Phase D" is the critic
-  refinement loop — opt-in, run per ticker from its own entry point
-  (`refine.py`), never as part of a pipeline run.
+- Phase letters match `agent_architecture.md`: A = screener, B = bear/bull/analyst
+  reasoning, C = sale advisor, D = the critic refinement loop, E = the buy case.
+  **D and E are lettered in the order they were added, not in pipeline order**: D is
+  opt-in, run per ticker from its own entry point (`refine.py`), never as part of a
+  pipeline run; E runs *inside* the pipeline, immediately after C, for a `Watch`
+  verdict only.
