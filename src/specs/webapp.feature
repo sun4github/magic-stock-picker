@@ -14,6 +14,7 @@ Background:
     Then the app lists that ticker's pipeline runs from "ticker_runs", sorted by date (date shown)
     And when the user selects a run
     Then the app displays the Bear Case, Bull Case, Sale Advisory, and Final Report as rendered markdown
+    And it shows a Buy Case tab as well when that run has one, which is when its verdict was "Watch"
     And it shows the Buy/Watch/Avoid recommendation for that run
     And it offers a download of each report as a markdown (.md) file to the viewing device
 	
@@ -37,6 +38,14 @@ Background:
     And every definition is reachable and fully populated, since a term with no matching entry shows nothing at all rather than reporting an error
     And the figures shown match the downloadable cheat sheet exactly, which is the authoritative source for them
 
+  Scenario: Show the price each verdict was reached at
+    Given a pipeline run is open in the viewer
+    Then each ticker's row shows the share price recorded when that ticker was analysed, not a live quote
+    And the CSV download carries the same price and its timestamp
+    And a run analysed before prices were recorded shows a dash rather than a blank or a zero, because that day's price cannot be recovered
+    And the viewer never calls a market data provider, since it is read-only and holds no such credential
+    And a reused report's row carries the price of the run it reuses, so the listing and the document it links to never disagree
+
   Scenario: Rank is recorded per ticker per run
     Given a pipeline run analyzes candidates selected by the Phase A screener
     Then each ticker's "Final_Rank" from that screen is stored on its "ticker_runs" row as "magic_rank"
@@ -59,3 +68,12 @@ Background:
     And each round's own headings sit below its round heading, so one round cannot read as part of another
     And the tab offers the same markdown download as the other reports
     And the Bear Case, Bull Case and Sale Advisory shown for that run are the ones from the run it reviewed, labelled as such, because a review does not re-run that research
+
+  Scenario: Show a buy case only where one exists, and never borrow one
+    Given a run is open in the viewer
+    When its verdict is "Watch" and a buy case was written for it
+    Then a "Buy Case" tab is shown, offering the same markdown download as the other reports
+    But when the verdict is "Buy" or "Avoid" the tab is hidden entirely, because the absence is the correct answer rather than a missing document
+    And a critic-reviewed run never borrows the reviewed run's buy case the way it borrows the Bear, Bull and Sale documents
+    And the reason is that a review can move the verdict off "Watch", and a buy case must never appear on a run whose verdict is "Buy" or "Avoid"
+    And where a run holds more than one buy case, every reader takes the newest

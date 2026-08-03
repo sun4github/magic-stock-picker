@@ -21,26 +21,33 @@ flowchart LR
     A["Phase A — Screener<br/>Scans the FMP universe, applies<br/>Greenblatt's eligibility gates, and<br/>ranks survivors on ROC, Earnings Yield<br/>and Lynch's PEG ratio"]
     B["Phase B — Decomposer Analysis<br/>Bear and Bull agents argue the case;<br/>a neutral Analyst Agent weighs both<br/>and issues Buy / Watch / Avoid"]
     C["Phase C — Sale Advisory<br/>Assumes the stock is already owned;<br/>names 3 measurable events that would<br/>break the original investment thesis"]
+    W["Phase E — Buy Case<br/>ONLY when the verdict is Watch.<br/>Assumes you do NOT own it; derives the<br/>buy price range and the events that<br/>would make it a Buy"]
     D["Phase D — Critic Review (opt-in)<br/>Producer–Critic / reflection loop<br/>An INDEPENDENT Critic Agent re-verifies<br/>the report with its own web + FMP tools<br/>and hunts fallacies in the Analyst's judgement"]
     E["Analyst revises<br/>under the same rules<br/>as Phase B"]
     F["Refined report — agreed by both,<br/>or stamped 'the critic has NOT agreed',<br/>with the open objections attached"]
     A --> B --> C
+    C -->|"verdict == Watch"| W
     C -.->|"opt-in, run per ticker:<br/>python refine.py TICKER"| D
     D -->|"blocking / material findings"| E
     E -->|"re-review"| D
     D ==>|"agreed, or budget spent"| F
 ```
 
-Phases A–C are one pipeline run. **Phase D is deliberately not part of it** — it is
+Phases A–C are one pipeline run, and so is Phase E — but only for the candidates
+whose verdict comes back **Watch**. **Phase D is deliberately not part of it** — it is
 a separate command you point at a report you're about to act on, because it costs
 several times what producing that report cost.
 
-Two smaller commands are left off the diagram because they add no stage — they act
+(The letters run in the order the phases were added, not in pipeline order: D is the
+opt-in critic loop, E runs inside the pipeline right after C.)
+
+Four smaller commands are left off the diagram because they add no stage — they act
 on a run that already exists: **`sale_advisory.py`** regenerates one report's Phase C
-advisory (when it is missing, stale, or you want its thresholds re-anchored to
-today's figures), and **`main.py --sell-check`** tests a stored advisory's triggers
-against current data to advise Sell or Hold. Both are covered under
-[Running](#running).
+advisory and **`buy_case.py`** does the same for a Watch report's Phase E buy case
+(when either is missing, stale, or you want it re-anchored to today's figures and
+price); **`main.py --sell-check`** tests a stored advisory's triggers to advise Sell
+or Hold, and **`main.py --buy-check`** tests a stored buy case's triggers to advise
+Buy or Wait. All four are covered under [Running](#running).
 
 **Phase A — Screener.** Scans the FMP stock universe, applies Greenblatt's
 step-by-step eligibility gates — no financials, utilities, funds/REITs or foreign
@@ -78,6 +85,16 @@ on-demand ticker):
 the stock: **Buy** (worth initiating), **Watch** (not compelling now / watchlist),
 or **Avoid** (actively unattractive).
 
+**Every report opens with the price.** A one-row table above everything else: what a
+share cost when the report was written, the timestamp, the 52-week range, how far off
+its high it is, the 50- and 200-day averages, and the market value the ratios below
+are all computed from. It is stamped rather than presented as current — a stored
+report is a point-in-time document, and knowing what a stock cost when a `Watch` was
+written is most of the context for judging whether that verdict still holds. The same
+single quote is given to the agents as a verified figure, so the prose can't wander
+between two different prices, and to the buy case, so its price triggers are measured
+against exactly the number printed at the top.
+
 **Phase C — Sale Advisory.** After the analyst report is produced, a **Sale
 Advisor Agent** (`src/sale-advisor-instructions.md`) runs per ticker. It *ignores*
 the verdict and *assumes the stock is already owned*, then — using the analyst's
@@ -85,13 +102,41 @@ bull/bear thesis plus fresh FMP news + Tavily research — names the **three spe
 measurable business events** (not price movements) that would signal the original
 investment case is broken and justify selling.
 
+**Phase E — Buy Case (Watch verdicts only).** A `Watch` is the most common verdict
+and the least actionable one: it tells you to wait without saying what for. So when —
+and only when — the verdict is `Watch`, a **Buy Case Agent**
+(`src/buy-case-instructions.md`) finishes the sentence. It is the mirror of Phase C:
+where the sale advisory assumes you own the stock and names what would break the
+thesis, the buy case assumes you **don't** and names what would make it worth owning.
+
+It is also the only role in the system that looks **forward**. It reads analyst
+consensus revenue and earnings estimates for future fiscal years, the **forward P/E
+those imply at today's price — always quoted with its basis** (the price, the
+fiscal-year end, the consensus EPS, and how many analysts stand behind it), the
+analyst price targets and who moved them, pending deals and SEC merger filings, and
+the earnings dates of the companies whose results actually drive this one's revenue
+(a chip designer's customers are the cloud operators buying the chips, so their
+capital-spending guidance is a leading indicator for the supplier). Those feeds are
+deliberately kept away from the bear/bull/analyst chain, which weighs results that
+have actually happened and may not rest a `Buy` on a projection.
+
+What it produces is a short document ending in **buy triggers** — a derived price
+range showing its arithmetic, plus three to five observable events, each with its
+threshold, the current value beside it, and the report or announcement it will show
+up in. `python main.py --buy-check TICKER` re-tests all of them against current data
+later and answers **Buy** or **Wait**. No buy case is written for a `Buy` (the entry
+condition is now) or an `Avoid` (writing entry conditions for a company the analysis
+argued against is exactly the wrong document to hand someone).
+
 **Phase D — Critic Review (opt-in): the Producer–Critic / reflection pattern.**
 Phases B and C are adversarial — bear versus bull — but all four roles read the
 *same* pre-fetched evidence and descend from the same prompt lineage, so nothing
 stands outside them. The reconciliation gate catches wrong **figures**; nothing
 catches wrong **reasoning** — a verdict that doesn't follow from the report's own
 body, a "Buy" resting entirely on a rumoured deal, a "priced in" claim with nothing
-behind it.
+behind it. This class of check only exists in Phase D, and Phase D is opt-in — a
+report that nobody runs `refine.py` against has had its numbers checked but its
+reasoning never examined by anything.
 
 So `python refine.py TICKER` (see [below](#independent-critic-review-refinepy))
 adds a **Critic Agent** as the independent half of a producer–critic pair. It has
@@ -108,10 +153,11 @@ point already settled.
 
 **Persistence.** Every run writes to PostgreSQL (with `pgvector` embeddings for
 semantic search): the pipeline run's token/search usage and estimated cost, each
-agent's raw output (SEC/metrics stored without embeddings; bear/bull/sale case and
+agent's raw output (SEC/metrics stored without embeddings; bear/bull/sale/buy case and
 the final report embedded for search), and the final verdict. Reports are also
-saved locally to `src/reports/<TICKER>_Final_Report_<Buy|Watch|Avoid>.md` and
-`src/reports/<TICKER>_Sale_Advisory.md`. A Phase D review is stored as its **own**
+saved locally to `src/reports/<TICKER>_Final_Report_<Buy|Watch|Avoid>.md`,
+`src/reports/<TICKER>_Sale_Advisory.md`, and — for a Watch —
+`src/reports/<TICKER>_Buy_Case.md`. A Phase D review is stored as its **own**
 run — the report it reviewed is never overwritten — writing
 `src/reports/<TICKER>_Refined_Report_<Verdict>.md` and
 `src/reports/<TICKER>_Critic_Review.md`.
@@ -409,11 +455,12 @@ python main.py --from-csv path/to/other_rankings.csv   # explicit CSV path
 
 `--screen-only` and `--from-csv` are exact inverses, so **screening and analysis can
 run on different cadences**: refresh the rankings as often as you like for free, and
-pay for Phase B/C only in the periods you actually intend to act on the list. The two
-together do the same work as a bare `python main.py`.
+pay for Phase B/C/E only in the periods you actually intend to act on the list. The
+two together do the same work as a bare `python main.py`.
 
 **Control how deep to analyze** — `--top-n` overrides `top_n_candidates` for one run.
-Depth is the main cost lever, at roughly $0.37/ticker.
+Depth is the main cost lever, at roughly $0.37/ticker — plus about $0.18 more for each
+ticker whose verdict comes back `Watch` and therefore gets a buy case.
 ```bash
 python main.py --from-csv --top-n 12
 ```
@@ -431,6 +478,13 @@ python main.py --from-csv --skip-sale-advisor
 ```
 Reports produced with and without Phase C are fingerprinted separately, so a cheap
 Phase-C-less run is never reused to satisfy a later full one.
+
+**Drop Phase E** — skip the buy case even for a `Watch` verdict. Nothing is written,
+so `--buy-check` will have no triggers from such a run to test. Fingerprinted
+separately for the same reason as above.
+```bash
+python main.py --from-csv --skip-buy-case
+```
 
 **On-demand single ticker** — bypasses the screener entirely. Magic Formula
 ROC/Earnings Yield are computed for just that ticker so the Bull Agent still has
@@ -466,6 +520,36 @@ produced a `SALE_CASE` for the ticker.
 > purchased under — so you evaluate the conditions you actually committed to rather
 > than a fresh `SALE_CASE` anchored to a thesis you never acted on. The `RUN_ID` is
 > shown in the run logs. See [`src/specs/agent_architecture.md`](src/specs/agent_architecture.md) §8.D.
+
+**Buy-condition check** — the mirror image, for a stock you do **not** own: test
+whether the buy case's price range and triggers are now met. It loads a stored
+`BUY_CASE`, fetches **today's price** plus current fundamentals and live news/web
+research, marks each trigger **MET / NOT MET / UNCLEAR** with evidence, reports what
+has moved since (consensus estimates, analyst targets, any bid), and advises **BUY**
+or **WAIT**.
+```bash
+python main.py --buy-check MRVL                    # against MRVL's latest buy case
+python main.py --buy-check MRVL "Marvell"          # optional explicit company name
+python main.py --buy-check MRVL --run <RUN_ID>     # against a SPECIFIC run's buy case
+```
+Also lightweight: it writes `src/reports/<TICKER>_Buy_Check.md` and creates no
+pipeline run. It requires a prior run to have produced a `BUY_CASE` — which means a
+prior run must have reached a `Watch` verdict on that ticker.
+
+> **Note the opposite default from `--sell-check`, and why.** A sell-check should be
+> anchored to the run you *bought* under, because sale conditions are the exit
+> criteria of a specific entry thesis. A buy-check is a decision you are making
+> **today**, so the newest buy case is the right one by default. `--run` is there for
+> when you want to test what a *particular* past case would have said — "would the
+> case I passed on in March have fired by now?". If a newer report has since moved
+> the ticker off `Watch`, the command says so and runs the check anyway.
+
+**Recommendation lines at a glance:**
+
+| Command | Assumes you | Reads | Answers |
+| :--- | :--- | :--- | :--- |
+| `--sell-check` | own it | stored `SALE_CASE` | `SELL` / `HOLD` |
+| `--buy-check` | don't own it | stored `BUY_CASE` | `BUY` / `WAIT` |
 
 ### Independent critic review (`refine.py`)
 
@@ -511,12 +595,15 @@ the verdict.
 Why it is a separate command: it costs several times what producing the report cost
 in the first place, and takes as long. Run it on the handful of names you are
 actually about to buy. The ceiling defaults to `refinement.max_budget_usd` in
-`config.yaml` ($2.25) and is enforced *between* rounds. Committing to a revision
-commits to three things, priced as one: the revision, **the review that must follow
-it** — so the report you are handed has always been checked as it stands — and the
+`config.yaml` ($2.45) and is enforced *between* rounds. Committing to a revision
+commits to four things, priced as one: the revision, **the review that must follow
+it** — so the report you are handed has always been checked as it stands — the
 **sale advisory that revision invalidates**, since an advisory written against the
-pre-review report can carry sell triggers anchored to a figure the critic corrected.
-The rolling daily budget still applies on top.
+pre-review report can carry sell triggers anchored to a figure the critic corrected,
+and the **buy case**, on the same logic. The buy case is reserved for every session
+even though only a refined report ending on `Watch` will spend it: whether it is
+needed depends on the verdict of a report that does not exist yet, so it cannot be
+reserved conditionally. The rolling daily budget still applies on top.
 
 The refinement gets its **own** run id and its own cost row; the report it reviewed
 is left untouched, and the refined one is written to
@@ -524,6 +611,16 @@ is left untouched, and the refined one is written to
 `src/reports/<TICKER>_Critic_Review.md`. It also shows up in the
 [web UI](#web-ui-report-viewer) as its own run, marked with a critic-standing chip
 and a dedicated Critic Review tab — see below.
+
+> **A review is not confused by an old price.** The critic works from figures
+> recomputed *today*, while the report it is reading was written days or weeks ago —
+> so the stock has usually moved since. It is told which figures are allowed to have
+> moved (share price, market value, and anything derived from them) and which are not
+> (debt, cash, equity, assets, profit — those come off the balance sheet and don't
+> change until the next filing). A price that has merely moved is never reported as a
+> mistake, and the analyst is told not to quietly rewrite old prices to today's. If
+> the move is big enough to actually weaken the argument, *that* gets raised — as a
+> point about the reasoning, not as a wrong number.
 
 > **The critic remembers.** Every finding is stored in a `critic_memory` table and
 > replayed into both agents on later rounds *and later sessions for the same
@@ -562,6 +659,32 @@ rewrite the record of what that run cost.
 > review would not repair a stale advisory: the critic agrees immediately (the report
 > is already corrected), so no revision runs, and the advisory gets carried forward
 > again — this time without its staleness warning.
+
+### Generate or repair a buy case (`buy_case.py`)
+
+The same tool for the other side. The pipeline writes a buy case once, for a `Watch`
+verdict, as the last step of that ticker's run — and a buy case ages faster than
+anything else here, because its first trigger is a price range measured against a
+quote that moves every session and derived from consensus estimates that are revised
+continuously. Refreshing one is ordinary watchlist maintenance, not a repair:
+
+```bash
+python buy_case.py MRVL                     # from MRVL's latest report
+python buy_case.py MRVL --run <RUN_ID>      # from a SPECIFIC run's report
+python buy_case.py MRVL "Marvell"           # optional explicit company name
+```
+
+Costs ~$0.12–0.18 against the rolling daily budget. The same split as
+`sale_advisory.py` applies: the buy case is stored **on the run you name**, so
+`--buy-check --run <that id>` picks it up and the viewer shows it on that run's Buy
+Case tab, while the *cost* gets its own row so the named run's totals are not
+rewritten.
+
+**It refuses on a report whose verdict is not `Watch`**, and there is no override
+flag. A `Buy` needs no entry conditions — the entry condition is now — and an `Avoid`
+should not be handed any. If you think the verdict is wrong, the answer is
+`python refine.py TICKER`: let the critic move it on the evidence, rather than writing
+entry conditions underneath a verdict that says no.
 
 ## Running the book's strategy on a 2-month cycle
 
@@ -631,8 +754,8 @@ cd src
 python main.py
 ```
 
-That is Phase A + B + C: roughly 55 minutes and about **$11** (6 runs ≈ $66/year).
-Then read the results:
+That is Phase A + B + C, plus Phase E for the Watch verdicts: roughly 55 minutes and
+about **$11–13** (6 runs ≈ $66–78/year). Then read the results:
 
 ```bash
 cd ../webapp
@@ -640,8 +763,15 @@ python app.py     # http://localhost:8000
 ```
 
 Open **By pipeline run** → newest run. Buy verdicts are grouped first and sorted by
-Magic Formula rank, so your candidates are the top rows. Work down them, read each
-final report, and take 6.
+Magic Formula rank, so your candidates are the top rows — each with the share price it
+was analysed at, so you can see at a glance how far the market has moved since. Work
+down them, read each final report, and take 6.
+
+**Then do something with the Watch verdicts**, which are usually the largest group.
+Each has a **Buy Case** tab holding the price range and the events that would make it
+a Buy. Skim those, note the ones whose triggers look close, and between runs test them
+with `python main.py --buy-check TICKER` — a couple of cents each, and it is the
+difference between a watchlist you act on and a list of tickers you never revisit.
 
 Split the run if you would rather see the shortlist before spending anything:
 
@@ -666,18 +796,29 @@ python main.py --sell-check TICKER --run <RUN_ID>
 Using the latest `SALE_CASE` instead would test a thesis you never acted on. This tool
 tracks no positions and no purchase dates; keep those wherever you already do.
 
+The buy side of the same rhythm: names that came back `Watch` in an earlier run carry
+a buy case, so before each buying run is a natural moment to run `--buy-check` over
+the handful whose triggers were closest. A trigger that has fired is a candidate you
+already did the work on. If a buy case is more than a run or two old, regenerate it
+first (`python buy_case.py TICKER`) so its price range is anchored to today's market
+rather than to the one it was written in.
+
 ## Web UI (report viewer)
 
 A separate, read-only Flask web app in [`webapp/`](webapp/) lets you browse the
 stored reports: pick a ticker, choose a run (by date), and view the Bear / Bull /
-Sale Advisory / Final reports with the Buy/Watch/Avoid recommendation and a markdown download.
+Sale Advisory / Buy Case / Final reports with the Buy/Watch/Avoid recommendation and a
+markdown download. The **Buy Case** tab appears only where there is one — that is, on a
+`Watch` verdict.
 It's designed to run on a Raspberry Pi and connects to the same database via its
 own `.env`. See [`webapp/README.md`](webapp/README.md) for full details.
 
 A run produced by `refine.py` is marked in the run picker (✓/⚠), carries a critic
-standing chip next to its verdict badge, and gets a fifth **Critic Review** tab
-holding every round of the exchange — the Bear/Bull/Sale tabs on that run are
-borrowed from the report it reviewed rather than duplicated.
+standing chip next to its verdict badge, and gets a **Critic Review** tab holding
+every round of the exchange — the Bear/Bull/Sale tabs on that run are borrowed from
+the report it reviewed rather than duplicated. The Buy Case tab is deliberately *not*
+borrowed: a review can move the verdict off `Watch`, and a buy case must never appear
+on a run whose verdict is `Buy` or `Avoid`.
 
 ### Quick start
 

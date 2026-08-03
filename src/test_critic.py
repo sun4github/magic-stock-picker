@@ -215,19 +215,25 @@ def _budget_cases():
     est.observe("critique", 0.0)
     zero_ignored = abs(est.critique - 0.40 * h) < 1e-9
     adv = refine.SEED_ADVISORY_USD if refine.REGENERATE_SALE_ADVISORY else 0.0
+    buy = refine.SEED_BUY_CASE_USD if refine.REGENERATE_BUY_CASE else 0.0
     fresh = refine._Estimator()          # unmeasured, as at session start
     tight = refine.SEED_CRITIQUE_USD + 0.01   # room for one critique, nothing more
     return [
-        # A revision commits the session to three things, not two: the revision, the
-        # critique that must follow it, AND the sale advisory it invalidates. Missing
-        # the third is how a session ends up revised, reviewed, and shipping a stale
-        # advisory it could not afford to re-derive.
-        ("a full round reserves revision + critique + advisory",
-         abs(seeded - (refine.SEED_CRITIQUE_USD + refine.SEED_REVISION_USD + adv)) < 1e-9),
+        # A revision commits the session to four things, not two: the revision, the
+        # critique that must follow it, the sale advisory it invalidates, AND the buy
+        # case (reserved unconditionally, because whether the refined report will need
+        # one depends on a verdict that does not exist yet — see refine._Estimator).
+        # Missing any of them is how a session ends up revised, reviewed, and shipping
+        # a stale derived document it could not afford to re-derive.
+        ("a full round reserves revision + critique + advisory + buy case",
+         abs(seeded - (refine.SEED_CRITIQUE_USD + refine.SEED_REVISION_USD
+                       + adv + buy)) < 1e-9),
         ("the advisory reservation is real, not zero",
          adv > 0 if refine.REGENERATE_SALE_ADVISORY else adv == 0),
+        ("the buy-case reservation is real, not zero",
+         buy > 0 if refine.REGENERATE_BUY_CASE else buy == 0),
         ("measurements replace the seeds",
-         abs(measured - (0.40 * h + 0.20 * h + adv)) < 1e-9),
+         abs(measured - (0.40 * h + 0.20 * h + adv + buy)) < 1e-9),
         # The reservation must bind exactly where intended: a session that only ever
         # critiques is not charged for an advisory it will never need, but the moment
         # a revision is on the table the advisory is part of the commitment.
@@ -381,6 +387,44 @@ def _standalone_advisory_cases():
         ("the generator drives the pipeline's own sale advisor agent",
          "sale_advisor_agent" in refine.run_sale_advisor.__doc__
          or main.sale_advisor_agent.output_key == "sale_data"),
+    ] + _staleness_cases()
+
+
+def _staleness_cases():
+    """A review happens LATER than the report it reviews, with figures from today.
+
+    That gap is deliberate — the reader is deciding today — but it creates one
+    specific false finding: the report says the market cap is $164B, VERIFIED_FIGURES
+    (recomputed at review time) says $131B, and the critic reports a correct figure as
+    an error. The reviser then "fixes" a number that was right when it was written,
+    leaving a document whose figures come from two different days.
+
+    Guarded by prompt rules rather than by code, so what is testable is that the rules
+    are actually present and that both agents are given the vintage they need to apply
+    them. `refine._load_candidate`'s docstring has always conceded this hazard; these
+    assertions are what stop the guard being deleted as verbose.
+    """
+    critic_text = ca.critic_agent.instruction
+    reviser_text = ca.reviser_agent.instruction
+    return [
+        ("the critic is told when the report was written",
+         "{report_vintage}" in critic_text),
+        ("and the reviser is too", "{report_vintage}" in reviser_text),
+        ("the critic is told a moved market figure is not an error",
+         "is not an error" in critic_text and "market capitalisation" in critic_text),
+        ("it is told which figures DO NOT move between filings",
+         "debt, cash, equity, assets" in critic_text),
+        ("it is told to raise a real move as an argument, not a correction",
+         "it is a clock" in critic_text),
+        ("the reviser is told not to re-price the prose",
+         "Do not re-price the report" in reviser_text),
+        # The report under review never contains the deterministic price section —
+        # `strip_generated_sections` removes it — so the vintage line is the ONLY way
+        # either agent can know the prose and the figures are from different days.
+        ("the price section is stripped before review, so vintage is the only signal",
+         "## Price" not in refine.strip_generated_sections(
+             "> **Run ID:** `x`\n\n## Price\n\n| a |\n| - |\n\n"
+             "## Magic Formula Metrics\n\nstuff\n\n## Recent Quarter Check\n\nbody\n")),
     ]
 
 
@@ -398,10 +442,13 @@ def _inlining_cases():
         ("the demotion stops at h6", "###### deep" in out),
         ("body text is untouched", "- **Severity:** MINOR" in out),
         # The report's own outline must stay the analyst's five sections plus the
-        # two this tool adds — never the critic's section names mixed in among them.
+        # three this tool adds — never the critic's section names mixed in among them.
+        # '## Price' is present even here, where no quote was passed: the section
+        # renders a "could not be retrieved" note rather than disappearing, so the
+        # outline of a report never depends on whether a market data call succeeded.
         ("the inlined review adds no top-level section",
-         top_level == ["## Magic Formula Metrics", "## Recent Quarter Check",
-                       refine.CRITIC_SECTION_HEADING]),
+         top_level == ["## Price", "## Magic Formula Metrics",
+                       "## Recent Quarter Check", refine.CRITIC_SECTION_HEADING]),
     ]
 
 

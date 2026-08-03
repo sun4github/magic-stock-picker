@@ -40,12 +40,46 @@ function today. Two different consumption paths follow from that:
 | `fmp_metrics_extractor` | `mcp_server.py:256` | Direct | FMP `/stable/key-metrics`, `/ratios`, `/ratings-snapshot`, `/price-target-consensus`, `/grades-consensus`, `/stock-peers` | Structured JSON, **annual** fundamentals + analyst opinion | `FMP_API_KEY` |
 | `fmp_quarterly_trends` | `mcp_server.py:343` | Direct | FMP `/stable/income-statement`, `/cash-flow-statement`, `/balance-sheet-statement` (`period=quarter`) | Structured JSON → rendered as markdown tables, **quarterly** fundamentals | `FMP_API_KEY` |
 | `fmp_stock_news` | `mcp_server.py:485` | **Agent tool** (bear/bull/sale/sell-check) | FMP `/stable/news/stock` | Unstructured news headlines + snippets, ticker-tagged, factual | `FMP_API_KEY` |
-| `web_search_tool` | `mcp_server.py:523` | **Agent tool** (bear/bull/sale/sell-check) | Tavily Search API (`api.tavily.com/search`) | Unstructured open-web search results + a synthesized answer, qualitative | `TAVILY_API_KEY` |
+| `web_search_tool` | `mcp_server.py:523` | **Agent tool** (bear/bull/sale/sell-check/buy-case/buy-check) | Tavily Search API (`api.tavily.com/search`) | Unstructured open-web search results + a synthesized answer, qualitative | `TAVILY_API_KEY` |
+| `fmp_price_snapshot` | "TOOL 5" block | Direct **and** agent tool (buy-case/buy-check) | FMP `/stable/quote` | Structured JSON, **live price** + 52-week range + 50/200-day averages | `FMP_API_KEY` |
+| `fmp_forward_estimates` | "TOOL 5" block | **Agent tool** (buy-case/buy-check) | FMP `/stable/analyst-estimates`, `/quote`, `/income-statement`, `/price-target-consensus`, `/price-target-news`, `/grades-consensus` | Structured JSON, **forward** consensus revenue/EPS by fiscal year + implied forward P/E + analyst counts + price targets | `FMP_API_KEY` |
+| `fmp_earnings_calendar` | "TOOL 5" block | **Agent tool** (buy-case/buy-check) | FMP `/stable/earnings` | Structured JSON, next scheduled report date + last four with surprise % — **for any symbol** | `FMP_API_KEY` |
+| `fmp_revenue_segments` | "TOOL 5" block | **Agent tool** (buy-case) | FMP `/stable/revenue-product-segmentation`, `/revenue-geographic-segmentation` | Structured JSON, annual segment splits with share of total and YoY | `FMP_API_KEY` |
+| `fmp_pending_ma_filings` | "TOOL 5" block | **Agent tool** (buy-case/buy-check) | FMP `/stable/mergers-acquisitions-latest` | Structured JSON, SEC merger registrations naming the ticker | `FMP_API_KEY` |
 
 All FMP and Tavily calls are plain `requests` HTTP calls (no SDK); SEC access
 goes through the third-party `edgar-tools` package's `Company`/`set_identity`
-API. None of these seven tools touch the database — that's the separate
+API. None of these tools touch the database — that's the separate
 inventory below.
+
+### The forward-looking block ("TOOL 5"), and why it is fenced off
+
+Everything above `fmp_price_snapshot` is backward-looking: filings, realised
+quarters, annual ratios. The five tools in the `TOOL 5` block are the only
+forward-looking feeds in the system, and they are wired **only** into
+`buy_case_agent` and `buy_check_agent`. That is a design constraint, not an
+oversight: the analyst's instruction forbids resting a `Buy` on a speculative
+catalyst, so handing the bear/bull/analyst chain a consensus-estimates feed would
+undercut a rule the verdict depends on. Phase E runs after the verdict, so it can use
+them safely — see [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md).
+
+Two payload conventions worth knowing, because both exist to stop a number being
+quoted without its provenance:
+
+- `fmp_forward_estimates` carries **analyst counts and the low/high spread** beside
+  every consensus figure, and injects a `coverage_warning` (≤2 analysts) or
+  `spread_warning` (high/low ≥ 1.5x) into the payload itself. The instructions require
+  the prose to repeat it.
+- `fmp_revenue_segments` injects a `stale_warning` when the most recent disclosure is
+  three or more years old. Companies stop reporting a breakdown when it stops being
+  material and the provider keeps serving the last year it has — H&R Block's
+  geographic split ends in FY2016, which reads as current to anyone who does not check
+  the date.
+
+Plan note (FMP Starter, verified 2026-08-02): `analyst-estimates` serves **annual
+periods only** — `period=quarter` answers 402 — and `mergers-acquisitions-search` is
+restricted while `mergers-acquisitions-latest` is not, which is why the M&A filter is
+applied client-side across two pages of 250.
 
 ### Why two data shapes for ROC/EY
 
@@ -86,6 +120,7 @@ this codebase that is not a third-party API.
 | `db_store_ticker_run` | `mcp_server.py:1026` | `ticker_runs` (write) | Relational row | Upsert the per-ticker index row (`ON CONFLICT (ticker, run_id) DO UPDATE`) — drives the web UI. |
 | `db_search_historical_reports` | `mcp_server.py:1063` | `final_reports` (read) | Vector cosine similarity (`<=>`) | Semantic search over stored reports. Not called anywhere in `main.py` today — available for ad hoc / future use. |
 | `db_get_sale_case` | `mcp_server.py:1107` | `agent_outputs` (read, `agent_type='SALE_CASE'`) | Raw text | Fetch the latest (or a pinned `run_id`'s) sale-condition text for `run_sell_check`. |
+| `db_get_buy_case` | after `db_get_sale_case` | `agent_outputs` ⋈ `final_reports` (read, `agent_type='BUY_CASE'`) | Raw text + the run's verdict | The same shape for `run_buy_check`, deliberately not routed through `db_get_agent_output` so the two check commands fail with the same shape of message when there is nothing to test. The verdict join is the one addition — it is what lets the caller warn that a later report has moved off `Watch`. |
 | `db_get_agent_output` | `mcp_server.py:1294` | `agent_outputs` (read) | Raw text | The general form of `db_get_sale_case`, for any `agent_type`. Added for the critic loop, which needs the bear/bull cases the analyst was given. |
 | `db_get_final_report` | `mcp_server.py:1343` | `final_reports` (read) | Markdown text | Load a specific (or the latest) report for a ticker. No `analysis_key` match and no age limit — the caller named the report it wants to refine. |
 | `db_store_critic_findings` | `mcp_server.py:1394` | `critic_memory` (write) | Relational rows, one per finding | Persist one review round's findings as long-term memory. |

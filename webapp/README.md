@@ -17,7 +17,9 @@ It offers **two ways to browse the same reports**, switchable at the top of the 
    **⚠ critic did NOT agree** — before you click into it.
 3. View the **Bear Case**, **Bull Case**, **Sale Advisory**, and **Final Report**
    for that run, rendered as markdown, with the **recommendation** (Buy / Watch /
-   Avoid) badge.
+   Avoid) badge. A **Buy Case** tab appears as well where the run has one — that is,
+   where the verdict was **Watch**; it holds the entry price range and the events
+   that would make the name a Buy (see "Buy Case tab" below).
 4. **Download** any report as a `.md` file to the viewing device.
 
 ### Critic-reviewed runs
@@ -37,7 +39,22 @@ agree or the budget runs out. Those runs get two things an ordinary run doesn't:
 
 A critic-reviewed run's Bear/Bull/Sale tabs are usually **borrowed** from the run
 it reviewed (stamped "From the reviewed run …") rather than duplicated, since
-`refine.py` critiques an existing report without re-running that research.
+`refine.py` critiques an existing report without re-running that research. Its **Buy
+Case is never borrowed**: a review can move the verdict off Watch, and `refine.py`
+then deliberately writes none, so borrowing would put entry conditions on a run whose
+verdict is now Buy or Avoid.
+
+### Buy Case tab
+
+Shown only for a run whose verdict is **Watch**. A Watch says "wait" without saying
+what for; the buy case answers that — a price range with the arithmetic behind it,
+three to five observable triggers each with its current value and where it will show
+up, the forward earnings multiple with the analyst count behind it, and the earnings
+dates of the companies whose results move this one's revenue.
+
+Its absence on a Buy or an Avoid is correct rather than missing: a Buy needs no entry
+conditions, and an Avoid should not be given any. The triggers can be re-tested later
+from the command line with `python main.py --buy-check TICKER`.
 
 ### Browse by pipeline run
 
@@ -46,14 +63,19 @@ it reviewed (stamped "From the reviewed run …") rather than duplicated, since
    single-ticker on-demand one-offs are excluded — browse those under "by ticker".
 2. See **every ticker analyzed in that run**, grouped **Buy first, then Watch,
    then Avoid**, and ordered by **Magic Formula rank** within each group (best
-   rank first) — each with its recommendation badge, its rank, and a summary
-   tally. Runs recorded before ranks were stored show `—` and fall back to
+   rank first) — each with its recommendation badge, its rank, **the share price it
+   was analysed at**, and a summary tally. That price is the one the verdict was
+   reached against, not a live quote (the viewer is read-only and holds no market-data
+   credential); hover it for the timestamp. Runs recorded before prices were stored
+   show a dash — that day's price cannot be recovered. Runs recorded before ranks were stored show `—` and fall back to
    alphabetical order within their group.
 3. Click **View reports** on any ticker to open its Bear / Bull / Sale Advisory /
-   Final reports for that specific run (a "Back to run" link returns to the list).
-4. **Download CSV** — all tickers, recommendations and ranks for the run
-   (`Ticker,Company,Recommendation,MagicFormulaRank`), in the same order, to the
-   viewing device.
+   Buy Case / Final reports for that specific run (a "Back to run" link returns to
+   the list).
+4. **Download CSV** — all tickers, recommendations, ranks and analysis-time prices
+   for the run
+   (`Ticker,Company,Recommendation,MagicFormulaRank,SharePriceAtAnalysis,PriceAsOf`),
+   in the same order, to the viewing device.
 
 Data comes from the `ticker_runs`, `agent_outputs`, and `final_reports` tables —
 the app is read-only and never modifies the database. The "by pipeline run" view

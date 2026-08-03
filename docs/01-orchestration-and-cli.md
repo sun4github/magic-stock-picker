@@ -5,7 +5,7 @@ Primary file: [`src/main.py`](../src/main.py) (2,372 lines). There is no separat
 once at import time, and its `if __name__ == "__main__"` block dispatches to one of
 five run functions based on CLI flags.
 
-> **There are two more entry points.** [`src/sale_advisory.py`](../src/sale_advisory.py)
+> **There are three more entry points.** [`src/sale_advisory.py`](../src/sale_advisory.py)
 > regenerates a Phase C sale advisory for any stored report
 > ([10-sale-advisory-regeneration.md](10-sale-advisory-regeneration.md)) — the repair
 > tool for a run whose advisory is missing, stale, or was skipped. And
@@ -13,11 +13,19 @@ five run functions based on CLI flags.
 > opt-in Phase D critic loop (`python refine.py TICKER`) and is documented in
 > [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md). It imports
 > `main` (for the agents, cost accounting, and report assembly) but `main` never
-> imports it — which is why it is a separate command rather than a sixth flag.
-> Both are separate commands for the same mechanical reason: `main.py` is run as a
-> script, so `import main` from a module `main` imported back would load a **second
-> copy** of every agent and re-run the module-level setup. Everything below concerns
-> the five modes of `main.py` itself.
+> imports it — which is why it is a separate command rather than another flag. And
+> [`src/buy_case.py`](../src/buy_case.py) generates or repairs a Phase E buy case for
+> any stored `Watch` report ([11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md)).
+>
+> Historically all three were separate commands for a mechanical reason as well as a
+> conceptual one: `main.py` is run as a script, so `import main` from a module it had
+> imported back would have loaded a **second copy** of every agent and re-run the
+> module-level setup — a second config read, a second set of log handlers, every line
+> logged twice across two files. Phase E made that unavoidable (`buy_case_agent`
+> imports `main`, and `analyze_ticker` has to call it), so `main.py:14` now aliases
+> `sys.modules["main"]` to itself before anything can import it. The imports inside
+> `analyze_ticker` and `run_buy_check` are deferred purely to break the definition-time
+> cycle. Everything below concerns the six modes of `main.py` itself.
 
 ## 1. Startup (module load), `main.py:1-120`
 
@@ -36,13 +44,19 @@ Runs once, before any CLI parsing:
 - `main.py:108-120` reads the three instruction files
   (`research-instructions.md`, `bullish-research-instructions.md`,
   `sale-advisor-instructions.md`) into strings that get concatenated into
-  agent prompts in the next section.
+  agent prompts in the next section. `buy-case-instructions.md` is read here too, but
+  only for the reuse fingerprint (`_DOWNSTREAM_PROMPTS`): its agent lives in
+  `buy_case_agent.py`, which `main` cannot import at load time, so the fingerprint
+  reads the file rather than the agent — see
+  [05-guardrails-cost-and-reuse.md](05-guardrails-cost-and-reuse.md).
 
 ## 2. Agent definitions, `main.py:122-507`
 
-All five `LlmAgent`s (`bear_agent`, `bull_agent`, `analyst_agent`,
+Five of the seven `LlmAgent`s (`bear_agent`, `bull_agent`, `analyst_agent`,
 `sale_advisor_agent`, `sell_check_agent`) are constructed here, once, at
-import time — not per-run. See
+import time — not per-run. The other two, `buy_case_agent` and `buy_check_agent`,
+live in [`src/buy_case_agent.py`](../src/buy_case_agent.py) because Phase E is
+conditional on a verdict this module parses *after* the graph has run. See
 [02-agents-and-reasoning-graph.md](02-agents-and-reasoning-graph.md) for the
 prompt content; this doc only covers control flow.
 
@@ -90,8 +104,10 @@ The single function every execution mode funnels through for Phase B/C. In order
    **no LLM call happens at all**.
 3. **Direct data gathering** (`main.py:1153-1174`, no LLM, no tokens):
    `fetch_sec_10k_data`, `fmp_metrics_extractor`, `fmp_quarterly_trends`,
-   `_format_verified_figures`. Logs a warning if the candidate is missing the
-   debt/cash/EV columns the reconciliation gate needs.
+   `_price_snapshot`, `_format_verified_figures`. Logs a warning if the candidate is
+   missing the debt/cash/EV columns the reconciliation gate needs. The price snapshot
+   is fetched **once** here and reused by the report's `## Price` section, the agents'
+   `VERIFIED_FIGURES`, and the buy case — so all three quote one number.
 4. **Run the reasoning graph** (`main.py:1179-1182`, calls `run_pipeline` from §3).
 5. **Persist everything** (`main.py:1188-1280`):
    - `db_store_agent_output` for `SEC_DATA`/`QUANT_METRICS` (unembedded) and
@@ -103,9 +119,17 @@ The single function every execution mode funnels through for Phase B/C. In order
      (`_format_magic_formula_section`) plus any reconciliation warnings.
    - `db_store_final_report`, `db_store_ticker_run`, and write
      `reports/{TICKER}_Final_Report_{Verdict}.md` /
-     `reports/{TICKER}_Sale_Advisory.md`.
+     `reports/{TICKER}_Sale_Advisory.md`. The stored report opens with a
+     deterministic `## Price` table (`_format_price_section`) above the Magic Formula
+     section — what a share cost, when, and where that sits in its 52-week range.
+   - **Phase E, `Watch` only.** With the report already persisted, `analyze_ticker`
+     asks `buy_case_agent.is_watch(verdict)` and, if so (and unless
+     `--skip-buy-case`), calls `buy_case_agent.write_buy_case` to add a `BUY_CASE`
+     and `reports/{TICKER}_Buy_Case.md` to the same run. Any other verdict logs the
+     reason and writes nothing — an absent buy case on a `Buy` is a decision, not a
+     failure. See [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md).
 
-## 5. The five execution modes, `main.py:2057-2260`
+## 5. The six execution modes, `main.py:2057-2260`
 
 ```mermaid
 flowchart TD
@@ -115,6 +139,8 @@ flowchart TD
     B -->|"for each candidate"| E
     F["run_screen_only()\nmain.py:2073"] -->|"screener only, no DB writes"| G[("CSV file")]
     H["run_sell_check(ticker)\nmain.py:2200"] -->|"db_get_sale_case + _run_sell_check"| I["sell_check_agent\nreports/TICKER_Sell_Check.md"]
+    J["run_buy_check(ticker)"] -->|"db_get_buy_case + fresh price"| K["buy_check_agent\nreports/TICKER_Buy_Check.md"]
+    E -->|"verdict == WATCH"| L["buy_case_agent.write_buy_case\nBUY_CASE + reports/TICKER_Buy_Case.md"]
 ```
 
 - **`run_orchestrator(force, skip_sale_advisor)`** (`main.py:2057`) — Phase A
@@ -132,8 +158,14 @@ flowchart TD
   (`db_get_sale_case`), fetches current FMP metrics + quarterly trends, runs
   `sell_check_agent` via `_run_sell_check` (`main.py:1034`), writes
   `reports/{TICKER}_Sell_Check.md`. Creates **no** `pipeline_runs` row.
+- **`run_buy_check(ticker, company_name, run_id)`** — the mirror image, a Phase E
+  follow-up for a stock you do **not** own: loads a stored `BUY_CASE`
+  (`db_get_buy_case`), fetches **today's price** plus metrics and quarterly trends,
+  runs `buy_check_agent`, writes `reports/{TICKER}_Buy_Check.md` (`BUY`/`WAIT`). Also
+  creates no `pipeline_runs` row. See
+  [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md).
 
-`_run_phase_b(top_candidates, source_label, force, skip_sale_advisor)`
+`_run_phase_b(top_candidates, source_label, force, skip_sale_advisor, skip_buy_case)`
 (`main.py:2009`) is shared by `run_orchestrator` and `run_from_csv`: it
 creates the parent `pipeline_runs` row (`db_create_pipeline_run`, must happen
 **before** any `agent_outputs`/`final_reports` insert — those tables carry an
@@ -144,15 +176,17 @@ budget guard (`_check_budget`, `main.py:594`) before each one.
 
 Standard `argparse`. Notable validation, not just flag definitions:
 
-- `main.py:2339-2340`: `--run` is rejected unless paired with `--sell-check`.
-- `main.py:2345-2357`: `--screen-only` rejects being combined with any Phase
-  B/C flag (`--from-csv`, `--sell-check`, `--skip-sale-advisor`, `--force`,
+- `--run` is rejected unless paired with `--sell-check` or `--buy-check`.
+- `--sell-check` and `--buy-check` are rejected together: they test different stored
+  conditions for opposite readers, and each writes its own report file, so one
+  invocation would be ambiguous about which answer it was reporting.
+- `--screen-only` rejects being combined with any Phase B/C/E flag (`--from-csv`,
+  `--sell-check`, `--buy-check`, `--skip-sale-advisor`, `--skip-buy-case`, `--force`,
   or a bare `TICKER`) rather than silently ignoring them.
-- `main.py:2364-2365`: `--skip-sale-advisor` is rejected with `--sell-check`
-  (the sell-check flow never runs Phase C in the first place).
-- Dispatch (`main.py:2359-2372`) is a simple if/elif chain checking
-  `--screen-only` → `--sell-check` → `--from-csv` → `TICKER` → bare
-  `run_orchestrator()`.
+- `--skip-sale-advisor` is rejected with `--sell-check`, and `--skip-buy-case` with
+  `--buy-check` — neither check flow runs the phase its flag would skip.
+- Dispatch is a simple if/elif chain checking `--screen-only` → `--sell-check` →
+  `--buy-check` → `--from-csv` → `TICKER` → bare `run_orchestrator()`.
 
 ## Where to look next
 
@@ -162,3 +196,5 @@ Standard `argparse`. Notable validation, not just flag definitions:
   actually return: [03-mcp-tools-and-persistence.md](03-mcp-tools-and-persistence.md).
 - `_analysis_key`, `_check_budget`, `_reconcile_agent_figures`, and the cost
   accounting functions: [05-guardrails-cost-and-reuse.md](05-guardrails-cost-and-reuse.md).
+- What happens after `analyze_ticker` stores a `Watch` report, and the `--buy-check`
+  command that reads it back: [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md).

@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import time
 import json
 import asyncio
@@ -10,6 +11,19 @@ import uuid
 import yaml
 import pandas as pd
 from dotenv import load_dotenv
+
+# This module is BOTH the CLI entry point and the module every other entry point
+# imports for its shared plumbing (`critic_agent`, `refine`, `sale_advisory`,
+# `buy_case_agent` all `import main`). Run as `python main.py`, it is loaded under the
+# name `__main__`, so a later `import main` — which happens the moment the pipeline
+# reaches the buy case — would EXECUTE THIS FILE A SECOND TIME under a second name:
+# a second read of the config, a second set of agent objects, and, worst of it, a
+# second StreamHandler and FileHandler attached to the same logger singleton, giving
+# every subsequent log line twice on the console and splitting the run across two log
+# files. Aliasing the two names in `sys.modules` before any of that can happen makes
+# `import main` resolve to this very module. It is a no-op on the ordinary path,
+# where `sys.modules["main"]` is already populated by the import that is running.
+sys.modules.setdefault("main", sys.modules[__name__])
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.context_cache_config import ContextCacheConfig
@@ -26,6 +40,7 @@ from mcp_server import (
     fmp_metrics_extractor,
     fmp_company_profile,
     fmp_quarterly_trends,
+    fmp_price_snapshot,
     fmp_stock_news,
     web_search_tool,
     db_create_pipeline_run,
@@ -35,6 +50,8 @@ from mcp_server import (
     db_store_final_report,
     db_store_ticker_run,
     db_get_sale_case,
+    db_get_buy_case,
+    db_get_final_report,
     db_find_reusable_report,
     db_copy_ticker_outputs,
     db_spend_since,
@@ -721,18 +738,49 @@ REUSE_ENABLED = bool(_reuse.get("enabled", True))
 REUSE_MAX_AGE_HOURS = int(_reuse.get("max_age_hours", 24))
 
 
+# The buy-case advisor's prompt is not reachable from PIPELINE_AGENTS: its agent
+# lives in `buy_case_agent`, which imports this module, so this module cannot import
+# it back at load time. Its instruction FILE is right here on disk, though, and that
+# is what actually changes when the prompt is tuned — so the fingerprint reads the
+# file rather than the agent. Read once at import: it is per-ticker input to
+# `_analysis_key` and re-reading it 30 times a run buys nothing.
+def _read_prompt_files(*names) -> str:
+    out = []
+    for name in names:
+        try:
+            with open(os.path.join(os.path.dirname(__file__), name), "r", encoding="utf-8") as fh:
+                out.append(fh.read())
+        except OSError as e:
+            # Not fatal here — the module that owns these files fails loudly on its
+            # own import if one is missing. All this costs is a fingerprint that no
+            # longer moves when that prompt is edited, so say it once.
+            logger.warning(f"Could not read {name} for the reuse fingerprint ({e}); "
+                           f"edits to it will not invalidate reused reports.")
+    return "".join(out)
+
+
+_DOWNSTREAM_PROMPTS = _read_prompt_files("buy-case-instructions.md")
+
+
 def _prompt_version() -> str:
     """Short hash of every agent instruction plus the shared prompt fragments.
 
     Any edit to a prompt changes this, which invalidates reuse — otherwise tuning
     the analyst's verdict stance would silently keep serving reports written under
-    the old rules."""
+    the old rules. The buy-case instructions are included via `_DOWNSTREAM_PROMPTS`
+    for the same reason, since a reused report also reuses the buy case copied
+    alongside it.
+
+    `buy-check-instructions.md` is deliberately NOT included: nothing that command
+    produces is stored under a reuse key, so editing it invalidates nothing."""
     blob = "".join(a.instruction for a in PIPELINE_AGENTS)
     blob += RECENCY_MANDATE + VERIFIED_FIGURES_MANDATE + REFERENCE_DATA_BLOCKS
+    blob += _DOWNSTREAM_PROMPTS
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
 
 
-def _analysis_key(ticker: str, candidate: dict, skip_sale_advisor: bool = False) -> str:
+def _analysis_key(ticker: str, candidate: dict, skip_sale_advisor: bool = False,
+                  skip_buy_case: bool = False) -> str:
     """Fingerprint of the inputs a report is produced from.
 
     Deliberately built from the BALANCE SHEET DATE rather than today's date: two
@@ -747,6 +795,13 @@ def _analysis_key(ticker: str, candidate: dict, skip_sale_advisor: bool = False)
     `--sell-check` would find no conditions to test. Keeping the two variants under
     different keys means neither can be served in place of the other.
 
+    `skip_buy_case` is in the fingerprint for exactly the same reason, one artifact
+    along: a run made with it produces no BUY_CASE for a Watch, so reusing it to
+    satisfy a full run would leave `--buy-check` with nothing to test. Note the
+    asymmetry with Phase C — a run WITHOUT this flag still writes no buy case unless
+    the verdict lands on Watch, which is a property of the analysis rather than of
+    the flag, so the two variants genuinely differ only in what was ASKED for.
+
     Returns "" when the balance sheet date is unknown, which disables reuse for
     that ticker — better to pay again than to serve a report whose provenance we
     cannot establish."""
@@ -754,6 +809,7 @@ def _analysis_key(ticker: str, candidate: dict, skip_sale_advisor: bool = False)
     if not bs_date:
         return ""
     variant = "|no-phase-c" if skip_sale_advisor else ""
+    variant += "|no-buy-case" if skip_buy_case else ""
     raw = f"{ticker}|{bs_date}|{_prompt_version()}{variant}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
@@ -1190,7 +1246,7 @@ def _extract_verdict(report_text: str) -> str:
 
 def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: str = "",
                    candidate: dict = None, force: bool = False,
-                   skip_sale_advisor: bool = False) -> dict:
+                   skip_sale_advisor: bool = False, skip_buy_case: bool = False) -> dict:
     """Run the Phase-B agent sequence for one ticker and persist its
     outputs and final report. Returns the ticker's token-usage dict (zero usage
     if the pipeline failed).
@@ -1216,7 +1272,7 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     # Reuse check FIRST, before any billed work. The fingerprint covers the ticker,
     # the balance-sheet date its figures came from, and the prompt version, so a new
     # filing or any prompt edit forces a fresh analysis.
-    analysis_key = _analysis_key(ticker, candidate, skip_sale_advisor)
+    analysis_key = _analysis_key(ticker, candidate, skip_sale_advisor, skip_buy_case)
     if REUSE_ENABLED and not force and analysis_key:
         try:
             prior = json.loads(db_find_reusable_report(ticker, analysis_key, REUSE_MAX_AGE_HOURS))
@@ -1239,7 +1295,10 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
             )
             _check_db(
                 db_store_ticker_run(run_id, ticker, company_name or ticker, prior["verdict"],
-                                    _present((candidate or {}).get("Final_Rank"))),
+                                    _present((candidate or {}).get("Final_Rank")),
+                                    # The REUSED report's price, not today's: this run
+                                    # serves that document, price section and all.
+                                    prior.get("share_price"), prior.get("price_as_of")),
                 f"{ticker} ticker_run (reused)",
             )
             report_path = os.path.join("reports", f"{ticker}_Final_Report_{prior['verdict'].title()}.md")
@@ -1254,7 +1313,10 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     # Quarterly trends are a SEPARATE feed from metrics_data, which is annual-only.
     # Without this the agents cannot see recent-quarter deterioration at all.
     quarterly_data = fmp_quarterly_trends(ticker)
-    verified_figures = _format_verified_figures(candidate)
+    # One quote per ticker, shared by the report's price section, the agents'
+    # VERIFIED_FIGURES, and (on a Watch) the buy case's triggers — see `_price_snapshot`.
+    price = _price_snapshot(ticker)
+    verified_figures = _format_verified_figures(candidate, price)
 
     # The reconciliation gate can only check figures it has ground truth for. A
     # rankings CSV written before those columns existed yields a candidate with no
@@ -1334,14 +1396,16 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     if recon_findings:
         for f in recon_findings:
             logger.warning(
-                f"[{ticker}] RECONCILIATION: {f['source']} states {f['field']} of "
-                f"{format_money(f['stated'])}, but the filings show "
-                f"{format_money(f['verified'])} (off by {f['deviation_pct']}%). "
-                f"Context: \"{f['context']}\""
+                reconciliation_warning(ticker, f, with_context=True)
             )
+        # Counted by basis, because the two mean different things: a filings
+        # disagreement is an error in the report, a market one may be the clock.
+        filed = sum(1 for f in recon_findings if f.get("basis") != "market price")
+        moved = len(recon_findings) - filed
+        parts = ([f"{filed} contradict the filings"] if filed else []) +                 ([f"{moved} disagree with the current market price"] if moved else [])
         logger.warning(
-            f"[{ticker}] {len(recon_findings)} figure(s) in this report contradict the "
-            f"filings; a warning table has been added to the report."
+            f"[{ticker}] {len(recon_findings)} flagged figure(s) in this report: "
+            f"{', '.join(parts)}. A warning table has been added to the report."
         )
     else:
         logger.info(f"[{ticker}] Reconciliation gate passed (no contradicted figures).")
@@ -1350,7 +1414,11 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     # below don't affect the '## Final Verdict' split), then persist the report
     # with the deterministic Magic Formula Metrics section + run header prepended.
     verdict = _extract_verdict(report_text)
+    # Price first, then the ratios derived from it, then the analyst's prose. The
+    # order is the argument: what it costs, how that was turned into the screen's
+    # figures, then what to make of it.
     report_with_metrics = (
+        f"{_format_price_section(price, ticker)}\n"
         f"{_format_magic_formula_section(candidate)}\n{report_text}"
         f"{_format_reconciliation_section(recon_findings)}"
     )
@@ -1362,13 +1430,43 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     # the run view can order by conviction; None for on-demand single-ticker runs.
     _check_db(
         db_store_ticker_run(run_id, ticker, company_name or ticker, verdict,
-                            _present((candidate or {}).get("Final_Rank"))),
+                            _present((candidate or {}).get("Final_Rank")),
+                            price.get("price"), price.get("as_of")),
         f"{ticker} ticker_run",
     )
 
     report_path = os.path.join("reports", f"{ticker}_Final_Report_{verdict.title()}.md")
     with open(report_path, "w", encoding='utf-8') as f:
         f.write(report_stored)
+
+    # Phase E: the buy case, for a WATCH verdict only. It runs here rather than inside
+    # the reasoning graph because the verdict it is conditional on does not exist
+    # until `_extract_verdict` has read the analyst's finished prose, which is a
+    # Python decision taken after the graph has finished. The report is already
+    # persisted at this point, so a failure here costs the buy case and nothing else.
+    #
+    # The import is deferred on purpose: `buy_case_agent` imports this module for the
+    # shared cost/logging plumbing (as `critic_agent` does), so importing it at the
+    # top of this file would be a cycle. See the `sys.modules` alias at the top for
+    # why `import main` inside it resolves back here rather than re-running this file.
+    import buy_case_agent
+    if buy_case_agent.is_watch(verdict) and not skip_buy_case:
+        buy_case_agent.write_buy_case(
+            run_id, ticker, company_name or ticker, report_text, verified_figures,
+            quarterly_data, candidate, usage,
+            metadata={"origin": "pipeline", "verdict": verdict},
+            # The same quote the report's price section was printed from, so the buy
+            # triggers cannot be measured against a different one.
+            price_data=buy_case_agent.price_data_block(ticker, price),
+        )
+    elif buy_case_agent.is_watch(verdict):
+        logger.info(f"[{ticker}] Verdict is Watch, but Phase E was skipped "
+                    f"(--skip-buy-case): no BUY_CASE written. `--buy-check {ticker}` "
+                    f"will have no entry conditions from this run to test.")
+    else:
+        logger.info(f"[{ticker}] Verdict is {verdict}, not Watch — no buy case is "
+                    f"written. A Buy needs no entry conditions and an Avoid should "
+                    f"not be given any.")
 
     # Fold in the embedding calls made by the db_store_* tools above.
     _collect_embedding_usage(usage)
@@ -1429,6 +1527,98 @@ def _format_screen_context(candidate: dict) -> str:
     return ctx
 
 
+# --- The share price ------------------------------------------------------------
+# Every report used to talk about valuation in market capitalisation and enterprise
+# value and never once said what a SHARE costs. Those are the right units for the
+# Magic Formula's arithmetic and the wrong ones for a reader: "$164.26B market cap,
+# 65x trailing earnings" does not answer "what would I pay for this, and is that a
+# lot?". The price was in the screener's CSV all along (`Live_Price`) and simply
+# never reached the report.
+#
+# It is fetched here rather than read from the candidate, because the two candidate
+# shapes disagree: the screener CSV carries `Live_Price`, and
+# `compute_ticker_magic_metrics` carries no price at all. Sourcing it from the
+# candidate would therefore print "Not available" on exactly the on-demand
+# single-ticker runs a reader looks at most closely — the §2.I trap again. One quote
+# call is deterministic, costs no tokens, and is subscription-metered.
+#
+# Fetched ONCE per ticker and passed to everything that quotes it — the report
+# section below, the VERIFIED_FIGURES block the agents read, and the buy case — so
+# the price on the report and the price the buy triggers are measured against cannot
+# be two different numbers taken seconds apart.
+def _price_snapshot(ticker: str) -> dict:
+    """Current quote for a ticker, or {} when unavailable. Never raises."""
+    try:
+        data = json.loads(fmp_price_snapshot(ticker))
+    except Exception as e:
+        logger.warning(f"[{ticker}] Price snapshot failed ({e}); reports for this "
+                       f"ticker will say the price was unavailable.")
+        return {}
+    if data.get("error") or data.get("price") is None:
+        logger.warning(f"[{ticker}] No current price available "
+                       f"({data.get('error') or 'quote carried no price'}).")
+        return {}
+    return data
+
+
+def _format_price_section(price: dict, ticker: str) -> str:
+    """The '## Price' block that opens every stored report.
+
+    One row, read left to right: what a share costs, when that was true, and the
+    three comparisons that tell you whether it is a lot — where it sits in its own
+    year, how far it is off the high, and where the trend has been. Market cap is
+    repeated here on purpose: it is the bridge between this line and the ratios
+    below, which are all computed from it.
+
+    **The as-of stamp is not decoration.** A stored report is a point-in-time
+    document and this is the one figure in it that was already out of date by the
+    time anyone read it. Stamped and captioned, it becomes strictly more useful than
+    no price at all — reading an old `Watch` and knowing what the stock cost when
+    that verdict was written is most of the context for deciding whether it still
+    applies.
+    """
+    if not price:
+        return (
+            "## Price\n\n"
+            f"A current share price could not be retrieved for {ticker} when this "
+            f"report was written. The valuation figures below are computed from the "
+            f"filings and the market capitalisation, and are unaffected — but this "
+            f"report cannot tell you what one share costs today.\n"
+        )
+
+    def _n(key, fmt="{:,.2f}", dollar=True):
+        v = price.get(key)
+        if not isinstance(v, (int, float)):
+            return "n/a"
+        return ("$" if dollar else "") + fmt.format(v)
+
+    off_high = price.get("pct_from_52w_high")
+    off_high_str = f"{off_high:+.1f}%" if isinstance(off_high, (int, float)) else "n/a"
+    # ISO with a 'T' in it is a machine's timestamp. The prompt block keeps it; the
+    # reader-facing table does not.
+    as_of = (price.get("as_of") or "n/a").replace("T", " ")
+    return "\n".join([
+        "## Price",
+        "",
+        "| Share price | As of | 52-week range | Off its 52-week high | 50-day avg | "
+        "200-day avg | Market value |",
+        "| ---: | :--- | :--- | ---: | ---: | ---: | ---: |",
+        f"| **{_n('price')}** | {as_of} | "
+        f"{_n('yearLow')} – {_n('yearHigh')} | {off_high_str} | "
+        f"{_n('priceAvg50')} | {_n('priceAvg200')} | "
+        f"{format_money(price.get('marketCap'))} |",
+        "",
+        "That price is what one share cost **at the moment this report was written**, "
+        "and it moves every trading session. It is shown so the rest of the report has "
+        "a stated starting point: every valuation figure below — the earnings yield, "
+        "the price-to-earnings ratio, the PEG — is derived from the market value in "
+        "the last column, which is this price multiplied by the number of shares. If "
+        "you are reading this days later, check the current price before treating any "
+        "of them as today's.",
+        "",
+    ])
+
+
 def _verified_figures(candidate: dict) -> dict:
     """The subset of screener output that is deterministic ground truth: figures
     read straight off the filings rather than written by a model. Used twice --
@@ -1446,12 +1636,19 @@ def _verified_figures(candidate: dict) -> dict:
     return out
 
 
-def _format_verified_figures(candidate: dict) -> str:
+def _format_verified_figures(candidate: dict, price: dict = None) -> str:
     """Human-and-model readable VERIFIED_FIGURES block for the agent prompts.
 
     Every number here came from the same balance sheet / income statement the
     Magic Formula ratios were computed from, so an agent contradicting this block
-    is contradicting the pipeline's own basis for screening the company."""
+    is contradicting the pipeline's own basis for screening the company.
+
+    `price` is the live quote, and is the one entry here that did NOT come from a
+    filing — it is included anyway, labelled as what it is, because the alternative
+    is worse. Without it each agent reaches for a price of its own from news or
+    recollection, and a report ends up discussing "the stock at $210" in one section
+    and "$187" in another. Optional so the callers that have no quote to hand keep
+    working unchanged."""
     candidate = candidate or {}
     figs = _verified_figures(candidate)
     if not figs:
@@ -1478,6 +1675,21 @@ def _format_verified_figures(candidate: dict) -> str:
         f"- Operating profit (EBIT, {candidate.get('EBIT_Basis') or 'basis not stated'}): {_m('EBIT')}",
         f"- Balance sheet as of: {candidate.get('BalanceSheetDate') or 'Not available'}",
     ]
+
+    # The live price, kept visually apart from the filing figures because it is a
+    # different KIND of fact: those are fixed until the next filing, this one changed
+    # while you were reading. Agents get one price, stated once, with its timestamp.
+    if price and isinstance(price.get("price"), (int, float)):
+        lines += [
+            "",
+            f"- CURRENT SHARE PRICE: ${price['price']:,.2f} (as of "
+            f"{price.get('as_of') or 'today'}). This is a LIVE market figure, not a "
+            f"filing figure. Use THIS price whenever you state what the stock costs, "
+            f"and quote its date beside it; do not substitute a price from a news "
+            f"article or an analyst note without saying which is which. The market "
+            f"capitalisation above is this price multiplied by shares outstanding, so "
+            f"the two must never be quoted in a way that contradicts each other.",
+        ]
 
     # The two return figures side by side. Reported together because quoting the
     # Greenblatt ROC alone for an acquisition-built company reliably produces the
@@ -1877,6 +2089,8 @@ def _reconcile_agent_figures(text: str, candidate: dict, source: str) -> list:
                 findings.append({
                     "source": source,
                     "field": label,
+                    "key": field,
+                    "basis": _finding_basis(field),
                     "stated": amount,
                     "verified": truth,
                     "deviation_pct": round(deviation * 100, 1),
@@ -1894,30 +2108,91 @@ def _reconcile_agent_figures(text: str, candidate: dict, source: str) -> list:
     return unique
 
 
+# Not every verified figure has the same provenance, and the gate's wording used to
+# pretend otherwise: every finding, market capitalisation included, was reported as
+# "the filings show X". Debt and cash DO come off the balance sheet and are fixed
+# until the next filing, so a disagreement there is a mistake. Market capitalisation
+# is today's share price times shares outstanding, and enterprise value is built on
+# it — those move every session, so a disagreement may be nothing but the passage of
+# time. That distinction is invisible in a log line that calls both "the filings",
+# and it matters most in exactly the place the gate is least trusted: a report being
+# re-checked days after it was written (`refine.py`, `sale_advisory.py`,
+# `buy_case.py`), where a market figure is EXPECTED to have moved.
+_MARKET_DERIVED_FIELDS = {"LiveMarketCap", "EnterpriseValue"}
+
+
+def _finding_basis(field_key: str) -> str:
+    """'market price' for figures that move every session, else 'filings'."""
+    return "market price" if field_key in _MARKET_DERIVED_FIELDS else "filings"
+
+
+def reconciliation_warning(ticker: str, finding: dict, with_context: bool = False) -> str:
+    """The log line for one reconciliation finding, phrased for its basis.
+
+    One function rather than the four near-identical f-strings this replaced (here,
+    `refine`, `sale_advisory`, `buy_case_agent`) — that duplication is how the
+    misleading "the filings show" wording came to be repeated in four places at once.
+    """
+    head = (f"[{ticker}] RECONCILIATION: {finding['source']} states {finding['field']} "
+            f"of {format_money(finding['stated'])}, ")
+    if finding.get("basis") == "market price":
+        body = (f"against {format_money(finding['verified'])} implied by the CURRENT "
+                f"share price (off by {finding['deviation_pct']}%). Market figures move "
+                f"every session — on a report being re-checked later, this may be the "
+                f"passage of time rather than an error.")
+    else:
+        body = (f"but the filings show {format_money(finding['verified'])} "
+                f"(off by {finding['deviation_pct']}%).")
+    tail = f" Context: \"{finding['context']}\"" if with_context else ""
+    return head + body + tail
+
+
 def _format_reconciliation_section(findings: list) -> str:
     """Reader-facing note appended to the final report when the gate fired.
 
     Surfaced in the report rather than only logged: a reader has no other way to
-    know that a figure in the bull or bear case above contradicts the filings."""
+    know that a figure in the bull or bear case above contradicts the pipeline's own.
+
+    The Basis column is the point of the table's fourth column, not decoration. A
+    'filings' row is a factual error in the report. A 'market price' row on a report
+    checked later may be nothing more than the share price having moved since — the
+    same distinction the critic is given in `critic_agent.py`, in the one other place
+    a stale price can be mistaken for a wrong one."""
     if not findings:
         return ""
+    market_rows = any(f.get("basis") == "market price" for f in findings)
     lines = [
         "",
         _RECONCILIATION_HEADING,
         "",
         "Some figures written by the analysis agents above disagree with the figures "
-        "this pipeline read directly from the company's filings. The verified figure "
-        "is the one to trust. Treat any argument resting on a flagged number as "
-        "unreliable.",
+        "this pipeline computed itself. **Read the Basis column before concluding the "
+        "report is wrong** — the two kinds of disagreement do not mean the same thing.",
         "",
-        "| Section | Figure | Stated in report | Verified from filings | Off by |",
-        "| :--- | :--- | ---: | ---: | ---: |",
+        "| Section | Figure | Stated in report | Verified | Basis | Off by |",
+        "| :--- | :--- | ---: | ---: | :--- | ---: |",
     ]
     for f in findings:
+        basis = f.get("basis") or "filings"
         lines.append(
             f"| {f['source']} | {f['field']} | {format_money(f['stated'])} | "
-            f"{format_money(f['verified'])} | {f['deviation_pct']}% |"
+            f"{format_money(f['verified'])} | {basis} | {f['deviation_pct']}% |"
         )
+    lines += [
+        "",
+        "- **_filings_** — the verified figure came off the company's balance sheet "
+        "and does not change until the next filing. A disagreement here is an error "
+        "in the report, and any argument resting on that number is unreliable.",
+    ]
+    if market_rows:
+        lines += [
+            "- **_market price_** — the verified figure is derived from the share "
+            "price, which changes every trading session (market capitalisation is the "
+            "price times the number of shares; enterprise value is built on top of "
+            "it). On a report checked some time after it was written, a gap here can "
+            "simply mean the stock has moved since. Compare the dates before treating "
+            "it as a mistake.",
+        ]
     return "\n".join(lines) + "\n"
 
 
@@ -2380,7 +2655,7 @@ def _format_magic_formula_section(candidate: dict) -> str:
 
 
 def _run_phase_b(top_candidates: list, source_label: str, force: bool = False,
-                 skip_sale_advisor: bool = False):
+                 skip_sale_advisor: bool = False, skip_buy_case: bool = False):
     """Create a pipeline run and analyze each candidate through Phase B.
     Shared by the full-pipeline and CSV modes."""
     run_id = str(uuid.uuid4())
@@ -2415,7 +2690,7 @@ def _run_phase_b(top_candidates: list, source_label: str, force: bool = False,
         screen_context = _format_screen_context(candidate)
         _merge_usage(run_usage,
                      analyze_ticker(run_id, ticker, company_name, screen_context, candidate,
-                                    force, skip_sale_advisor))
+                                    force, skip_sale_advisor, skip_buy_case))
         completed += 1
 
     if halted:
@@ -2427,7 +2702,8 @@ def _run_phase_b(top_candidates: list, source_label: str, force: bool = False,
                   status="BUDGET_EXCEEDED" if halted else "COMPLETED")
 
 
-def run_orchestrator(force: bool = False, skip_sale_advisor: bool = False):
+def run_orchestrator(force: bool = False, skip_sale_advisor: bool = False,
+                     skip_buy_case: bool = False):
     """Full pipeline: Phase A screener -> Phase B analysis over the Top N."""
     # Phase A: Screener. We invoke the screener tool directly (deterministic JSON);
     # this also writes the rankings CSV that --from-csv can reuse later.
@@ -2440,7 +2716,7 @@ def run_orchestrator(force: bool = False, skip_sale_advisor: bool = False):
 
     top_candidates = top_candidates[:top_n]
     logger.info(f"Phase A Complete. Retrieved {len(top_candidates)} candidates.")
-    _run_phase_b(top_candidates, "Phase A screener", force, skip_sale_advisor)
+    _run_phase_b(top_candidates, "Phase A screener", force, skip_sale_advisor, skip_buy_case)
 
 
 def run_screen_only():
@@ -2497,7 +2773,8 @@ def run_screen_only():
     logger.info("Screen-only run finished. To analyze these, run: python main.py --from-csv")
 
 
-def run_from_csv(csv_path: str = None, force: bool = False, skip_sale_advisor: bool = False):
+def run_from_csv(csv_path: str = None, force: bool = False,
+                 skip_sale_advisor: bool = False, skip_buy_case: bool = False):
     """Skip Phase A: load the screener's rankings CSV from a previous run and run
     Phase B over the top N. Phase A (the full FMP universe scan) is slow, so this
     reuses its output when you just want to (re)run the analysis."""
@@ -2517,11 +2794,11 @@ def run_from_csv(csv_path: str = None, force: bool = False, skip_sale_advisor: b
         return
 
     logger.info(f"Loaded top {len(top_candidates)} candidates from CSV.")
-    _run_phase_b(top_candidates, f"CSV '{csv_path}'", force, skip_sale_advisor)
+    _run_phase_b(top_candidates, f"CSV '{csv_path}'", force, skip_sale_advisor, skip_buy_case)
 
 
 def run_single_ticker(ticker: str, company_name: str = None, force: bool = False,
-                      skip_sale_advisor: bool = False):
+                      skip_sale_advisor: bool = False, skip_buy_case: bool = False):
     """On-demand Phase B: run the skeptical analysis for a single arbitrary
     ticker, bypassing Phase A. Logged as its own one-company pipeline run."""
     ticker = ticker.strip().upper()
@@ -2566,7 +2843,7 @@ def run_single_ticker(ticker: str, company_name: str = None, force: bool = False
         screen_context = _format_screen_context(candidate)
 
     usage = analyze_ticker(run_id, ticker, company_name, screen_context, candidate, force,
-                           skip_sale_advisor)
+                           skip_sale_advisor, skip_buy_case)
 
     _finalize_run(run_id, usage, "On-Demand Run")
 
@@ -2639,6 +2916,97 @@ def run_sell_check(ticker: str, company_name: str = None, run_id: str = None):
     logger.info(f"[{ticker}] Sell-condition check complete — Recommendation: {recommendation}. Saved to {out_path}")
 
 
+def run_buy_check(ticker: str, company_name: str = None, run_id: str = None):
+    """On-demand buy-condition check for a single stock. The `--sell-check` of the
+    other side: loads a stored BUY_CASE (the entry price range and buy triggers
+    written when the verdict was Watch) and tests, against CURRENT data, whether they
+    are now met — advising Buy vs. Wait for someone who does NOT own the stock.
+
+    `run_id` pins the check to a SPECIFIC run's BUY_CASE. Unlike a sale advisory,
+    which is pinned to the run you PURCHASED under, the natural default here is the
+    most recent buy case — you are deciding today, against the newest reading of the
+    company. Pin a run when you want to test the conditions a particular report set,
+    for instance to see whether a case you rejected in March would have fired since.
+
+    Lightweight, like the sell-check: it reads the stored conditions and writes a
+    local report file, but creates no pipeline_runs / ticker_runs record, so it never
+    appears in the web UI's run lists."""
+    ticker = ticker.strip().upper()
+    company_name = company_name or ticker
+    pin = f" (pinned to run {run_id})" if run_id else ""
+    logger.info(f"Starting Buy-Condition Check for {ticker} ({company_name}){pin}")
+
+    # Deferred import: `buy_case_agent` imports this module for the shared
+    # cost/logging plumbing (as `critic_agent` does), so importing it at the top of
+    # this file would be a cycle. See the `sys.modules` alias at the top of the file
+    # for why `import main` inside it resolves back here instead of re-running this
+    # file. Done first, before the database round-trip, so a broken prompt file or a
+    # bad import fails immediately rather than after the lookup has succeeded.
+    import buy_case_agent
+
+    # 1. The stored buy case (a specific run's, or the most recent).
+    data = json.loads(db_get_buy_case(ticker, run_id or ""))
+    if data.get("error"):
+        logger.error(f"[{ticker}] {data['error']}")
+        return
+    buy_conditions = data.get("buy_conditions", "") or ""
+    logger.info(
+        f"[{ticker}] Loaded buy conditions from run {data.get('run_id')} "
+        f"(dated {data.get('created_at')})."
+    )
+
+    # A buy case is only ever written for a Watch, so its own run's verdict is always
+    # Watch. What can have changed is the LATEST view of the company: a report written
+    # since may have moved to Buy (the wait is over by the analyst's own reckoning) or
+    # to Avoid (the triggers are testing a case the pipeline has since abandoned).
+    # Warn rather than refuse — the operator asked for these conditions to be checked,
+    # and the newer verdict is information, not an error.
+    try:
+        latest = json.loads(db_get_final_report(ticker, ""))
+    except Exception:
+        latest = {"found": False}
+    latest_verdict = (latest.get("verdict") or "").upper()
+    if latest.get("found") and latest_verdict and latest_verdict != "WATCH":
+        logger.warning(
+            f"[{ticker}] The most recent report (run {latest.get('run_id')}, "
+            f"{latest.get('age_hours')}h old) reaches a verdict of {latest_verdict}, "
+            f"not Watch. These buy conditions were written for an older Watch report "
+            f"and are being checked as asked — but read that newer report before "
+            f"acting on the result."
+        )
+
+    # 2. Current data, by direct call (100% fidelity, 0 tokens). The price is the
+    # authority for the price trigger and is fetched here rather than left to a tool
+    # call, exactly as it is when the buy case is written.
+    logger.info(f"[{ticker}] Fetching current price + FMP metrics + quarterly trends...")
+    price_data = buy_case_agent.price_data_block(ticker)
+    metrics_data = fmp_metrics_extractor(ticker)
+    quarterly_data = fmp_quarterly_trends(ticker)
+
+    # 3. Evaluate the conditions against current data + live news/web research.
+    logger.info(f"[{ticker}] Evaluating buy conditions against current data...")
+    try:
+        result, usage = buy_case_agent.run_buy_check(
+            ticker, company_name, buy_conditions, metrics_data, quarterly_data, price_data,
+        )
+    except Exception as e:
+        logger.error(f"[{ticker}] Buy-condition check aborted: {e}")
+        return
+
+    _log_usage(f"{ticker} buy-check", usage)
+    if not result:
+        logger.error(f"[{ticker}] Buy-condition check produced no output.")
+        return
+
+    out_path = os.path.join("reports", f"{ticker}_Buy_Check.md")
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(result)
+
+    recommendation = buy_case_agent.extract_buy_recommendation(result)
+    logger.info(f"[{ticker}] Buy-condition check complete — Recommendation: "
+                f"{recommendation}. Saved to {out_path}")
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -2654,17 +3022,23 @@ if __name__ == "__main__":
             "  python main.py TICKER [Company]    on-demand Phase B/C for one ticker\n"
             "  python main.py --sell-check TICKER [Company]            test if TICKER's latest sale conditions are now met (Sell/Hold)\n"
             "  python main.py --sell-check TICKER --run RUN_ID         same, but against a SPECIFIC run's conditions (the run you bought under)\n"
+            "  python main.py --buy-check TICKER [Company]             test if TICKER's buy conditions are now met (Buy/Wait)\n"
+            "  python main.py --buy-check TICKER --run RUN_ID          same, but against a SPECIFIC run's buy case\n"
             "\n"
             "\n"
             "  python refine.py TICKER             (separate command) put an existing report\n"
             "                                     through independent critic review\n"
             "  python sale_advisory.py TICKER      (separate command) generate or repair one\n"
             "                                     report's sale advisory\n"
+            "  python buy_case.py TICKER           (separate command) generate or repair one\n"
+            "                                     Watch report's buy case\n"
             "\n"
-            "Phase A is subscription-metered (time only); Phase B/C is the billed part.\n"
+            "Phase A is subscription-metered (time only); Phase B/C/E is the billed part.\n"
             "--screen-only and --from-csv are inverses, so the two can run on different\n"
             "cadences: screen often, analyze only when you intend to act on the list.\n"
             "--skip-sale-advisor drops Phase C from any Phase B run (~1/4 of the cost).\n"
+            "Phase E (the buy case: entry price range + buy triggers) runs automatically\n"
+            "for a ticker whose verdict is WATCH, and only then; --skip-buy-case drops it.\n"
             "Re-running --from-csv with a larger --top-n within the reuse window bills\n"
             "only the NEW tickers: the ones already analyzed are reused for ~$0, so you\n"
             "can start shallow and deepen without paying twice for the same work."
@@ -2691,12 +3065,20 @@ if __name__ == "__main__":
         help="Run Phase B without Phase C (no sale advisory / SALE_CASE), saving ~1/4 of the per-ticker cost",
     )
     parser.add_argument(
+        "--skip-buy-case", action="store_true",
+        help="Run Phase B without Phase E (no buy case / BUY_CASE for a Watch verdict)",
+    )
+    parser.add_argument(
         "--sell-check", action="store_true",
         help="Test whether TICKER's sale conditions are now met, and advise Sell/Hold (no full analysis)",
     )
     parser.add_argument(
+        "--buy-check", action="store_true",
+        help="Test whether TICKER's buy conditions are now met, and advise Buy/Wait (no full analysis)",
+    )
+    parser.add_argument(
         "--run", metavar="RUN_ID", default=None,
-        help="With --sell-check: evaluate against a SPECIFIC run's SALE_CASE (the run you purchased under) instead of the latest",
+        help="With --sell-check / --buy-check: evaluate against a SPECIFIC run's SALE_CASE (the run you purchased under) or BUY_CASE, instead of the latest",
     )
     parser.add_argument(
         "--force", action="store_true",
@@ -2722,8 +3104,16 @@ if __name__ == "__main__":
         top_n = args.top_n
         logger.info(f"Analyzing the top {top_n} candidates this run (--top-n override).")
 
-    if args.run and not args.sell_check:
-        parser.error("--run is only valid together with --sell-check")
+    if args.run and not (args.sell_check or args.buy_check):
+        parser.error("--run is only valid together with --sell-check or --buy-check")
+
+    # The two checks answer opposite questions for opposite readers (one assumes the
+    # stock is owned, the other that it is not) and each writes its own report file.
+    # Running both from one invocation would be ambiguous about which answer the exit
+    # was reporting, so ask for one at a time.
+    if args.sell_check and args.buy_check:
+        parser.error("--sell-check and --buy-check test different stored conditions; "
+                     "run one at a time")
 
     # --screen-only never reaches Phase B, so any flag that only shapes Phase B is a
     # sign the command was not the one intended. Fail loudly rather than silently
@@ -2732,7 +3122,9 @@ if __name__ == "__main__":
         conflicting = [
             name for name, given in (
                 ("--from-csv", args.from_csv), ("--sell-check", args.sell_check),
-                ("--skip-sale-advisor", args.skip_sale_advisor), ("--force", args.force),
+                ("--buy-check", args.buy_check),
+                ("--skip-sale-advisor", args.skip_sale_advisor),
+                ("--skip-buy-case", args.skip_buy_case), ("--force", args.force),
                 ("TICKER", args.ticker),
             ) if given
         ]
@@ -2750,9 +3142,16 @@ if __name__ == "__main__":
         if args.skip_sale_advisor:
             parser.error("--skip-sale-advisor is not valid with --sell-check (it runs no Phase C)")
         run_sell_check(args.ticker, args.company, args.run)
+    elif args.buy_check:
+        if not args.ticker:
+            parser.error("--buy-check requires a TICKER (e.g. python main.py --buy-check CROX)")
+        if args.skip_buy_case:
+            parser.error("--skip-buy-case is not valid with --buy-check (it runs no Phase E)")
+        run_buy_check(args.ticker, args.company, args.run)
     elif args.from_csv:
-        run_from_csv(args.from_csv, args.force, args.skip_sale_advisor)
+        run_from_csv(args.from_csv, args.force, args.skip_sale_advisor, args.skip_buy_case)
     elif args.ticker:
-        run_single_ticker(args.ticker, args.company, args.force, args.skip_sale_advisor)
+        run_single_ticker(args.ticker, args.company, args.force, args.skip_sale_advisor,
+                          args.skip_buy_case)
     else:
-        run_orchestrator(args.force, args.skip_sale_advisor)
+        run_orchestrator(args.force, args.skip_sale_advisor, args.skip_buy_case)

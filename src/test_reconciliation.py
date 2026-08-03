@@ -167,15 +167,18 @@ SOLV_CASES = [
 
 # The gate must not re-read its own warning table when an already-stored report is
 # checked a second time -- the table's columns would look like fresh wrong claims.
+# Kept byte-identical in SHAPE to what `_format_reconciliation_section` emits today,
+# including the Basis column, so this fixture cannot quietly drift into testing a
+# table the code no longer produces.
 STORED_REPORT_WITH_WARNINGS = """
 Vicor holds $453.58M of cash against $7.61M of total debt.
 
 ## Data Reconciliation Warnings
 
-| Section | Figure | Stated in report | Verified from filings | Off by |
-| :--- | :--- | ---: | ---: | ---: |
-| Bull case | enterprise value | $88.35M | $8.91B | 99.0% |
-| Sale advisory | total debt | $453.58M | $7.61M | 5861.9% |
+| Section | Figure | Stated in report | Verified | Basis | Off by |
+| :--- | :--- | ---: | ---: | :--- | ---: |
+| Bull case | enterprise value | $88.35M | $8.91B | market price | 99.0% |
+| Sale advisory | total debt | $453.58M | $7.61M | filings | 5861.9% |
 """
 
 
@@ -218,7 +221,63 @@ def run():
     else:
         print(f"PASS  {'stored warning table not re-scanned':<40} expected=silent got=silent")
 
-    total = len(CASES) + len(VICR_CASES) + len(SOLV_CASES) + 2
+    # --- Provenance: not every verified figure comes from a filing -------------
+    # Debt and cash are read off the balance sheet and do not move until the next
+    # one; market capitalisation is today's price times shares, and enterprise value
+    # is built on it. Reporting both as "the filings show X" made a moved price look
+    # like a mistake — which matters most on `refine.py` / `sale_advisory.py` /
+    # `buy_case.py`, where the report being checked is older than the figures.
+    print("--- finding provenance ---")
+    basis_checks = [
+        ("debt is a filings figure", main._finding_basis("TotalDebt") == "filings"),
+        ("cash is a filings figure", main._finding_basis("Cash") == "filings"),
+        ("market cap is market-derived",
+         main._finding_basis("LiveMarketCap") == "market price"),
+        ("enterprise value is market-derived, since it is built on market cap",
+         main._finding_basis("EnterpriseValue") == "market price"),
+    ]
+    debt_finding = main._reconcile_agent_figures(
+        "Vicor carries total debt of $8.92B.", VICR_CANDIDATE, "Bull case")
+    cap_finding = main._reconcile_agent_figures(
+        "Vicor's market capitalisation is $88.35M.", VICR_CANDIDATE, "Bull case")
+    basis_checks += [
+        ("a debt finding is tagged filings",
+         bool(debt_finding) and debt_finding[0]["basis"] == "filings"),
+        ("a market-cap finding is tagged market price",
+         bool(cap_finding) and cap_finding[0]["basis"] == "market price"),
+    ]
+    if debt_finding:
+        w = main.reconciliation_warning("VICR", debt_finding[0])
+        basis_checks += [
+            ("a filings warning still says 'the filings show'", "the filings show" in w),
+            ("and does not excuse itself as market movement", "move every session" not in w),
+        ]
+    if cap_finding:
+        w = main.reconciliation_warning("VICR", cap_finding[0])
+        basis_checks += [
+            ("a market warning does NOT claim the filings show it",
+             "the filings show" not in w),
+            ("it names the current share price as the basis",
+             "CURRENT share price" in w),
+            ("and warns it may be the clock, not an error",
+             "passage of time rather than an error" in w),
+        ]
+        section = main._format_reconciliation_section(cap_finding)
+        basis_checks += [
+            ("the report table carries a Basis column", "| Basis |" in section),
+            ("and explains what a market-price row means",
+             "can simply mean the stock has moved since" in section),
+        ]
+        filed_only = main._format_reconciliation_section(debt_finding)
+        basis_checks.append(
+            ("the market-price note is omitted when no such row exists",
+             "the stock has moved since" not in filed_only))
+    for name, ok in basis_checks:
+        if not ok:
+            failures.append(name)
+        print(f"{'PASS' if ok else 'FAIL'}  {name:<62} {ok}")
+
+    total = len(CASES) + len(VICR_CASES) + len(SOLV_CASES) + 2 + len(basis_checks)
     print(f"{total - len(failures)}/{total} passed.")
     if failures:
         print("FAILED: " + ", ".join(failures))

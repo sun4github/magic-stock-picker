@@ -136,7 +136,10 @@ def generate_sale_advisory(ticker: str, company_name: str = None,
                      f"an advisory from; nothing done.")
         return
     candidate = refine._load_candidate(ticker)
-    verified_figures = main._format_verified_figures(candidate)
+    # The advisory's triggers are business events rather than price levels, but its
+    # prose routinely refers to what the stock costs — one stated price, from the same
+    # place every other document takes it, beats each agent finding its own.
+    verified_figures = main._format_verified_figures(candidate, main._price_snapshot(ticker))
     quarterly_data = fmp_quarterly_trends(ticker)
 
     # 4. Its own cost row — see the module docstring for why this is not folded into
@@ -168,9 +171,7 @@ def generate_sale_advisory(ticker: str, company_name: str = None,
     recon = main._reconcile_agent_figures(sale_data, candidate, "Sale advisory")
     for f in recon:
         logger.warning(
-            f"[{ticker}] RECONCILIATION: {f['source']} states {f['field']} of "
-            f"{main.format_money(f['stated'])}, but the filings show "
-            f"{main.format_money(f['verified'])} (off by {f['deviation_pct']}%)."
+            main.reconciliation_warning(ticker, f)
         )
     if not recon:
         logger.info(f"[{ticker}] Reconciliation gate passed on the new advisory.")

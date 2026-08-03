@@ -81,6 +81,40 @@ agents:
     search_provider: "tavily"                 # anything not in the news feed
     search_api_key_env: "TAVILY_API_KEY"
 
+  # Phase E: the BUY CASE, for a WATCH verdict only (src/buy_case_agent.py). Defined
+  # outside main.py because it is conditional on a verdict that only exists after the
+  # reasoning graph has finished — see the module docstring. It reads the finished
+  # report, the verified figures, the quarterly feed and a freshly fetched price, and
+  # writes the entry price range and the buy triggers that `--buy-check` tests later.
+  #
+  # It is the only role in the system with FORWARD-looking data: analyst consensus
+  # estimates, the implied forward P/E and its analyst counts, the earnings calendar
+  # for this company AND for the companies whose results drive its revenue, segment
+  # disclosure, and SEC merger filings. Those feeds are deliberately kept away from
+  # the bear/bull/analyst chain, which weighs realised results and may not rest a Buy
+  # on a projection.
+  buy_case_agent:
+    name: "Buy_Case_Agent"
+    # model: inherited from agents.model (pinned)
+    instructions_file: "buy-case-instructions.md"
+    verdicts: ["Watch"]                       # informational: the gate is is_watch()
+    news_provider: "fmp"
+    news_api_key_env: "FMP_API_KEY"
+    search_provider: "tavily"                 # deals, spending plans, analyst commentary
+    search_api_key_env: "TAVILY_API_KEY"
+
+  # On-demand buy-condition check (Phase E follow-up), the mirror of sell_check_agent:
+  # loads a stored BUY_CASE and tests whether its price range and triggers are now
+  # met against CURRENT data, advising Buy/Wait. Not part of the analysis graph.
+  buy_check_agent:
+    name: "Buy_Check_Agent"
+    # model: inherited from agents.model (pinned)
+    instructions_file: "buy-check-instructions.md"
+    news_provider: "fmp"
+    news_api_key_env: "FMP_API_KEY"
+    search_provider: "tavily"
+    search_api_key_env: "TAVILY_API_KEY"
+
 # EXPLICIT context caching (Gemini). Disabled on measured evidence — see the long
 # comment above CONTEXT_CACHE in main.py.
 #
@@ -150,11 +184,12 @@ reuse:
 # rolling budget.per_day_usd window still applies on top of this.
 refinement:
   # Raised from 2.00 to 2.25 when the sale advisory joined the revision commitment
-  # (see seed_advisory_usd below). The reservation is ~$0.12 and is held back from
-  # the review rounds, so without this the change would have quietly bought fewer
-  # rounds for the same stated ceiling. 2.25 restores the review headroom rather than
-  # paying for the advisory out of it.
-  max_budget_usd: 2.25      # ~4-6 agent turns at current rates, plus the advisory
+  # (see seed_advisory_usd below), then to 2.45 when the buy case did (see
+  # seed_buy_case_usd). Each reservation is held back from the review rounds, so
+  # without the matching increase every addition would quietly buy fewer rounds for
+  # the same stated ceiling. The number restores review headroom rather than paying
+  # for the derived documents out of it.
+  max_budget_usd: 2.45      # ~4-6 agent turns, plus the advisory and the buy case
   max_rounds: 3             # hard stop; the budget usually binds first
   # Cost estimates used ONLY for the first ceiling check, before either role has run
   # once and can be measured. After round 1 they are discarded in favour of the
@@ -199,6 +234,23 @@ refinement:
   #
   # Set false to leave the advisory untouched (the pre-2026-08 behaviour).
   regenerate_sale_advisory: true
+
+  # The buy case (Phase E) after a review. Same problem as the advisory — it is
+  # derived FROM the report, the critic never sees it, and a revision leaves its
+  # triggers describing a thesis that no longer exists — with one extra wrinkle: it
+  # exists only for a 'Watch', and a review can move the verdict ONTO or OFF Watch.
+  # So there are four outcomes, not two (see refine._refresh_buy_case):
+  #   verdict is no longer Watch -> nothing is written; the reviewed run keeps its own
+  #   Watch, no buy case existed  -> one is WRITTEN (the review created the need)
+  #   Watch, revision ran         -> re-derived against the revised text and today's price
+  #   Watch, no revision          -> carried forward unchanged, for $0
+  #
+  # Carrying forward matters for the same reason it does for the advisory: the refined
+  # report stamps the refinement's run_id and tells the reader to record it, and
+  # `--buy-check TICKER --run <that id>` would fail outright with no BUY_CASE under it.
+  #
+  # Set false to leave the buy case untouched.
+  regenerate_buy_case: true
   # Reserved BEFORE the loop commits to a revision, not discovered afterwards — see
   # _Estimator.full_round. A revision is what makes the advisory stale, so the two
   # are one commitment and are priced as one. The alternative, a separate pot the
@@ -207,6 +259,19 @@ refinement:
   # in practice (~$0.12 against rounds of ~$0.20) and only binds in a session that is
   # about to need it, since no revision has been committed to before the check.
   seed_advisory_usd: 0.12
+
+  # Reserved on the same rule, with one difference that cannot be engineered away:
+  # whether a buy case is needed depends on the verdict of a report that does not yet
+  # exist when the reservation has to be made. It is therefore reserved for EVERY
+  # session, and a session whose verdict lands on Buy or Avoid simply does not spend
+  # it. max_budget_usd above was raised to absorb that.
+  #
+  # Higher than the advisory's seed because the buy-case advisor does more work: it
+  # calls the forward-estimates feed, the earnings calendar for the subject AND for
+  # each company it names as a leading indicator, segment disclosure, and the M&A
+  # filings, where the advisor makes two tool calls. Re-calibrate this against
+  # measured runs the way seed_critique_usd was.
+  seed_buy_case_usd: 0.18
 
 tools:
   web_search:
