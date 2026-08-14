@@ -321,6 +321,91 @@ Universe rows carry **no** benchmark baseline, and their `excess_return_pct` is
 NULL by design. They exist to be compared against the verdicts of the *same run*,
 and that comparison is like-for-like without an index in the middle.
 
+## Externally-sourced picks (`source`)
+
+Most of the money this household invests does **not** come from this pipeline —
+it follows outside recommendations. Until those purchases were recorded, the
+pipeline could only be compared against the index, which flatters or damns
+everything together depending on what the market did.
+
+`verdict_log.source` closes that gap. `PIPELINE` is a verdict this system
+reasoned its way to; anything else is a purchase made elsewhere, mirrored in
+from the position tracker by
+[`src/sync_external_picks.py`](../src/sync_external_picks.py) as a `BUY` row.
+
+**What a mirrored row means.** `verdict_date` is the *purchase* date and `price`
+is the *fill* price — not the date or price of the recommendation. That choice
+decides which question gets answered: this grades the holder's money, including
+whatever was lost between reading an idea and acting on it. `prompt_version`,
+`git_sha` and `verdict_basis` rows are all absent, because no prompt produced
+these and no factors were articulated. That is expected, not missing data.
+
+**The one rule that is not optional.** Every query that grades *this system*
+must filter `source = 'PIPELINE'`. Without it the screen collects credit and
+blame for picks it never made — which does not add noise, it silently answers a
+different question. Q1–Q4 in `ledger-queries.sql` all carry the filter; Q7–Q9
+are the queries that deliberately put the streams side by side.
+
+**Two windows, not one.** External picks arrive by *backfill*: a purchase made
+three years ago enters the ledger already older than `track_for_days` (400) and
+would never be snapshotted even once — silently, because "no subjects due" reads
+exactly like a quiet week. `external_track_for_days` (2200) is the window
+applied to them instead, and they are multi-year holds rather than annual
+rotations, so they need it anyway.
+
+**Nothing needs running at the moment of a trade.** Record purchases and sales in
+the tracker whenever convenient; `sync_external_picks.py --commit` runs on the
+same weekly schedule as the snapshot job and immediately before it, and picks up
+both. Order matters — the sync is what tells the snapshot which subjects exist
+and which have finished.
+
+That script does two distinct jobs, and the second is easy to miss. It mirrors
+new purchases, *and* it settles rows whose position has since been sold. A
+purchase is mirrored when it is made; the sale comes later, by which time a
+`verdict_log` row already exists and the mirror step skips it forever. Without
+the settle step a sold position keeps being re-priced weekly as though still
+held — and since every query here reads the **latest** snapshot, the settled
+result would be silently overridden by a hypothetical one. Marks dated after the
+sale are deleted for that reason.
+
+**The streams overlap.** An outside recommendation is sometimes also run through
+this pipeline before being bought, leaving two rows for one company: a
+`PIPELINE` verdict grading the analysis and an external row grading the
+purchase. Both are kept. They are different claims made on different dates at
+different prices, and the gap between them is the cost of deliberating. Q9
+reports the overlap — both as a caveat on Q7 and as a finding in itself, since
+agreement between two independent streams is a stronger signal than either
+alone.
+
+The partial unique index `idx_verdict_log_external_dedup` on
+`(source, ticker, verdict_date) WHERE source <> 'PIPELINE'` is what makes the
+sync safe to re-run. It is partial because the pipeline legitimately logs both
+an `INDEPENDENT` and a `POST_CRITIC` verdict for one ticker on one day.
+
+## Backfilling a verdict the ledger missed
+
+The ledger began recording after the earliest real purchases, so the analyses
+behind them were absent from it. Two scripts enter them after the fact, and
+`src/backfills/` keeps the exact inputs used.
+
+`backfill_pipeline_verdicts.py` writes the `verdict_log` row from
+`final_reports` (verdict + date), recovering the price and the benchmark
+baseline from the EOD close on the verdict date. **Which run to use is named
+explicitly, never inferred**: a ticker is often re-analysed after it was bought,
+and a verdict reached later cannot be the one that caused the purchase.
+
+`load_reconstructed_basis.py` attaches factors. It does **not** call a model —
+the extraction is written into a reviewable JSON file and this only validates and
+loads it, so no unreviewed interpretation reaches the permanent record with
+nothing to inspect. A `factor_key` that is neither in the taxonomy nor prefixed
+`OTHER_` is refused outright, because a near-miss key aggregates with nothing
+and silently vanishes from every base rate.
+
+`prompt_version` stays NULL on every backfilled verdict — the prompt hash as it
+stood that day is gone, and today's would misattribute the row to the current
+system. That NULL doubles as the marker for these rows, and for the
+reconstructed basis hanging off them.
+
 ## Failure modes, all non-fatal
 
 | What breaks | What happens | What is lost |
@@ -332,6 +417,8 @@ and that comparison is like-for-like without an index in the middle.
 | Ledger write raises | warning; run continues | one ledger row |
 | Symbol stops quoting (delisted) | warning; other symbols still snapshot | that subject's later history |
 | Snapshot job misses a week | next run catches up | nothing |
+| No `stock_tracker.lots` table | sync logs it and exits 0 | nothing; this repo tracks no positions |
+| No benchmark history on a purchase date | warning; row written with NULL baseline | excess return for that pick |
 
 ## Tests
 

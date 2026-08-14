@@ -305,6 +305,25 @@ verdict_ledger:
   # verdict older than this has already been acted on one way or the other.
   track_for_days: 400
 
+  # The same limit for externally-sourced picks (verdict_log.source <>
+  # 'PIPELINE'), which needs to be much larger for two reasons.
+  #
+  # These are multi-year holds, not annual rotations, so 400 days would stop
+  # measuring a position still being held. Worse, they are entered by BACKFILL:
+  # a purchase made three years ago arrives in the ledger already older than
+  # track_for_days and would never be snapshotted even once — silently, since
+  # "no subjects due" is indistinguishable from a quiet week in the log.
+  #
+  # Six years covers the history on hand with room to spare. The cost of raising
+  # it is one quote per subject per week.
+  external_track_for_days: 2200
+
+  # Value written to verdict_log.source for purchases mirrored in from the
+  # position tracker by sync_external_picks.py. Must match the label used on
+  # the tracker's own lots (stock_tracker.lots.source), or the sync re-enters
+  # the same purchases under a second name every time it runs.
+  external_source: "MANUAL"
+
   # Controlled vocabulary for verdict_basis.factor_key. The analyst picks from
   # this list; anything genuinely new is recorded as OTHER_<slug> and reviewed
   # for promotion. Free-text keys are the failure mode this exists to prevent —

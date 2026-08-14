@@ -1323,15 +1323,36 @@ def initialize_database():
                 prompt_version VARCHAR(16),
                 git_sha VARCHAR(40),
                 analysis_key TEXT,
+                source VARCHAR(32) NOT NULL DEFAULT 'PIPELINE',
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # Idempotently add `source` to a verdict_log created before it existed.
+        # PIPELINE is the right default for every pre-existing row: until this
+        # column shipped, the pipeline was the only thing that wrote here.
+        cur.execute("ALTER TABLE verdict_log ADD COLUMN IF NOT EXISTS "
+                    "source VARCHAR(32) NOT NULL DEFAULT 'PIPELINE'")
+        # Set only for a row whose position was sold. NULL means still held, so
+        # the snapshot job keeps marking it to market; non-NULL means the result
+        # is final and the last outcome row is the one priced at the exit.
+        cur.execute("ALTER TABLE verdict_log ADD COLUMN IF NOT EXISTS exit_date DATE")
+        cur.execute("ALTER TABLE verdict_log ADD COLUMN IF NOT EXISTS "
+                    "exit_price NUMERIC(14, 4)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_verdict_log_ticker_date "
                     "ON verdict_log(ticker, verdict_date DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_verdict_log_date "
                     "ON verdict_log(verdict_date DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_verdict_log_verdict "
                     "ON verdict_log(verdict, prompt_version)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_verdict_log_source "
+                    "ON verdict_log(source, verdict_date DESC)")
+        # Makes sync_external_picks.py safe to re-run: one purchase is one
+        # (source, ticker, date), so a repeat sync conflicts instead of
+        # double-entering it. Partial, because the pipeline legitimately logs
+        # both an INDEPENDENT and a POST_CRITIC verdict for one ticker on one
+        # day and must not be constrained by this.
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_verdict_log_external_dedup "
+                    "ON verdict_log(source, ticker, verdict_date) WHERE source <> 'PIPELINE'")
 
         cur.execute('''
             CREATE TABLE IF NOT EXISTS verdict_basis (

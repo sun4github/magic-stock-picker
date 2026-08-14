@@ -125,6 +125,7 @@ _DEFAULTS = {
     "benchmark_symbol": "SPY",
     "snapshot_interval_days": 7,
     "track_for_days": 400,
+    "external_track_for_days": 2200,
 }
 
 
@@ -193,17 +194,28 @@ def _due(cur, cfg: dict) -> tuple:
     """
     interval = int(cfg.get("snapshot_interval_days", 7))
     track_for = int(cfg.get("track_for_days", 400))
+    external_track_for = int(cfg.get("external_track_for_days", 2200))
 
+    # The tracking window is per-source. A pipeline verdict is spent after about
+    # a year — that is the holding period the strategy uses. An externally
+    # sourced pick is a multi-year hold AND arrives by backfill, often already
+    # older than the pipeline window: measured against `track_for_days` alone it
+    # would never be snapshotted once, and would look exactly like a quiet week.
     cur.execute('''
         SELECT v.verdict_id, v.ticker, v.verdict_date, v.price, v.benchmark_price
           FROM verdict_log v
          WHERE v.price > 0
-           AND v.verdict_date > CURRENT_DATE - %s
+           -- A sold position is finished. Re-pricing it every week would keep
+           -- crediting or blaming the pick for a market it was no longer in,
+           -- and would overwrite a settled result with a hypothetical one.
+           AND v.exit_date IS NULL
+           AND v.verdict_date > CURRENT_DATE - (
+                 CASE WHEN v.source = 'PIPELINE' THEN %s ELSE %s END)
            AND NOT EXISTS (
                  SELECT 1 FROM verdict_outcome o
                   WHERE o.verdict_id = v.verdict_id
                     AND o.as_of > CURRENT_DATE - %s)
-    ''', (track_for, interval))
+    ''', (track_for, external_track_for, interval))
     verdicts = cur.fetchall()
 
     # Universe rows are the control group: names the screen surfaced, tracked
