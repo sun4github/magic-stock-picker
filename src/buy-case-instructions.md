@@ -207,6 +207,19 @@ Rules that make these worth writing:
 7. **Say how many must fire.** Close the section with one sentence: which triggers are
    necessary, which are sufficient, and how many together make this a Buy. The price
    trigger alone is rarely sufficient — say plainly whether it is here.
+8. **State each trigger's expected horizon, and how often the condition has actually
+   occurred.** One clause per trigger: when you would expect it to fire if the case is
+   right, and how frequently the same condition has occurred historically — from the
+   eight quarters in QUARTERLY_DATA for an operating trigger, or from the 52-week
+   range for a price one. "Within two quarters; this margin level was last reached in
+   the quarter ended 30 September" or "within a year; the stock traded below $38 in
+   four of the last twelve months."
+   This is a disclosure requirement, NOT an instruction to prefer triggers that fire
+   soon. A trigger that will take two years is fine if it is the right condition —
+   say two years. Do not reach for an easier condition, and above all do not lean
+   harder on the price trigger, just to make a shorter horizon plausible. A watchlist
+   whose triggers are chosen for hittability rather than for meaning is worse than
+   useless: it converts patience into false precision.
 
 ## 6. What would take this off the watchlist
 

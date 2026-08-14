@@ -6,6 +6,7 @@ import json
 import asyncio
 import hashlib
 import logging
+import subprocess
 from datetime import datetime
 import uuid
 import yaml
@@ -55,6 +56,8 @@ from mcp_server import (
     db_find_reusable_report,
     db_copy_ticker_outputs,
     db_spend_since,
+    db_log_run_universe,
+    db_log_verdict,
     drain_embedding_usage,
 )
 # The screener's CSV output path (default source for --from-csv mode) and the
@@ -90,6 +93,22 @@ with open(config_path, "r") as f:
     config = yaml.safe_load(f)
 
 top_n = config.get("agents", {}).get("screener_agent", {}).get("top_n_candidates", 30)
+
+# Verdict ledger settings. The factor vocabulary is spliced into the analyst's
+# instruction at import (not templated from session state) because it is static
+# config, and because an ADK `{placeholder}` that no one seeds resolves to an
+# empty string — which would silently ship a prompt telling the model to pick
+# from a list that is not there.
+LEDGER = config.get("verdict_ledger", {}) or {}
+LEDGER_ENABLED = bool(LEDGER.get("enabled", False))
+LEDGER_BENCHMARK = str(LEDGER.get("benchmark_symbol", "SPY")).strip().upper()
+LEDGER_FACTOR_TAXONOMY = [str(k).strip() for k in (LEDGER.get("factor_taxonomy") or []) if str(k).strip()]
+if LEDGER_ENABLED and not LEDGER_FACTOR_TAXONOMY:
+    # Loud, because the failure is silent otherwise: the analyst would be asked
+    # to choose from an empty vocabulary and would invent keys, which is the one
+    # outcome the controlled list exists to prevent.
+    logger.error("verdict_ledger.enabled is true but factor_taxonomy is empty in "
+                 "config.yaml — the analyst has no vocabulary to choose from.")
 
 # PINNED model version, deliberately not the `gemini-flash-latest` alias.
 #
@@ -223,6 +242,54 @@ VERIFIED_FIGURES_MANDATE = (
     "- Do not confuse market capitalisation with total debt: they are different "
     "line items and a plausible-looking coincidence between them is a sign you have "
     "mixed them up.\n\n"
+)
+
+
+# The machine-readable tail of the analyst's report, used only to populate the
+# verdict ledger (see sql-schema.sql tables 6-9). It is PARSED AND STRIPPED by
+# `_split_verdict_basis` before the report is stored, so no reader ever sees it:
+# the report is written for someone with no finance background, and a JSON dump
+# at the end of it would be noise to every human who opens it.
+#
+# Asked for as a fenced block rather than as prose because it is the one part of
+# the output that a program consumes. Prose would need a parser that guesses,
+# and a guessing parser writing to a table meant to be a factual record of what
+# we claimed is the wrong trade.
+#
+# The factor list is a CONTROLLED VOCABULARY, and that is the whole point: free
+# text keys would record "customer concentration", "client concentration risk"
+# and "top-10 customer exposure" as three unrelated factors, and the base rates
+# the ledger exists to accumulate would never form. The list is injected from
+# specs/config.yaml at import so the vocabulary has exactly one home.
+VERDICT_BASIS_MANDATE = (
+    "## Verdict Basis (mandatory, machine-read — write it LAST)\n"
+    "After '## What Would Make This Wrong', append a final section headed exactly "
+    "'## Verdict Basis' containing ONE fenced ```json block and nothing else. It "
+    "records the factors that actually drove your verdict, so the system can later "
+    "check which factors it reads well and which it misreads.\n"
+    "Format — a JSON array of 3 to 7 objects:\n"
+    '```json\n'
+    '[{"factor_key": "customer_concentration", "stance": "BEAR", '
+    '"materiality": "HIGH", "observation": "Two sentences, plain English, '
+    'specific to this company and citing the figure that matters."}]\n'
+    '```\n'
+    "Rules:\n"
+    "- `factor_key` MUST come from the list below. If a factor genuinely driving "
+    "your verdict is not on the list, use `OTHER_<short_snake_case_name>` — do not "
+    "force it into an approximate match, and do not coin a new bare key.\n"
+    "- `stance` is BEAR (argues against buying) or BULL (argues for). "
+    "`materiality` is HIGH, MEDIUM or LOW — how much this factor moved YOUR "
+    "verdict, not how dramatic it sounds.\n"
+    "- Include the factors that DECIDED it, including ones that cut against where "
+    "you landed. A basis listing only factors agreeing with the verdict is a "
+    "record of a conclusion, not of reasoning.\n"
+    "- Do NOT list the screen's entry criteria (high return on capital, high "
+    "earnings yield, low PEG, EPS growth). Every candidate has those; they "
+    "distinguish nothing and would swamp the ledger with a constant.\n"
+    "- `observation` is exactly two sentences and must contain the specific "
+    "number, date or event — not a restatement of the factor's name.\n"
+    "Permitted factor_key values:\n"
+    + ", ".join(LEDGER_FACTOR_TAXONOMY) + "\n\n"
 )
 
 
@@ -500,6 +567,7 @@ analyst_agent = LlmAgent(
         "Q3 alone has been pointed at an incomplete picture. The same applies to any "
         "retailer, or to any company whose quarters are visibly uneven in "
         "QUARTERLY_DATA.\n\n"
+        + VERDICT_BASIS_MANDATE
         + REFERENCE_DATA_BLOCKS
         + "<BEAR_CASE>\n{bear_data}\n</BEAR_CASE>\n\n"
         "<BULL_CASE>\n{bull_data}\n</BULL_CASE>\n"
@@ -1244,6 +1312,126 @@ def _extract_verdict(report_text: str) -> str:
     return min(positions, key=positions.get).upper() if positions else "WATCH"
 
 
+# Matches the '## Verdict Basis' section and everything after it. Anchored to the
+# heading rather than to the fence so a model that emits stray prose around the
+# block still gets the whole tail removed from the reader-facing report.
+_VERDICT_BASIS_RE = re.compile(r"\n#{1,6}\s*Verdict Basis\b.*", re.IGNORECASE | re.DOTALL)
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\[.*?\])\s*```", re.DOTALL)
+
+
+def _split_verdict_basis(report_text: str, ticker: str = "") -> tuple:
+    """Split the analyst's report into (reader-facing report, basis factor list).
+
+    The basis block is machine-only, so it is removed from the text that gets
+    stored, rendered and shown: the report is written for a reader with no
+    finance background, and a JSON array at the foot of it is noise to every
+    human who opens it. Stripping happens here, before the reconciliation gate
+    and the critic see the text, so no downstream consumer has to know the
+    section ever existed.
+
+    A missing or malformed block costs the ledger one row and nothing else — it
+    never fails the analysis. The report is the product; the bookkeeping is not.
+    """
+    if not report_text:
+        return report_text, []
+    m = _VERDICT_BASIS_RE.search(report_text)
+    if not m:
+        logger.warning(f"[{ticker}] No '## Verdict Basis' section in the analyst's "
+                       f"report; this verdict will be logged with no factors.")
+        return report_text, []
+
+    tail, cleaned = m.group(0), report_text[:m.start()].rstrip() + "\n"
+    fence = _JSON_FENCE_RE.search(tail)
+    raw = fence.group(1) if fence else None
+    if raw is None:
+        # Fall back to the outermost bracket pair: models occasionally emit the
+        # array without fencing it, and the data is perfectly good when they do.
+        start, end = tail.find("["), tail.rfind("]")
+        raw = tail[start:end + 1] if 0 <= start < end else None
+    if raw is None:
+        logger.warning(f"[{ticker}] Verdict Basis section contained no JSON array.")
+        return cleaned, []
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.warning(f"[{ticker}] Could not parse the Verdict Basis JSON ({e}); "
+                       f"this verdict will be logged with no factors.")
+        return cleaned, []
+    if not isinstance(parsed, list):
+        logger.warning(f"[{ticker}] Verdict Basis JSON was not an array.")
+        return cleaned, []
+
+    known = set(LEDGER_FACTOR_TAXONOMY)
+    factors, off_vocabulary = [], []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("factor_key") or "").strip()
+        if not key:
+            continue
+        # An unrecognised key is KEPT, not dropped. It is recorded as given so
+        # the monthly taxonomy review can see what the analyst reached for; a
+        # dropped observation is unrecoverable, an untidy key is a rename.
+        if key not in known and not key.upper().startswith("OTHER_"):
+            off_vocabulary.append(key)
+            key = f"OTHER_{key}"
+        factors.append({
+            "factor_key": key,
+            "stance": str(item.get("stance") or "").strip().upper(),
+            "materiality": str(item.get("materiality") or "").strip().upper(),
+            "observation": str(item.get("observation") or "").strip(),
+        })
+    if off_vocabulary:
+        logger.info(f"[{ticker}] Verdict basis used {len(off_vocabulary)} key(s) outside "
+                    f"the taxonomy, stored under OTHER_: {', '.join(off_vocabulary)}")
+    return cleaned, factors
+
+
+_BENCHMARK_CACHE = {}
+
+
+def _benchmark_price() -> float:
+    """Today's benchmark level, fetched once per process and reused.
+
+    Cached by date rather than fetched per ticker: a 30-ticker run would
+    otherwise make 30 identical quote calls, and every verdict in that run would
+    be baselined against a slightly different intraday level for no reason. The
+    benchmark is what a verdict's excess return is measured against years later,
+    so it is captured now — recovering a historical index level for an arbitrary
+    past date later means trusting a provider to still serve it.
+
+    Returns 0.0 on failure, which db_log_verdict stores as NULL. A verdict with
+    no baseline is still gradeable on absolute return; refusing to log it would
+    lose the observation entirely."""
+    today = datetime.now().date().isoformat()
+    if _BENCHMARK_CACHE.get("date") == today:
+        return _BENCHMARK_CACHE.get("price", 0.0)
+    price = 0.0
+    try:
+        snap = json.loads(fmp_price_snapshot(LEDGER_BENCHMARK))
+        price = float(snap.get("price") or 0.0)
+    except Exception as e:
+        logger.warning(f"Could not fetch the {LEDGER_BENCHMARK} benchmark price ({e}); "
+                       f"verdicts this run will be logged without a baseline.")
+    _BENCHMARK_CACHE.update({"date": today, "price": price})
+    return price
+
+
+def _git_sha() -> str:
+    """Short commit SHA of the working tree, or "" outside a checkout.
+
+    Stored beside `_prompt_version()` on every logged verdict. The hash says two
+    prompt versions differ; the commit says HOW they differ, which is the part a
+    human needs when the track record splits either side of an edit."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=os.path.dirname(__file__),
+                             capture_output=True, text=True, timeout=5)
+        return out.stdout.strip()[:40] if out.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
 def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: str = "",
                    candidate: dict = None, force: bool = False,
                    skip_sale_advisor: bool = False, skip_buy_case: bool = False) -> dict:
@@ -1349,6 +1537,10 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     bull_data = state.get("bull_data", "") or ""
     sale_data = state.get("sale_data", "") or ""
     report_text = state.get("final_report", "") or ""
+    # Split off the machine-only basis block immediately, so every downstream
+    # consumer — reconciliation gate, critic, stored report, web UI — sees only
+    # the prose the analyst wrote for a human.
+    report_text, verdict_factors = _split_verdict_basis(report_text, ticker)
 
     # Persist each step's raw output (spec section 5B). SEC/metrics are raw
     # provenance (reproducible, low search value) -> stored without an embedding.
@@ -1434,6 +1626,34 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
                             price.get("price"), price.get("as_of")),
         f"{ticker} ticker_run",
     )
+
+    # The verdict ledger. Deliberately AFTER the report is safely persisted and
+    # deliberately not wrapped in _check_db: this is bookkeeping, and a ledger
+    # failure must never cost a report that has already been paid for. Only the
+    # fresh-analysis path reaches here — the reuse path returns long before this
+    # point, which is what keeps a re-run ticker from entering the same
+    # judgement into the track record twice.
+    if LEDGER_ENABLED:
+        try:
+            db_log_verdict(
+                run_id, ticker, verdict, json.dumps(verdict_factors),
+                company_name=company_name or ticker,
+                verdict_stage="INDEPENDENT",
+                price=_present(price.get("price")) or 0.0,
+                market_cap=_present((candidate or {}).get("LiveMarketCap")) or 0.0,
+                shares_outstanding=_present((candidate or {}).get("SharesOutstanding")) or 0.0,
+                sector=(candidate or {}).get("Sector") or "",
+                industry=(candidate or {}).get("Industry") or "",
+                magic_rank=int(_present((candidate or {}).get("Final_Rank")) or 0),
+                benchmark_symbol=LEDGER_BENCHMARK,
+                benchmark_price=_benchmark_price(),
+                prompt_version=_prompt_version(),
+                git_sha=_git_sha(),
+                analysis_key=analysis_key or "",
+            )
+        except Exception as e:
+            logger.warning(f"[{ticker}] Verdict ledger write failed ({e}); the "
+                           f"analysis is unaffected.")
 
     report_path = os.path.join("reports", f"{ticker}_Final_Report_{verdict.title()}.md")
     with open(report_path, "w", encoding='utf-8') as f:
@@ -2666,6 +2886,18 @@ def _run_phase_b(top_candidates: list, source_label: str, force: bool = False,
     tickers = [c.get("Symbol") for c in top_candidates if c.get("Symbol")]
     _check_db(db_create_pipeline_run(run_id, tickers), "create pipeline run")
 
+    # Snapshot the screen's own output before any agent runs. It costs nothing
+    # (every figure is already computed) and it is otherwise unrecoverable:
+    # magic_formula_rankings_live.csv is overwritten next run, and
+    # pipeline_runs.top_30_tickers keeps only the bare symbols. Written for the
+    # WHOLE candidate list, including names a budget stop may never reach, so
+    # the ledger has a control group to measure the agents' filtering against.
+    if LEDGER_ENABLED:
+        try:
+            logger.info(db_log_run_universe(run_id, json.dumps(top_candidates, default=str)))
+        except Exception as e:
+            logger.warning(f"Universe ledger write failed ({e}); the run is unaffected.")
+
     prior_day_usd = _prior_day_spend() if BUDGET_ENABLED else 0.0
     if BUDGET_ENABLED:
         logger.info(
@@ -2916,7 +3148,8 @@ def run_sell_check(ticker: str, company_name: str = None, run_id: str = None):
     logger.info(f"[{ticker}] Sell-condition check complete — Recommendation: {recommendation}. Saved to {out_path}")
 
 
-def run_buy_check(ticker: str, company_name: str = None, run_id: str = None):
+def run_buy_check(ticker: str, company_name: str = None, run_id: str = None,
+                  origin: str = "manual", escalation_reason: str = ""):
     """On-demand buy-condition check for a single stock. The `--sell-check` of the
     other side: loads a stored BUY_CASE (the entry price range and buy triggers
     written when the verdict was Watch) and tests, against CURRENT data, whether they
@@ -2928,9 +3161,16 @@ def run_buy_check(ticker: str, company_name: str = None, run_id: str = None):
     company. Pin a run when you want to test the conditions a particular report set,
     for instance to see whether a case you rejected in March would have fired since.
 
-    Lightweight, like the sell-check: it reads the stored conditions and writes a
-    local report file, but creates no pipeline_runs / ticker_runs record, so it never
-    appears in the web UI's run lists."""
+    Lightweight, like the sell-check: it creates no pipeline_runs / ticker_runs
+    record, so it never appears in the web UI's RUN LISTS. It does store the check
+    itself against the run whose buy case it tested, which is what gives the Buy
+    Check tab its history — the local report file is overwritten by the next check
+    and so cannot answer when a trigger first fired.
+
+    `origin` and `escalation_reason` are provenance for the weekly sweep
+    (cron/run_buy_check_sweep.py), which reaches here only for tickers its
+    pre-filter escalated. Returns the recommendation string, or None if the check
+    could not be completed."""
     ticker = ticker.strip().upper()
     company_name = company_name or ticker
     pin = f" (pinned to run {run_id})" if run_id else ""
@@ -2979,7 +3219,16 @@ def run_buy_check(ticker: str, company_name: str = None, run_id: str = None):
     # authority for the price trigger and is fetched here rather than left to a tool
     # call, exactly as it is when the buy case is written.
     logger.info(f"[{ticker}] Fetching current price + FMP metrics + quarterly trends...")
-    price_data = buy_case_agent.price_data_block(ticker)
+    # Fetched as a dict first, then rendered, so the price can be recorded on the
+    # stored check alongside the recommendation. Re-quoting for the record would
+    # risk stamping a check with a price a minute away from the one it actually
+    # tested — the single number the whole exercise turns on.
+    try:
+        price_snapshot = json.loads(buy_case_agent.fmp_price_snapshot(ticker))
+    except Exception as e:
+        logger.warning(f"[{ticker}] Price snapshot failed ({e}).")
+        price_snapshot = {"error": str(e)}
+    price_data = buy_case_agent.price_data_block(ticker, price_snapshot)
     metrics_data = fmp_metrics_extractor(ticker)
     quarterly_data = fmp_quarterly_trends(ticker)
 
@@ -3003,8 +3252,52 @@ def run_buy_check(ticker: str, company_name: str = None, run_id: str = None):
         f.write(result)
 
     recommendation = buy_case_agent.extract_buy_recommendation(result)
+
+    # Persist the check, not just the file. The file is overwritten by the next
+    # check, so on its own it answers "what does this say today" and nothing
+    # else — no history of when a trigger first fired, no record of the
+    # reasoning behind an alert, and nothing the verdict ledger could ever grade.
+    # "Our triggers fired and then the stock did X" is the fastest-arriving
+    # accuracy signal this system can produce, and it needs the checks kept.
+    #
+    # Stored against the run whose buy case was TESTED, which is what pins a
+    # check to the conditions it was checking. Repeated checks of the same buy
+    # case accumulate as separate rows — that is the history, so nothing here
+    # deduplicates.
+    #
+    # No embedding: these are operational records read by ticker and date, never
+    # by semantic similarity, and a weekly sweep would otherwise add an embedding
+    # call per ticker per week forever.
+    if data.get("run_id"):
+        _check_db(
+            db_store_agent_output(
+                data["run_id"], ticker, "BUY_CHECK",
+                _with_run_header(result, data["run_id"], ticker),
+                json.dumps({
+                    "ticker": ticker,
+                    # Denormalised so the ledger and the web UI can filter and
+                    # count without re-parsing markdown prose.
+                    "recommendation": recommendation,
+                    "checked_on": datetime.now().date().isoformat(),
+                    "price_at_check": _present(price_snapshot.get("price")),
+                    # "manual" for `--buy-check`, "sweep" for the weekly job.
+                    # Kept because the two have different selection biases: the
+                    # sweep only checks tickers its pre-filter escalated, so a
+                    # base rate computed over both without distinguishing them
+                    # would be measuring two different populations.
+                    "origin": origin,
+                    "escalation_reason": escalation_reason or None,
+                }),
+                embed=False,
+            ),
+            f"{ticker} buy check",
+        )
+
     logger.info(f"[{ticker}] Buy-condition check complete — Recommendation: "
                 f"{recommendation}. Saved to {out_path}")
+    # Returned so a caller (the weekly sweep) does not have to read the report
+    # file back off disk to learn the answer it just paid for.
+    return recommendation
 
 
 if __name__ == "__main__":

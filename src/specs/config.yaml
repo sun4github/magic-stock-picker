@@ -273,6 +273,149 @@ refinement:
   # measured runs the way seed_critique_usd was.
   seed_buy_case_usd: 0.18
 
+# The verdict ledger: what each verdict claimed, and what happened next.
+#
+# Purpose, in order of how soon it pays off:
+#   1. Did filtering the screen beat not filtering it? Comparing the verdicts
+#      against run_universe answers that with one year of data and costs nothing
+#      extra to collect, because the screener already computes every figure.
+#   2. Which FACTORS do we read correctly, and which do we misread? Aggregated
+#      across tickers via factor_key, this reaches useful sample sizes long
+#      before any company-to-company comparison could.
+#   3. (Later, unbuilt.) A second verdict informed by 1 and 2.
+#
+# Nothing here changes a verdict today. The ledger only records.
+verdict_ledger:
+  enabled: true
+
+  # Benchmark for excess return. Deliberately a broad-market index rather than a
+  # sector ETF: the screen is sector-agnostic, and the question being asked is
+  # "did this beat leaving the money in the market", not "did it beat its peers".
+  # Changing this invalidates comparisons against everything recorded before the
+  # change, so it is stored per-row (verdict_log.benchmark_symbol) as well.
+  benchmark_symbol: "SPY"
+
+  # How often the outcome job re-quotes every open subject. Weekly rather than
+  # at fixed 30/90/180/365 horizons: a cron run missed on a horizon date would
+  # lose that datapoint permanently, and over a year a missed run is a certainty.
+  # The horizon marks are derived from age_days at read time instead.
+  snapshot_interval_days: 7
+  # Stop snapshotting a subject after this long. One year is the holding period
+  # the strategy actually uses (see magic-stock-tracker's rotation rules), so a
+  # verdict older than this has already been acted on one way or the other.
+  track_for_days: 400
+
+  # Controlled vocabulary for verdict_basis.factor_key. The analyst picks from
+  # this list; anything genuinely new is recorded as OTHER_<slug> and reviewed
+  # for promotion. Free-text keys are the failure mode this exists to prevent —
+  # "customer concentration", "client concentration risk" and "top-10 customer
+  # exposure" are one factor written three ways, and as three keys they never
+  # accumulate into a base rate.
+  #
+  # Seeded from critic-instructions.md's fallacy checklist and the section
+  # headings of research-instructions.md / bullish-research-instructions.md, so
+  # the vocabulary matches the questions the agents are already made to answer.
+  factor_taxonomy:
+
+    # -- Earnings quality and data integrity ---------------------------------
+    # This group is the one that justifies an AVOID on its own terms: it says
+    # the earnings that made the stock rank cheap are not real, i.e. the screen
+    # received a broken input. That is a different claim from "we dislike this
+    # business", and the ledger is meant to keep the two apart.
+    - one_time_earnings_distortion   # gain/charge inflating or deflating the EBIT the rank used
+    - accounting_restatement_risk    # restatement, late filing, auditor change, material weakness
+    - going_concern_language         # explicit doubt in the filing
+    - ttm_annual_divergence          # TTM and annual EBIT tell different stories
+    - non_recurring_revenue          # a contract, settlement or divestiture inflating the top line
+    - segment_disclosure_absent      # organic performance cannot be separated from acquired
+
+    # -- Growth and its durability -------------------------------------------
+    - organic_growth_declining
+    - roll_up_acquisitive_growth     # growth bought rather than generated
+    - revenue_growth_accelerating
+    - margin_compression
+    - margin_expansion
+    - cyclical_peak_earnings         # earnings near a cycle high, so the multiple flatters
+    - end_market_secular_decline
+
+    # -- Business quality and moat -------------------------------------------
+    - customer_concentration
+    - supplier_concentration
+    - moat_switching_costs
+    - moat_brand_or_network
+    - moat_absent_commodity          # no durable advantage; competes on price
+    - pricing_power_demonstrated
+    - competitive_intensity_rising
+
+    # -- Balance sheet --------------------------------------------------------
+    - debt_maturity_wall
+    - leverage_elevated
+    - net_cash_position
+    - goodwill_heavy_balance_sheet
+    - working_capital_deterioration
+    - free_cash_flow_conversion_weak
+
+    # -- Capital allocation ---------------------------------------------------
+    - buyback_funded_by_debt
+    - buyback_accretive
+    - dividend_coverage_thin
+    - acquisition_track_record_poor
+    - reinvestment_runway_strong
+
+    # -- Catalysts and expectations ------------------------------------------
+    # The CONFIRMED/SPECULATIVE split mirrors the label the bull agent is
+    # already required to attach to every catalyst it raises, so the two stay
+    # in the same vocabulary and a Buy resting on a speculative catalyst is
+    # visible as such in the ledger.
+    - catalyst_confirmed
+    - catalyst_speculative
+    - guidance_cut_recent
+    - expectations_already_low        # the bar the price implies is beatable
+    - priced_in_asserted              # claimed without evidence — a critic checklist item
+
+    # -- Governance, structure and external risk ------------------------------
+    - insider_selling
+    - insider_buying
+    - controlled_or_dual_class
+    - regulatory_overhang
+    - litigation_material
+    - customer_or_end_market_credit_risk
+
+# Weekly sweep of every open buy case, asking "has a trigger fired yet?".
+#
+# Runs on the machine that hosts the agents (Windows Task Scheduler), NOT on the
+# Pi that runs the ledger snapshot: this one uses ADK and Gemini.
+#
+# The design point is the PRE-FILTER. Running the buy-check agent on every open
+# watchlist name every week costs ~$0.08 a ticker for a question whose answer is
+# "not yet" almost every time, and a weekly notification that always says the
+# same thing is one the reader stops opening. So a free arithmetic pass decides
+# who is worth asking about, and only those tickets reach the model.
+buy_check_sweep:
+  enabled: true
+
+  # Escalate to the agent when the live price is within this much of the buy
+  # case's own price trigger. 5% is roughly one ordinary week of movement in a
+  # small/mid-cap name: close enough that the answer could change before the
+  # next sweep, far enough that ordinary noise does not summon the model.
+  near_trigger_pct: 5.0
+
+  # Escalate when the company has reported since the last sweep, whatever the
+  # price is doing. Most event triggers in a buy case are written against
+  # reported figures, so a fresh report is the moment their answer can change —
+  # and it is the one moment a price-only filter would miss entirely.
+  escalate_on_new_earnings: true
+
+  # Do not re-notify about the same standing recommendation. Without this, a
+  # trigger that fires and stays fired sends the same alert every week until it
+  # is trained into background noise.
+  suppress_repeat_alerts: true
+
+  # A ceiling on how many tickers may reach the model in one sweep, so a market
+  # -wide drop cannot turn one scheduled job into an unbounded bill. Tickers are
+  # escalated closest-to-trigger first, so the ceiling drops the least urgent.
+  max_agent_checks_per_sweep: 8
+
 tools:
   web_search:
     default_engine: "tavily"

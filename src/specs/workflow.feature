@@ -304,3 +304,109 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     And the buy case is stored against the run it was derived from, so the buy-condition check pinned to that run finds it
     But the cost is recorded as its own run, so the named run's totals are not rewritten
     And the spend still counts against the rolling daily ceiling
+
+  # ---------------------------------------------------------------------------
+  # The verdict ledger. Records only: it feeds nothing back into any prompt and
+  # changes no verdict. See docs/12-verdict-ledger.md and sql-schema.sql 6-9.
+  # ---------------------------------------------------------------------------
+
+  Scenario: Keep a record of what the screen surfaced, before any judgement is made
+    Given a screening run has produced its ranked list of candidates
+    When the run begins
+    Then every candidate is recorded with the rank, price, market cap and ratios it had that day
+    And that includes candidates a budget stop may never reach, so the names the agents never saw stay distinguishable from the ones they passed on
+    And it costs nothing extra, because the screener has already computed every figure
+    But without it those figures are unrecoverable, since the rankings CSV is overwritten on the next run and the stored run keeps only the bare symbols
+
+  Scenario: Record what each verdict actually claimed
+    Given the analyst has reached a verdict for a ticker
+    When the report is stored
+    Then the verdict is logged with the price, market cap, screen rank and benchmark level of that day
+    And the factors that drove it are logged separately, each with a stance, a materiality and a two-sentence observation
+    And each factor is named from a controlled vocabulary, so that one factor described three ways does not become three factors that never accumulate into a base rate
+    And a factor outside the vocabulary is kept under an OTHER_ prefix for review rather than discarded, because a lost observation cannot be recovered but an untidy name is only a rename
+    And the prompt version and commit that produced the verdict are stored with it, so a later change of prompt cannot be mistaken for a change in judgement
+
+  Scenario: Never let bookkeeping cost an analysis that was paid for
+    Given the analyst's report is written but its machine-readable basis block is missing or malformed
+    When the ledger tries to record the verdict
+    Then the report is stored, rendered and returned exactly as it would have been
+    And the verdict is still logged, with no factors attached and a warning in the log
+    And any failure writing to the ledger is logged and swallowed rather than failing the run
+
+  Scenario: Keep the reader's report free of machine-readable content
+    Given the analyst has appended a structured basis block for the ledger
+    When the report is prepared for storage
+    Then the block is parsed and removed before the reconciliation gate, the critic, the stored report or the web UI sees the text
+    And the verdict remains extractable from what is left
+    Because the report is written for a reader with no finance background, to whom a block of JSON is noise
+
+  Scenario: Count each judgement once
+    Given a ticker's analysis is reused from an earlier run rather than regenerated
+    When the run completes
+    Then no new verdict is logged for it
+    Because re-stating an existing judgement is not making a new one, and counting it twice would let one heavily re-run ticker dominate every base rate drawn from the ledger
+
+  Scenario: Grade past verdicts by arithmetic, on a schedule, off the analysis machine
+    Given verdicts and screened candidates have been recorded
+    When the weekly outcome job runs
+    Then it quotes each subject still inside its tracking window and records the price, the benchmark level, the return and the excess return
+    And it grades names that were screened but never analysed or bought, so the question of whether filtering the screen beat not filtering it has a control group
+    And it uses no language model at all, because a model asked to score its own past accuracy will flatter itself where subtraction will not
+    And it takes a snapshot every week rather than at fixed anniversaries, so a missed run costs nothing and a later run catches up
+    And running it twice in one day records one observation, not two
+    And it sends no notification, because a price being recorded is not news
+
+  # ---------------------------------------------------------------------------
+  # The weekly buy-check sweep. Runs on the machine hosting the agents, unlike
+  # the ledger snapshot above. See docs/11-buy-case-and-buy-check.md.
+  # ---------------------------------------------------------------------------
+
+  Scenario: Check every open buy case on a schedule, without paying to ask about all of them
+    Given several Watch verdicts each carry a buy case with a price trigger and event triggers
+    When the weekly sweep runs
+    Then a free arithmetic pass decides which of them could plausibly have changed since the last sweep
+    And only those are put to the agent, so a quiet week costs nothing at all
+    And a ticker is escalated when its price is at or below its own price trigger, or within a small band of it
+    And a ticker is escalated when the company has reported since the last sweep, whatever its price has done
+    Because most event triggers are written against reported figures, so a fresh report is the one moment a price-only check would miss
+
+  Scenario: Prefer spending a few cents to losing a name off the watchlist
+    Given a buy case whose price trigger cannot be read, because its formatting differs from what the parser expects
+    When the sweep evaluates it
+    Then it is escalated to the agent rather than skipped
+    Because the cost of asking is a few cents and the cost of not asking is a trigger firing unseen
+
+  Scenario: Leave alone the names the analysis has moved on from
+    Given a ticker has a stored buy case but its most recent verdict is no longer Watch
+    When the sweep runs
+    Then that ticker is not checked and the reason is logged
+    Because its triggers test a case the pipeline has already abandoned
+
+  Scenario: Keep one scheduled job from becoming an unbounded bill
+    Given a market-wide fall has put more buy cases over the escalation line than the sweep's ceiling allows
+    When the sweep runs
+    Then it checks only up to the ceiling, taking those closest to their triggers first
+    And it names the ones it deferred, which are picked up by the next sweep
+
+  Scenario: Tell the investor when a trigger has actually fired
+    Given an escalated ticker's buy conditions are evaluated and read Buy
+    When the sweep completes
+    Then a push notification and an email name the price, the trigger it cleared, and why that ticker was looked at
+    And nothing is sent for a Wait, because a weekly message that always says the same thing is one that stops being read
+    And a signal that fires and stays fired is not re-sent on every subsequent sweep
+
+  Scenario: Preview the sweep without spending anything or changing anything
+    Given an investor wants to know what the sweep would do before letting it run
+    When they run it in dry-run mode
+    Then it reports which tickers would be checked and why
+    And it makes no agent calls, sends no notifications, and records nothing
+    Because a preview that quietly recorded what it had seen would make the next real sweep decline to escalate the very thing it predicted
+
+  Scenario: Keep every check, not just the latest one
+    Given a buy case has been checked several times over several weeks
+    When each check completes
+    Then it is stored against the run whose buy case it tested, alongside the earlier ones
+    And the recommendation, the date, the price at the time and the reason for checking are recorded with it
+    And the local report file holds only the most recent check, so the stored history is the only record of when a trigger first fired
+    And a check that is stored is one the ledger can eventually grade, which the local file could never be

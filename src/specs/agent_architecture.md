@@ -2334,3 +2334,180 @@ Two things the first run surfaced, both now guarded:
   carried named publishers and dates for every transaction (*Business Wire*, 6 January
   2026; *Reuters*, 29 July 2026), which is the difference between a claim a reader can
   check and one they cannot.
+
+## 13. The verdict ledger — recording what we claimed, and what happened
+
+Phases A–E all answer "what should we think about this company today". The
+ledger answers a different question, and the only one that can eventually check
+the rest: **were we right?**
+
+It is *records only*. Nothing in it is read back into a prompt, no agent holds
+any of its tools, and it changes no verdict. That restraint is the design, not a
+first increment waiting to be finished — see §13.4.
+
+### 13.1 The question it is built to answer first
+
+The Magic Formula is a **basket** method. Its edge comes from holding many
+screened names and rotating them annually; the winners outweigh the individual
+value traps. Every verdict this system produces is therefore a *filter applied on
+top of a strategy that did not ask to be filtered*.
+
+That filter may help or it may hurt, and the case for hurting is structural
+rather than hypothetical: a bear case is always more articulate for a cheap
+stock, because it is cheap for a reason, so a bear/bull/analyst chain is best at
+building a compelling argument against exactly the uncomfortable names the
+formula depends on.
+
+Settling that needs three things, and the ledger exists to capture them:
+
+1. a point-in-time price for **every** screened name — `run_universe`;
+2. a point-in-time price for the ones that reached a verdict, with the verdict —
+   `verdict_log`;
+3. prices for both over time — `verdict_outcome`.
+
+With those, "the full screened basket returned X, the names we approved returned
+Y" is arithmetic. Without the first, it is unanswerable, and the screener's own
+figures are unrecoverable within a day: `magic_formula_rankings_live.csv` is
+overwritten each run and `pipeline_runs.top_30_tickers` keeps only symbols.
+
+### 13.2 Two rules the implementation follows without exception
+
+**Grading is arithmetic, never a model.** Return minus benchmark return is
+subtraction. An LLM asked to score its own prior accuracy brings hindsight bias
+and a pull toward self-flattery to a table whose entire purpose is to be
+unflattering when the record is. `cron/run_outcome_snapshot.py` contains no
+prompt and no model.
+
+**Factors are a controlled vocabulary.** `verdict_basis.factor_key` is drawn from
+`verdict_ledger.factor_taxonomy` in `config.yaml`. "Customer concentration",
+"client concentration risk" and "top-10 customer exposure" are one factor written
+three ways; as three free-text keys they never accumulate into a base rate, and
+the table's only purpose is lost. The vocabulary deliberately excludes the
+screen's own entry criteria — every candidate has a high return on capital and a
+low PEG, so recording them adds a constant, not information.
+
+### 13.3 Provenance is what makes the record readable later
+
+Every logged verdict carries `_prompt_version()` and the git SHA. Without them
+the first prompt edit mixes two different systems into one track record, and
+*"our judgement got worse"* cannot be told apart from *"we changed the
+question"*. This has a working consequence: **batch prompt edits**, because each
+one splits the sample.
+
+`verdict_stage` separates the analyst's independent verdict from the
+post-refinement one, which turns "does the critic improve outcomes or only cost
+money" (§11) from an assumption into a measurement.
+
+### 13.4 What is deliberately not built
+
+A second, memory-informed verdict — retrieving similar past companies and
+adjusting today's call — was designed and postponed. It needs a few hundred
+verdicts with real elapsed time behind them. Built on a thin corpus it would
+produce a confident-sounding section resting on noise, published beside real
+analysis, which is worse than its absence.
+
+The ordering principle: **logging is the only part whose cost is paid by
+waiting.** The reasoning on top can be built at any time; the months of data
+underneath it cannot be recovered afterwards.
+
+### 13.5 Deployment
+
+The weekly snapshot job runs on the Raspberry Pi that already hosts
+`magic-stock-tracker`'s daily sell check, not on the machine that runs the
+agents. It has no LLM, so it needs none of the agent stack: its dependencies are
+`requests`, `psycopg2-binary`, `python-dotenv` and `pyyaml`
+(`requirements-cron.txt`), and its environment is `DATABASE_URL` and
+`FMP_API_KEY`. It imports nothing from this repo on purpose — see the module
+docstring — and sends no notifications, because a recorded price is not news.
+
+## 14. The weekly buy-check sweep
+
+Phase E writes entry conditions for a `Watch`. `--buy-check` tests them when asked.
+Neither answers the question that decides whether any of it was worth writing:
+**did a trigger fire, and did anyone notice in the week it fired?**
+
+`cron/run_buy_check_sweep.py` closes that gap, on the machine that hosts the
+agents (Windows Task Scheduler; `tools/setup_weekly_jobs.cmd`), Saturdays after
+the close.
+
+### 14.1 Why a pre-filter, and not just a loop
+
+The obvious implementation runs `--buy-check` over every open buy case each week.
+At roughly $0.08 a ticker that is ~$50/year for twelve names — affordable, and
+still the wrong design, for a reason that is not about money:
+
+**the answer is "not yet" almost every week, and a weekly notification that always
+says the same thing is one that stops being read.** By the time a trigger does
+fire, the channel that would have carried the news has been trained into
+background noise. The cheapest possible failure mode of an alerting system is
+that its alerts stop meaning anything.
+
+So a free arithmetic pass decides who is worth asking about, using the price the
+buy case wrote down for itself:
+
+| Condition | Escalate | Rationale |
+| :--- | :--- | :--- |
+| price ≤ Trigger 1 | yes | it has fired |
+| price within `near_trigger_pct` | yes | ~one week's movement in a small/mid cap |
+| reported since the last sweep | yes | event triggers are written against reported figures |
+| trigger unparseable | yes | see §14.2 |
+| otherwise | no | costs nothing |
+
+The earnings condition carries more weight than it appears to. Most triggers in a
+buy case are conditions on *reported* figures, so a fresh report is the moment
+their answer can change — and it is the one moment a price-only filter misses
+completely. In the first live sweep, both escalations were earnings-driven and
+neither was near its price trigger.
+
+### 14.2 The asymmetry that governs every ambiguous case
+
+The two failure directions are not equal:
+
+- escalating unnecessarily costs **$0.08**;
+- failing to escalate costs **the trade**, silently, with no trace anywhere.
+
+So every ambiguity resolves toward escalation. A buy case whose price trigger
+cannot be parsed — because a later prompt revision changed its formatting, which
+has already happened once in the stored corpus — is escalated, never skipped. The
+parser anchors on "Trigger 1" plus the word *Price* rather than on a heading depth
+or a dash character, precisely because both have already varied.
+
+`max_agent_checks_per_sweep` bounds the other direction: a market-wide fall would
+otherwise put every name over the line at once and turn one scheduled job into an
+unbounded bill. Escalations are ordered closest-to-trigger first, so the ceiling
+drops the least urgent rather than an arbitrary tail.
+
+### 14.3 Why checks are stored, not just written to a file
+
+`--buy-check` has always written `reports/TICKER_Buy_Check.md`, which the next
+check overwrites. That answers "what does this say today" and nothing else: no
+record of when a trigger first fired, no reasoning behind an alert already sent,
+and nothing the verdict ledger (§13) could ever grade.
+
+Each check is therefore also stored as a `BUY_CHECK` row against **the run whose
+buy case it tested**, which is what pins a check to the conditions it checked.
+Repeated checks accumulate; that is the history, so nothing deduplicates.
+
+This is the connection between §13 and §14, and it is the fastest-arriving
+accuracy signal the system can produce. Grading a verdict on price needs a year.
+Grading it on *"the triggers we wrote fired / never fired"* needs weeks, measures
+reasoning rather than beta, and only works if the checks were kept.
+
+One consequence in the persistence layer: `db_copy_ticker_outputs` excludes
+`BUY_CHECK`. Every other row is an artefact of the analysis being reused and the
+new run needs its own copy; a buy check is a dated observation of whether that
+analysis's triggers had fired on some later day. Copying them would clone the
+whole check history under a new run id on every reuse, inflating every count taken
+over it and inventing checks that never happened.
+
+### 14.4 Notification discipline
+
+Alerts go out on `Buy` only, through the same Pushover + Plunk channel
+`magic-stock-tracker` uses, under the same environment variable names so one set
+of credentials serves both repos. `suppress_repeat_alerts` stops a signal that
+fires and stays fired from re-alerting weekly.
+
+`--dry-run` reports what the sweep *would* do and **rolls back rather than
+commits**. Stamping `last_earnings_seen` in a preview would make the next real
+sweep treat those reports as already tested and decline to escalate — a
+harmless-looking preview silently suppressing the alert it was run to predict.
