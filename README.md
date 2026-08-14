@@ -807,8 +807,19 @@ will happily keep measuring against a stale price.
 
 ## What runs between your runs
 
-Two scheduled jobs run on their own between buying runs. They do opposite things and
-live on different machines, which is the quickest way to keep them straight:
+Two scheduled jobs run on their own between buying runs. Counting the tracker's daily
+check, that makes **three scheduled jobs across two machines**, and they are easy to
+blur together. The fastest way to keep them straight is what each one looks at —
+**only one of the three cares what you own:**
+
+| Job | Machine | Looks at | Asks |
+| :--- | :--- | :--- | :--- |
+| Tracker daily check *(separate repo)* | Pi | **your lots** | "time to sell this holding?" — the 1-year rule, tax treatment |
+| Buy-check sweep | Windows | **your watchlist** | "has a buy trigger fired?" |
+| Ledger snapshot | Pi | **every verdict ever** | "what is it all worth today?" |
+
+The two owned by this repo, side by side. They do opposite things, which is why they
+live on different machines:
 
 | | Weekly buy-check sweep | Ledger snapshot |
 | :--- | :--- | :--- |
@@ -880,12 +891,35 @@ and it changes nothing.
 
 ### The ledger snapshot
 
-Silent by design. Once a week it records the price of every verdict and every screened
-name still inside its tracking window, notes where the benchmark stood, and works out
-the return and the excess return. A price being recorded is not news, so it never
-notifies.
+In one sentence: **once a week it writes down what every stock the system has ever had
+an opinion on is worth today.** It is a price recorder, and silent by design — a price
+being recorded is not news, so it never notifies.
 
-It exists so that the next section can eventually be answered.
+**It never looks at what you own.** It does not read the tracker's `lots` table at all;
+your positions are invisible to it. What it reads is two tables that your *analysis
+runs* fill:
+
+| Table | Holds | Filled by |
+| :--- | :--- | :--- |
+| `verdict_log` | every Buy / Watch / Avoid the analysis reached | an analysis run |
+| `run_universe` | every name that cleared the screen | an analysis run |
+
+Each week it prices everything in both that is still inside its tracking window, notes
+where the benchmark stood, and works out the return and the excess return.
+
+**It deliberately tracks stocks you did not buy.** That reads backwards at first, and
+it is the whole point: if it only priced the names you own, there would be nothing to
+compare them against. The ones you passed over are the control group, and without them
+the next section's first question cannot be asked at all.
+
+Say your next run screens 12 names and the analysis calls 5 of them Buy. `run_universe`
+gets 12 rows, `verdict_log` gets 12 rows, and every Friday after that the job prices all
+12 plus the benchmark. A year later that answers: *did the 5 we liked beat the 12 we
+screened?* — which needs the 7 you did not buy just as much as the 5 you did.
+
+Until your first analysis run after installing it, both tables are empty and the job
+correctly reports `No ledger subjects due for a snapshot. No API calls made.` and exits.
+**That is a pass, not a failure.**
 
 ## Reading the track record
 

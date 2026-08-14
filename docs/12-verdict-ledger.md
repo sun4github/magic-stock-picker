@@ -250,6 +250,48 @@ endpoints answer 402 Restricted on the Starter plan. Forty single calls once a
 week is nothing against the quota; a silently empty scoreboard is the one failure
 this job cannot afford, because nobody is watching it.
 
+## Why a snapshot row has two parent columns
+
+Every `verdict_outcome` row points at exactly one parent, and which one says what is
+being priced:
+
+```
+ticker  verdict_id   universe_id
+CROX    NULL         87a03460      <- a screened name
+HRB     1ecdbf54     NULL          <- a verdict we gave
+```
+
+- **`verdict_id` set** — this prices *an opinion the system gave*, from `verdict_log`.
+- **`universe_id` set** — this prices *a name that cleared the screen*, analysed or
+  not, bought or not, from `run_universe`.
+
+A constraint enforces exactly one:
+
+```sql
+CHECK ((verdict_id IS NOT NULL) <> (universe_id IS NOT NULL))
+```
+
+Both set, or neither, is rejected. An orphan snapshot would be a price with no record
+of what it is a price *of*, and there is no later repair for that — the subject it
+referred to is exactly the information that went missing.
+
+**One table rather than two.** They are written by the same weekly job in the same
+loop, and read together in the same comparison. Splitting them would mean two
+near-identical tables, two write paths to keep in step, and a UNION in every query that
+matters.
+
+The split is what makes Q1 answerable at all: verdict rows are the system's **calls**,
+universe rows are the **control group**, and the comparison between them is the only
+way to find out whether filtering the screen beat not filtering it.
+
+It also explains a blank that otherwise looks like a bug: a universe row's
+`excess_return_pct` is NULL on purpose. A verdict records where the benchmark stood on
+the day it was made, so its excess return is computable years later. A screened name
+has no such baseline, because it is meant to be compared against the verdicts of its
+**own run** — like-for-like, with no index in the middle. Filling it from wherever the
+benchmark happens to be today would be arithmetic against the wrong starting point,
+which is worse than an empty column.
+
 ## Provenance: why `prompt_version` is on every row
 
 `verdict_log` stores `_prompt_version()` (`main.py`) — a hash of every agent
