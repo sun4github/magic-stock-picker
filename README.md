@@ -807,28 +807,24 @@ will happily keep measuring against a stale price.
 
 ## What runs between your runs
 
-Two scheduled jobs run on their own between buying runs. Counting the tracker's daily
-check, that makes **three scheduled jobs across two machines**, and they are easy to
-blur together. The fastest way to keep them straight is what each one looks at —
-**only one of the three cares what you own:**
-
-| Job | Machine | Looks at | Asks |
-| :--- | :--- | :--- | :--- |
-| Tracker daily check *(separate repo)* | Pi | **your lots** | "time to sell this holding?" — the 1-year rule, tax treatment |
-| Buy-check sweep | Windows | **your watchlist** | "has a buy trigger fired?" |
-| Ledger snapshot | Pi | **every verdict ever** | "what is it all worth today?" |
-
-The two owned by this repo, side by side. They do opposite things, which is why they
-live on different machines:
+Two optional scheduled jobs run on their own between analysis runs. They are easy to
+confuse, and the quickest way to keep them apart is that **neither one knows what you
+own** — this tool tracks no positions. One watches the entry conditions it wrote for
+`Watch` verdicts; the other just records prices.
 
 | | Weekly buy-check sweep | Ledger snapshot |
 | :--- | :--- | :--- |
-| Asks | "has a trigger fired?" | "how did past calls turn out?" |
+| Asks | "has a buy trigger fired?" | "how did past calls turn out?" |
+| Looks at | stored buy cases still on `Watch` | every verdict, and the whole screened list |
 | Uses a model | yes (ADK + Gemini) | **no** — arithmetic only |
-| Runs on | the machine with the agent stack | the Raspberry Pi |
-| Schedule | Saturday 09:00 | Friday 18:00 |
+| Needs | the full agent stack | `requests`, `psycopg2`, `pyyaml`, `dotenv` |
+| Suggested schedule | weekly, after the close | weekly, after the close |
 | Notifies | yes, when something fires | never |
 | Costs | ~$0.08 per escalated ticker | nothing |
+
+Because the snapshot job needs none of the agent stack, the two can run on different
+machines — the sweep wherever you run the pipeline, the snapshot on any always-on box
+that can reach the database.
 
 ### The weekly buy-check sweep
 
@@ -849,19 +845,21 @@ using the price the buy case itself wrote down:
 | Trigger price could not be read | yes | $0.08 beats silently dropping a name |
 | None of the above | no | costs nothing |
 
-Only the escalated ones reach the model. A real sweep over five open buy cases:
+Only the escalated ones reach the model, so a sweep over five open buy cases reads
+something like:
 
 ```
-[CNC]  skip     — price $66.05 is 29.1% above the $51.16 trigger
-[FN]   skip     — price $566.49 is 31.5% above the $430.75 trigger
-[MRVL] skip     — price $222.18 is 56.7% above the $141.80 trigger
-[SNDK] ESCALATE — reported on 2026-08-05, after the buy case was last tested
-[VNT]  ESCALATE — reported on 2026-08-06, after the buy case was last tested
+[AAA] skip     — price $66.05 is 29.1% above the $51.16 trigger
+[BBB] skip     — price $566.49 is 31.5% above the $430.75 trigger
+[CCC] skip     — price $222.18 is 56.7% above the $141.80 trigger
+[DDD] ESCALATE — reported on 2026-08-05, after the buy case was last tested
+[EEE] ESCALATE — reported on 2026-08-06, after the buy case was last tested
 ```
 
-Three free. Both escalations were **earnings-driven, not price-driven** — a price-only
-filter would have missed them, and those are exactly the weeks an event trigger's
-answer changes. Cost that week: $0.15 rather than $0.40; in a quiet week, zero.
+Three cost nothing. Note that both escalations there are **earnings-driven, not
+price-driven** — a price-only filter would have missed them, and those are exactly the
+weeks an event trigger's answer changes. Five names checked in full would be ~$0.40;
+that week costs $0.15, and a week where nothing moves and nobody reports costs zero.
 
 **What you get.** When a check comes back `Buy`, a Pushover push and an email arrive
 naming the price, the trigger it cleared, and why the sweep looked at that ticker at
@@ -879,11 +877,12 @@ notification.
   first.
 - `logs/buy_check_sweep.log` — every decision, including the free skips.
 
-Set it up once with `tools\setup_weekly_jobs.cmd`. Preview it any time without spending
+On Windows, `tools\setup_weekly_jobs.cmd` registers it with Task Scheduler; on Linux
+or macOS it is an ordinary weekly crontab entry. Preview it any time without spending
 anything:
 
 ```bash
-python src\cron\run_buy_check_sweep.py --dry-run
+python src/cron/run_buy_check_sweep.py --dry-run
 ```
 
 That runs the pre-filter and reports who *would* be checked. No model calls, no alerts,
@@ -895,9 +894,8 @@ In one sentence: **once a week it writes down what every stock the system has ev
 an opinion on is worth today.** It is a price recorder, and silent by design — a price
 being recorded is not news, so it never notifies.
 
-**It never looks at what you own.** It does not read the tracker's `lots` table at all;
-your positions are invisible to it. What it reads is two tables that your *analysis
-runs* fill:
+**It has no idea what you own** — this tool tracks no positions at all. What it reads
+is two tables that your *analysis runs* fill:
 
 | Table | Holds | Filled by |
 | :--- | :--- | :--- |
@@ -907,17 +905,17 @@ runs* fill:
 Each week it prices everything in both that is still inside its tracking window, notes
 where the benchmark stood, and works out the return and the excess return.
 
-**It deliberately tracks stocks you did not buy.** That reads backwards at first, and
-it is the whole point: if it only priced the names you own, there would be nothing to
-compare them against. The ones you passed over are the control group, and without them
-the next section's first question cannot be asked at all.
+**It deliberately prices the names that were rejected, too.** That reads backwards at
+first, and it is the whole point: a record of only the names the analysis liked has
+nothing to compare them against. The ones it passed over are the control group, and
+without them the next section's first question cannot be asked at all.
 
-Say your next run screens 12 names and the analysis calls 5 of them Buy. `run_universe`
-gets 12 rows, `verdict_log` gets 12 rows, and every Friday after that the job prices all
-12 plus the benchmark. A year later that answers: *did the 5 we liked beat the 12 we
-screened?* — which needs the 7 you did not buy just as much as the 5 you did.
+Say a run screens 12 names and the analysis calls 5 of them Buy. `run_universe` gets 12
+rows, `verdict_log` gets 12 rows, and each week after that the job prices all 12 plus
+the benchmark. A year later that answers: *did the 5 it liked beat the 12 it screened?*
+— which needs the 7 it rejected just as much as the 5 it did not.
 
-Until your first analysis run after installing it, both tables are empty and the job
+Until the first analysis run after you install it, both tables are empty and the job
 correctly reports `No ledger subjects due for a snapshot. No API calls made.` and exits.
 **That is a pass, not a failure.**
 
@@ -966,7 +964,22 @@ n: 9      avg_vs_market: -14.2%      pct_read_correctly: 78%
   strategies both averaging +10% are completely different animals if one is right 70%
   of the time and the other 20%.
 
-### Q1 is the one that matters most
+### Which question to care about
+
+Two of them earn attention for opposite reasons, and it is worth being clear that they
+are not competing:
+
+- **Q3 is the one you will use most.** It is actionable — a factor cited often and read
+  wrongly is a specific, fixable flaw in the analyst prompt — and it reaches a usable
+  sample first, because it aggregates across every ticker rather than waiting for
+  similar companies to recur.
+- **Q1 is the one that matters most.** It does not tell you what to fix; it tells you
+  whether the analysis layer is worth running at all.
+
+Q3 improves the tool. Q1 decides whether the tool should exist. Expect Q3 to say
+something useful long before Q1 does.
+
+#### Why Q1 is the existential one
 
 Greenblatt's method is a basket: its edge comes from holding many screened names,
 *including* uncomfortable ones. Every verdict this tool produces is a filter applied on
@@ -983,16 +996,20 @@ screener already computes every figure.
 
 ### When to start believing any of it
 
-Not yet. These need roughly **30 subjects with 6+ months elapsed** before the numbers
-mean anything, which realistically puts the first honest read in **spring 2027**.
+Not for a while. These need roughly **30 subjects with six months or more elapsed**
+before the numbers mean anything — so at a few runs a year, the first honest read is
+somewhere north of a year after you start recording.
 
-That is not a flaw, it is what "track record" means. It is also exactly why the
-recording had to ship before anything that uses it: the reasoning can be built at any
-time, but the months of data underneath it cannot be recovered afterwards.
+That is not a flaw, it is what "track record" means. It is also why the recording ships
+before anything that consumes it: the analysis on top can be built at any time, but the
+months of data underneath it cannot be recovered afterwards. Every query reports its own
+`n` so you can see how far off that point you are.
 
-Q5 is the exception, and it needs one thing from you: **record the `run_id` on each lot
-when you buy.** It is the only link from a purchase back to the analysis that justified
-it, and without it that query stays empty forever.
+Q5 is the exception, and it needs something this tool cannot do for you. It tracks no
+positions, so if you want to grade the trades you actually made rather than the opinions
+the system formed, record the pipeline `run_id` alongside each purchase in whatever you
+already use. That id is the only link from a trade back to the analysis that justified
+it, and it cannot be reconstructed later.
 
 ## Web UI (report viewer)
 

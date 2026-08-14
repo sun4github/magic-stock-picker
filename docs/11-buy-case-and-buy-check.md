@@ -264,14 +264,15 @@ plausibly have changed reach the model:
 | Trigger price could not be parsed | **yes** | $0.08 is cheaper than silently dropping a name |
 | None of the above | no | costs nothing |
 
-A real dry run over the five open buy cases, showing both halves working:
+A dry run over five open buy cases, showing both halves working (tickers
+anonymised):
 
 ```
-[CNC]  skip     — price $66.05 is 29.1% above the $51.16 trigger
-[FN]   skip     — price $566.49 is 31.5% above the $430.75 trigger
-[MRVL] skip     — price $222.18 is 56.7% above the $141.80 trigger
-[SNDK] ESCALATE — reported on 2026-08-05, after the buy case was last tested
-[VNT]  ESCALATE — reported on 2026-08-06, after the buy case was last tested
+[AAA] skip     — price $66.05 is 29.1% above the $51.16 trigger
+[BBB] skip     — price $566.49 is 31.5% above the $430.75 trigger
+[CCC] skip     — price $222.18 is 56.7% above the $141.80 trigger
+[DDD] ESCALATE — reported on 2026-08-05, after the buy case was last tested
+[EEE] ESCALATE — reported on 2026-08-06, after the buy case was last tested
 ```
 
 Three skipped for free. The two escalations are **earnings-driven, not
