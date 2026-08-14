@@ -135,9 +135,10 @@ a track record than a missing row.
 
 ## The weekly snapshot job
 
-[`src/cron/run_outcome_snapshot.py`](../src/cron/run_outcome_snapshot.py) runs
-**on the Raspberry Pi**, alongside `magic-stock-tracker`'s daily sell check — not
-on the machine that runs the agents.
+[`src/cron/run_outcome_snapshot.py`](../src/cron/run_outcome_snapshot.py) is
+built to run **somewhere other than the machine that runs the agents** — it needs
+no LLM, so any always-on box that can reach the database will do (a Raspberry Pi
+is the case this was written for).
 
 ```bash
 0 18 * * 5 /path/to/magic-stock-picker/.venv/bin/python /path/to/magic-stock-picker/src/cron/run_outcome_snapshot.py
@@ -225,7 +226,7 @@ made.` and exits 0 — that is a pass, not a failure.
 **Finally, the crontab** (`crontab -e`), Friday evening after the close:
 
 ```
-0 18 * * 5 cd /home/pi/magic-stock-picker && /usr/bin/python3 src/cron/run_outcome_snapshot.py >> /home/pi/magic-stock-picker/logs/cron-stdout.log 2>&1
+0 18 * * 5 cd /path/to/magic-stock-picker && /usr/bin/python3 src/cron/run_outcome_snapshot.py >> /path/to/magic-stock-picker/logs/cron-stdout.log 2>&1
 ```
 
 The `cd` is belt-and-braces — the script resolves its own paths from `__file__`,
