@@ -111,9 +111,44 @@ FMP_QUOTE_URL = "https://financialmodelingprep.com/stable/quote"
 # one failure this job cannot afford, because nobody is watching it.
 
 
+# Mirrors `verdict_ledger:` in specs/config.yaml, and is used only when that file
+# is not present beside this one.
+#
+# This job is deployed by copying files onto a Pi rather than by checking the
+# repo out there, so "the config file did not come along" is a likely accident
+# rather than a hypothetical. Falling back keeps a one-file copy working; saying
+# so at WARNING keeps it from being mistaken for the configured behaviour, which
+# is the failure that would otherwise hide for months — a Pi silently
+# benchmarking against a different symbol than the config says.
+_DEFAULTS = {
+    "enabled": True,
+    "benchmark_symbol": "SPY",
+    "snapshot_interval_days": 7,
+    "track_for_days": 400,
+}
+
+
 def _config() -> dict:
-    with open(os.path.join(SRC_ROOT, "specs", "config.yaml"), "r", encoding="utf-8") as fh:
-        return (yaml.safe_load(fh) or {}).get("verdict_ledger", {}) or {}
+    path = os.path.join(SRC_ROOT, "specs", "config.yaml")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            cfg = (yaml.safe_load(fh) or {}).get("verdict_ledger", {}) or {}
+        if cfg:
+            return cfg
+        logger.warning("No `verdict_ledger:` block in %s; using built-in defaults: %s",
+                       path, _DEFAULTS)
+    except FileNotFoundError:
+        logger.warning(
+            "%s not found; using built-in defaults: %s. Copy specs/config.yaml "
+            "beside this script to control these from one place.", path, _DEFAULTS)
+    except yaml.YAMLError as e:
+        # A corrupt config is NOT quietly replaced with defaults: that would run
+        # the job against settings nobody chose while the file that was supposed
+        # to govern it sat there broken.
+        logger.error("Could not parse %s (%s). Fix it or remove it to fall back "
+                     "to defaults.", path, e)
+        raise SystemExit(2)
+    return dict(_DEFAULTS)
 
 
 def fetch_quotes(symbols: list) -> dict:
