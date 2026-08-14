@@ -139,9 +139,11 @@ def _open_buy_cases(cur):
 
 def _state(cur) -> dict:
     cur.execute("SELECT ticker, last_swept_on, last_earnings_seen, last_recommendation, "
-                "last_alerted_on FROM buy_check_sweep_state")
+                "last_alerted_on, unreadable_streak, unreadable_alerted_on "
+                "FROM buy_check_sweep_state")
     return {r[0]: {"last_swept_on": r[1], "last_earnings_seen": r[2],
-                   "last_recommendation": r[3], "last_alerted_on": r[4]}
+                   "last_recommendation": r[3], "last_alerted_on": r[4],
+                   "unreadable_streak": r[5] or 0, "unreadable_alerted_on": r[6]}
             for r in cur.fetchall()}
 
 
@@ -160,6 +162,24 @@ def _latest_earnings_date(ticker: str, fmp_earnings_calendar):
             except ValueError:
                 continue
     return max(dates) if dates else None
+
+
+def next_unreadable_streak(trigger, prior: dict) -> int:
+    """How many sweeps in a row this buy case's price trigger has been unreadable.
+
+    Reset to zero the moment one parses, rather than decayed: the question the
+    counter answers is "has this been unreadable CONTINUOUSLY", and a buy case
+    regenerated with a dollar figure has settled it. Without the reset, a name
+    briefly unreadable would carry the count for ever and eventually warn about a
+    document that has been fine for months.
+
+    A module-level function rather than an expression inline in the sweep so the
+    tests exercise the rule the job actually applies, instead of a copy of it
+    that would keep passing after the real one broke.
+    """
+    if trigger is not None:
+        return 0
+    return (prior or {}).get("unreadable_streak", 0) + 1
 
 
 def _decide(case, price, trigger, prior, cfg, latest_earnings):
@@ -247,18 +267,47 @@ def run_sweep(dry_run: bool = False) -> dict:
                            if cfg.get("escalate_on_new_earnings", True) else None)
         escalate, reason, urgency = _decide(case, price, trigger, prior, cfg, latest_earnings)
 
+        streak = next_unreadable_streak(trigger, prior)
+
         cur.execute('''
             INSERT INTO buy_check_sweep_state
-                   (ticker, last_swept_on, last_price, trigger_price, last_earnings_seen, updated_at)
-            VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                   (ticker, last_swept_on, last_price, trigger_price, last_earnings_seen,
+                    unreadable_streak, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             ON CONFLICT (ticker) DO UPDATE SET
                 last_swept_on = EXCLUDED.last_swept_on,
                 last_price = EXCLUDED.last_price,
                 trigger_price = EXCLUDED.trigger_price,
                 last_earnings_seen = COALESCE(EXCLUDED.last_earnings_seen,
                                               buy_check_sweep_state.last_earnings_seen),
+                unreadable_streak = EXCLUDED.unreadable_streak,
+                -- Clearing the alert stamp when the streak resets is what makes
+                -- the warning repeatable for a LATER episode without making it
+                -- weekly within one.
+                unreadable_alerted_on = CASE WHEN EXCLUDED.unreadable_streak = 0
+                                             THEN NULL
+                                             ELSE buy_check_sweep_state.unreadable_alerted_on END,
                 updated_at = CURRENT_TIMESTAMP
-        ''', (ticker, today, price, trigger, latest_earnings))
+        ''', (ticker, today, price, trigger, latest_earnings, streak))
+
+        # Alerted on the sweep the threshold is first crossed, and not again
+        # until the streak has been broken and rebuilt.
+        warn_after = int(cfg.get("warn_after_unreadable_sweeps", 3))
+        if (streak >= warn_after and not (prior or {}).get("unreadable_alerted_on")
+                and not dry_run):
+            logger.warning(
+                f"[{ticker}] Price trigger has been unreadable for {streak} sweeps. "
+                f"It is escalated to the model every week as a result, at ~$0.08 a "
+                f"time. Regenerate the buy case against a live quote: "
+                f"python buy_case.py {ticker}")
+            try:
+                import notifications
+                notifications.send_unreadable_trigger_alert(ticker, streak)
+                cur.execute("UPDATE buy_check_sweep_state SET unreadable_alerted_on = %s "
+                            "WHERE ticker = %s", (today, ticker))
+            except Exception as e:
+                # Never fail the sweep over a chore reminder.
+                logger.warning(f"[{ticker}] Could not send the stale-buy-case alert ({e}).")
 
         if escalate:
             candidates.append({**case, "price": price, "trigger": trigger,

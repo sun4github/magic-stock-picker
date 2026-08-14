@@ -416,6 +416,22 @@ buy_check_sweep:
   # escalated closest-to-trigger first, so the ceiling drops the least urgent.
   max_agent_checks_per_sweep: 8
 
+  # Say something after this many consecutive sweeps in which a buy case's price
+  # trigger could not be read as a dollar amount.
+  #
+  # Such a trigger ("below 8.0x forward earnings") is legitimate and the sweep
+  # handles it correctly by escalating to the model — but that name then never
+  # becomes free to check, and costs ~$0.08 every week for as long as the
+  # document stands. Nothing self-corrects: regenerating the buy case against a
+  # live quote is a human action (`python buy_case.py TICKER`).
+  #
+  # Three rather than one, because the usual cause is a quote that failed on the
+  # day the case was written, and a single occurrence is not yet a pattern worth
+  # interrupting anybody over. Alerted ONCE when the streak is reached, not
+  # weekly after — the whole point is to avoid a message that repeats until it
+  # is ignored.
+  warn_after_unreadable_sweeps: 3
+
 tools:
   web_search:
     default_engine: "tavily"

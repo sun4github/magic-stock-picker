@@ -297,6 +297,18 @@ exactly the weeks when an event trigger's answer changes.
   picked up next sweep.
 - **`suppress_repeat_alerts`** stops a trigger that fires and stays fired from
   alerting every week until it is trained into background noise.
+- **`warn_after_unreadable_sweeps` (default 3)** covers the one case the sweep
+  handles correctly but cannot resolve. A price trigger written as a valuation
+  multiple — "below 8.0x forward earnings" — is legitimate and unparseable, so it
+  escalates to the model every week and that name never becomes free to check,
+  quietly costing ~$0.08 a week for as long as the document stands. The document
+  cannot repair itself; regenerating the buy case against a live quote is a human
+  action. After three consecutive sweeps the job says so **once**, naming the
+  command (`python buy_case.py TICKER`), and does not repeat until the streak has
+  broken and rebuilt. It is sent at low priority through the same channel — a
+  chore, not an event. Auto-regenerating was the alternative and was rejected:
+  it would spend money rewriting an analysis document with nobody deciding it
+  should be rewritten.
 - **Alerts** go out via Pushover + Plunk (`src/notifications.py`), using the same
   environment variable names `magic-stock-tracker` already uses, so one set of
   credentials in `.env` serves both repos. Missing credentials are a warning: the

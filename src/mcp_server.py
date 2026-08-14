@@ -1396,9 +1396,16 @@ def initialize_database():
                 last_earnings_seen DATE,
                 last_recommendation VARCHAR(8),
                 last_alerted_on DATE,
+                unreadable_streak INTEGER NOT NULL DEFAULT 0,
+                unreadable_alerted_on DATE,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # Idempotently add the streak columns to a table created before they
+        # existed, matching how pipeline_runs gained its usage columns.
+        for col_def in ["unreadable_streak INTEGER NOT NULL DEFAULT 0",
+                        "unreadable_alerted_on DATE"]:
+            cur.execute(f"ALTER TABLE buy_check_sweep_state ADD COLUMN IF NOT EXISTS {col_def}")
 
         # Backfill ticker_runs from any pre-existing final_reports so the UI shows
         # historical runs. company_name is unknown for old rows (left NULL).

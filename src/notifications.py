@@ -105,3 +105,39 @@ def send_buy_trigger_alert(ticker: str, company_name: str, price: float,
     message = "\n".join(lines)
     _send_pushover(title, message, priority=1)
     _send_email(title, message)
+
+
+def send_unreadable_trigger_alert(ticker: str, weeks: int, cost_per_check: float = 0.08) -> None:
+    """Tell the holder a buy case needs regenerating, once per episode.
+
+    Not urgent, and priority reflects that: nothing is broken, the weekly check
+    still runs correctly and still alerts on a Buy. What it cannot do is answer
+    cheaply, because a trigger like "below 8.0x forward earnings" needs judgement
+    rather than a comparison — so that name is escalated to the model every week
+    instead of being screened out for free.
+
+    Sent ONCE when the streak is first reached rather than on every subsequent
+    sweep. A weekly reminder about a small recurring cost is exactly the message
+    a reader learns to swipe away, which would then also cost them the Buy alert
+    that arrives through the same channel.
+    """
+    title = f"Buy case needs refreshing: {ticker}"
+    message = "\n".join([
+        f"{ticker}'s buy case has had no readable price trigger for {weeks} "
+        f"sweeps in a row.",
+        "",
+        "Nothing is broken — the weekly check still runs and will still alert "
+        "you if the conditions read Buy. But the price trigger is written in a "
+        "form the free pre-filter cannot compare against a quote (a valuation "
+        "multiple rather than a dollar amount), so this one is sent to the model "
+        f"every week at about ${cost_per_check:.2f} a time instead of being "
+        "screened out for nothing.",
+        "",
+        f"Usually the cause is that the price fetch failed on the day the case "
+        f"was written. Regenerating it against a live quote fixes it:",
+        f"    python buy_case.py {ticker}",
+    ])
+    # Priority -1: delivered quietly, no sound, no interruption. It is a chore,
+    # not an event.
+    _send_pushover(title, message, priority=-1)
+    _send_email(title, message)

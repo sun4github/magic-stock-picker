@@ -308,6 +308,20 @@ CREATE TABLE buy_check_sweep_state (
     -- has never escalated this ticker.
     last_recommendation VARCHAR(8),
     last_alerted_on DATE,
+    -- Consecutive sweeps where the buy case's price trigger could not be read as
+    -- a dollar amount. Reset to 0 the moment one parses.
+    --
+    -- A trigger written as "below 8.0x forward earnings" is a perfectly good
+    -- trigger that arithmetic cannot evaluate, so the sweep escalates it to the
+    -- model rather than skipping it — correct, but it means that name never
+    -- becomes free to check and quietly costs ~$0.08 every week for as long as
+    -- the document stands. The document cannot fix itself; regenerating the buy
+    -- case against a live quote is a human action. This counter is what turns a
+    -- recurring silent charge into one prompt to take it.
+    unreadable_streak INTEGER NOT NULL DEFAULT 0,
+    -- Set when the streak alert was sent, so it is sent once per episode rather
+    -- than every week thereafter.
+    unreadable_alerted_on DATE,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
