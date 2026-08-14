@@ -1383,6 +1383,23 @@ def initialize_database():
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_verdict_outcome_u_dedup "
                     "ON verdict_outcome(universe_id, as_of) WHERE universe_id IS NOT NULL")
 
+        # Operational state for the weekly buy-check sweep. Not ledger data —
+        # it exists so the sweep can tell "they have reported since we last
+        # looked" from "nothing has changed", and so a trigger that fires and
+        # stays fired does not re-alert every week. See sql-schema.sql table 10.
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS buy_check_sweep_state (
+                ticker VARCHAR(10) PRIMARY KEY,
+                last_swept_on DATE,
+                last_price NUMERIC(14, 4),
+                trigger_price NUMERIC(14, 4),
+                last_earnings_seen DATE,
+                last_recommendation VARCHAR(8),
+                last_alerted_on DATE,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
         # Backfill ticker_runs from any pre-existing final_reports so the UI shows
         # historical runs. company_name is unknown for old rows (left NULL).
         cur.execute('''

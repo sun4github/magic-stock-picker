@@ -278,6 +278,39 @@ CREATE TABLE verdict_outcome (
     CHECK ((verdict_id IS NOT NULL) <> (universe_id IS NOT NULL))
 );
 
+-- 10. Buy-Check Sweep State (what the weekly sweep saw last time)
+--
+-- Not part of the ledger — this is operational state for
+-- cron/run_buy_check_sweep.py, which asks weekly whether any open buy case's
+-- triggers have fired.
+--
+-- It exists for two jobs the sweep cannot do without memory of its last run:
+--
+--   * "has the company reported since we last looked", which is what escalates
+--     a ticker whose price has not moved but whose event triggers now have
+--     fresh numbers to be tested against;
+--   * not sending the same alert every week. A trigger that fires and STAYS
+--     fired would otherwise notify on every sweep until the reader stops
+--     opening the notification, which costs more than the alert is worth.
+CREATE TABLE buy_check_sweep_state (
+    ticker VARCHAR(10) PRIMARY KEY,
+    last_swept_on DATE,
+    last_price NUMERIC(14, 4),
+    -- The price trigger parsed out of the stored buy case, kept so a sweep can
+    -- report what it compared against without re-parsing, and so a buy case
+    -- rewritten at a new price is visible as a change rather than silently
+    -- shifting the bar.
+    trigger_price NUMERIC(14, 4),
+    -- Latest earnings date already seen. A `recent` report newer than this is
+    -- what "they have reported since we last looked" means.
+    last_earnings_seen DATE,
+    -- BUY | WAIT | NULL — the agent's last answer, or NULL if the pre-filter
+    -- has never escalated this ticker.
+    last_recommendation VARCHAR(8),
+    last_alerted_on DATE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indexes for fast lookup and vector similarity search
 CREATE INDEX idx_agent_outputs_ticker ON agent_outputs(ticker);
 CREATE INDEX idx_final_reports_ticker ON final_reports(ticker);

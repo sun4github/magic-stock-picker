@@ -381,6 +381,41 @@ verdict_ledger:
     - litigation_material
     - customer_or_end_market_credit_risk
 
+# Weekly sweep of every open buy case, asking "has a trigger fired yet?".
+#
+# Runs on the machine that hosts the agents (Windows Task Scheduler), NOT on the
+# Pi that runs the ledger snapshot: this one uses ADK and Gemini.
+#
+# The design point is the PRE-FILTER. Running the buy-check agent on every open
+# watchlist name every week costs ~$0.08 a ticker for a question whose answer is
+# "not yet" almost every time, and a weekly notification that always says the
+# same thing is one the reader stops opening. So a free arithmetic pass decides
+# who is worth asking about, and only those tickets reach the model.
+buy_check_sweep:
+  enabled: true
+
+  # Escalate to the agent when the live price is within this much of the buy
+  # case's own price trigger. 5% is roughly one ordinary week of movement in a
+  # small/mid-cap name: close enough that the answer could change before the
+  # next sweep, far enough that ordinary noise does not summon the model.
+  near_trigger_pct: 5.0
+
+  # Escalate when the company has reported since the last sweep, whatever the
+  # price is doing. Most event triggers in a buy case are written against
+  # reported figures, so a fresh report is the moment their answer can change —
+  # and it is the one moment a price-only filter would miss entirely.
+  escalate_on_new_earnings: true
+
+  # Do not re-notify about the same standing recommendation. Without this, a
+  # trigger that fires and stays fired sends the same alert every week until it
+  # is trained into background noise.
+  suppress_repeat_alerts: true
+
+  # A ceiling on how many tickers may reach the model in one sweep, so a market
+  # -wide drop cannot turn one scheduled job into an unbounded bill. Tickers are
+  # escalated closest-to-trigger first, so the ceiling drops the least urgent.
+  max_agent_checks_per_sweep: 8
+
 tools:
   web_search:
     default_engine: "tavily"

@@ -232,3 +232,77 @@ The tab is hidden unless the run actually has one, like the Critic Review tab.
 - The critic loop that regenerates it: [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md).
 - The tools it reads: [03-mcp-tools-and-persistence.md](03-mcp-tools-and-persistence.md).
 - The design rationale, with the phase-letter map: `specs/agent_architecture.md` §12.
+
+## The weekly sweep (`cron/run_buy_check_sweep.py`)
+
+`--buy-check` answers "have this ticker's triggers fired?" when you remember to
+ask. The sweep asks it on a schedule, for every open buy case, without turning
+into a weekly bill.
+
+Scheduled on the **machine that runs the agents** (Windows Task Scheduler via
+[`tools/setup_weekly_jobs.cmd`](../tools/setup_weekly_jobs.cmd)), Saturdays at
+09:00. It uses ADK and Gemini, unlike the ledger snapshot job
+([12-verdict-ledger.md](12-verdict-ledger.md)) which is pure arithmetic and
+belongs on the Pi.
+
+### The pre-filter is the whole design
+
+Running the buy-check agent over every watchlist name every week costs about
+**$0.08 a ticker** to ask a question whose answer is "not yet" almost every time.
+Twelve names is ~$50/year for a notification that says the same thing every
+week — and a notification that always says the same thing is one you stop
+opening. That second cost is the real one.
+
+So a **free arithmetic pass** runs first, and only tickers whose answer could
+plausibly have changed reach the model:
+
+| Condition | Escalate? | Why |
+| :--- | :--- | :--- |
+| Price at or below the buy case's Trigger 1 | yes | the trigger has fired |
+| Price within `near_trigger_pct` (default 5%) | yes | ~one week's movement; could fire before the next sweep |
+| Company reported since the last sweep | yes | most event triggers are written against reported figures |
+| Trigger price could not be parsed | **yes** | $0.08 is cheaper than silently dropping a name |
+| None of the above | no | costs nothing |
+
+A real dry run over the five open buy cases, showing both halves working:
+
+```
+[CNC]  skip     — price $66.05 is 29.1% above the $51.16 trigger
+[FN]   skip     — price $566.49 is 31.5% above the $430.75 trigger
+[MRVL] skip     — price $222.18 is 56.7% above the $141.80 trigger
+[SNDK] ESCALATE — reported on 2026-08-05, after the buy case was last tested
+[VNT]  ESCALATE — reported on 2026-08-06, after the buy case was last tested
+```
+
+Three skipped for free. The two escalations are **earnings-driven, not
+price-driven** — a price-only filter would have missed both, and those are
+exactly the weeks when an event trigger's answer changes.
+
+### Details worth knowing
+
+- **`--dry-run`** runs the pre-filter and reports who *would* be checked. No LLM
+  calls, no alerts, no cost — and it **rolls back rather than commits**, because
+  stamping `last_earnings_seen` in a preview would make the next real sweep treat
+  those reports as already tested and decline to escalate.
+- **Trigger parsing is deliberately tolerant.** Two heading shapes are already in
+  the stored corpus (`### Trigger 1 — Price` and `**Trigger 1 — Price.**`) with
+  different dash codepoints, so the regex anchors on "Trigger 1" plus the word
+  *Price*. When it fails it returns None, and None means *ask the model*.
+- **Names whose latest verdict has moved off Watch are dropped.** Their triggers
+  test a case the pipeline has already abandoned.
+- **`max_agent_checks_per_sweep` (default 8)** stops a market-wide drop turning
+  one scheduled job into an unbounded bill. Escalations are ordered
+  closest-to-trigger first, so the ceiling drops the least urgent; the rest are
+  picked up next sweep.
+- **`suppress_repeat_alerts`** stops a trigger that fires and stays fired from
+  alerting every week until it is trained into background noise.
+- **Alerts** go out via Pushover + Plunk (`src/notifications.py`), using the same
+  environment variable names `magic-stock-tracker` already uses, so one set of
+  credentials in `.env` serves both repos. Missing credentials are a warning: the
+  sweep still runs and still logs.
+- **State** lives in `buy_check_sweep_state` (`sql-schema.sql` table 10) — not
+  ledger data, just what the sweep saw last time.
+
+Tests: `python test_buy_check_sweep.py` — 22 offline cases over the parser and
+the escalate/skip decision. Every ambiguous case is asserted to escalate, because
+an unreadable trigger costs $0.08 and a missed one costs the trade.
