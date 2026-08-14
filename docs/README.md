@@ -33,6 +33,7 @@ Come here once you need to change or extend the code.
 | [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md) | Phase D: the independent critic, the analyst/critic feedback loop, its spend ceiling, and the cross-run critic memory that keeps it from relitigating settled points | `src/critic_agent.py`, `src/refine.py`, `src/critic-instructions.md` |
 | [10-sale-advisory-regeneration.md](10-sale-advisory-regeneration.md) | The standalone `sale_advisory.py` command: generating or repairing a Phase C sale advisory for any stored report, and why its artefact and its cost land on different runs | `src/sale_advisory.py` |
 | [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md) | Phase E: the buy case written for a `Watch` verdict (the entry price range and the triggers that would make it a Buy), the forward-looking feeds only it reads, and the `--buy-check` command that tests it later | `src/buy_case_agent.py`, `src/buy_case.py`, `src/buy-case-instructions.md`, `src/buy-check-instructions.md` |
+| [12-verdict-ledger.md](12-verdict-ledger.md) | The verdict ledger: what each verdict claimed, what the stock did next, and the off-box weekly job that grades it by arithmetic. Records only — it feeds nothing back into any prompt | `src/sql-schema.sql`, `src/mcp_server.py`, `src/main.py`, `src/cron/run_outcome_snapshot.py` |
 
 ## What is *not* in the runtime path
 
@@ -65,6 +66,10 @@ not. Put anything similar there rather than in `src/`.
 9. **11** for Phase E, the buy case. Unlike **09** and **10** this one *is* part of a
    pipeline run — but only for the tickers whose verdict is `Watch`, so it is easy to
    read **01** end to end without noticing it exists.
+10. **12** for the verdict ledger. It runs inside every pipeline run, but purely as
+    bookkeeping: it reads nothing back, changes no verdict, and its scoring job lives
+    off-box on a Raspberry Pi with none of this repo's dependencies. Read it when you
+    need to know how the system's own track record is being accumulated.
 
 ## Conventions used in these docs
 

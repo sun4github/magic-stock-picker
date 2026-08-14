@@ -1,0 +1,231 @@
+# The Verdict Ledger
+
+Everything else in this system records what a run **produced**. The ledger
+records what a verdict **claimed** and what the stock did afterwards, so the
+system can eventually be graded on realised outcomes instead of on its own
+confidence.
+
+It changes no verdict today. Phase 1 only writes things down — deliberately, because
+the value of a track record is a function of elapsed time and nothing else, and
+every month not logged is a month that cannot be recovered later.
+
+> **What this is not.** It is not a memory that feeds back into a prompt. Nothing
+> in these tables is read by any agent, and no agent has any of the ledger's
+> tools in its `tools=[...]`. `critic_memory` is the system's one true feedback
+> memory (see [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md));
+> the ledger is a record, not an input.
+
+## What it is for, in order of when it pays off
+
+1. **Did filtering the screen beat not filtering it?** The Magic Formula is a
+   basket method; its edge comes from holding many screened names, including
+   uncomfortable ones. A bear/bull/analyst chain is structurally best at building
+   an articulate case *against* the cheapest names, so it is a live question
+   whether the agents' filter adds or subtracts. Answering it needs a
+   point-in-time price for the names the agents passed over as well as the ones
+   they liked — which is why `run_universe` records the whole screen output and
+   `verdict_outcome` tracks names nobody bought. **One year of data, zero extra
+   cost.**
+2. **Which factors do we read well, and which do we misread?** Aggregating on
+   `verdict_basis.factor_key` across every ticker reaches useful sample sizes far
+   sooner than any company-to-company comparison could, and the lessons
+   generalise across sectors.
+3. **Does the critic change outcomes, or only cost money?** `verdict_stage`
+   records the independent verdict and the post-refinement one separately.
+
+A fourth use — a second verdict informed by 1 and 2 — is deliberately unbuilt.
+It needs a few hundred verdicts with real elapsed time behind them, and shipping
+it early would produce a confident-sounding section resting on noise.
+
+## The four tables
+
+Full DDL and rationale live in [`src/sql-schema.sql`](../src/sql-schema.sql)
+(tables 6–9); `initialize_database()` in `mcp_server.py` mirrors it idempotently,
+as it does for every other table.
+
+| Table | One row per | Written by | When |
+| :--- | :--- | :--- | :--- |
+| `run_universe` | candidate that cleared the screen | `db_log_run_universe` | once per run, before any agent runs |
+| `verdict_log` | fresh verdict | `db_log_verdict` | end of `analyze_ticker` |
+| `verdict_basis` | factor behind a verdict | `db_log_verdict` | same call |
+| `verdict_outcome` | weekly price snapshot | `cron/run_outcome_snapshot.py` | weekly, off-box |
+
+**None of them carry a foreign key onto `pipeline_runs`.** Every other table in
+the schema cascades away with its run, which is right for per-run artefacts.
+These are memory: a verdict whose run was deleted is still a verdict that was
+made, and losing it would silently shorten the very track record they exist to
+accumulate. The run ids are provenance, not constraints. Same reasoning as
+`critic_memory`.
+
+## Two design rules that explain most of the code
+
+**Grading is arithmetic, never a model.** A price return minus a benchmark
+return is subtraction. Handing that to an LLM introduces hindsight bias and a
+systematic pull toward self-flattery — the model would be scoring its own prior
+output. `run_outcome_snapshot.py` contains no LLM and no prompt.
+
+**The factor vocabulary is controlled, not free text.** `factor_key` comes from
+`verdict_ledger.factor_taxonomy` in [`config.yaml`](../src/specs/config.yaml).
+Free-form keys were the alternative and would have made the table useless for its
+one purpose: "customer concentration", "client concentration risk" and "top-10
+customer exposure" are one factor written three ways, and as three distinct keys
+they never accumulate into a base rate. A factor the analyst reaches for that is
+not on the list is stored as `OTHER_<name>` and reviewed for promotion — kept,
+not dropped, because a lost observation is unrecoverable and an untidy key is
+just a rename.
+
+The taxonomy deliberately **excludes the screen's own entry criteria** (high
+return on capital, high earnings yield, low PEG, EPS growth). Every candidate has
+those, so recording them would swamp the base rates with a constant that
+distinguishes nothing. `test_verdict_ledger.py` asserts they stay out.
+
+## Where it hooks into a run
+
+```mermaid
+sequenceDiagram
+    participant Screen as Phase A screener
+    participant Run as _run_workflow
+    participant Analyze as analyze_ticker
+    participant DB as PostgreSQL
+    participant Cron as run_outcome_snapshot.py<br/>(weekly, Raspberry Pi)
+
+    Screen->>Run: ranked candidate list
+    Run->>DB: db_log_run_universe(run_id, all candidates)
+    Note over Run,DB: whole list, including names a budget<br/>stop may never reach
+    Analyze->>Analyze: bear -> bull -> analyst
+    Analyze->>Analyze: _split_verdict_basis(report)
+    Note over Analyze: basis block parsed AND stripped<br/>before recon gate / critic / storage
+    Analyze->>DB: db_store_final_report (the product)
+    Analyze->>DB: db_log_verdict (the bookkeeping)
+    Cron->>DB: weekly price + benchmark snapshot
+```
+
+### The basis block, and why it is stripped
+
+`VERDICT_BASIS_MANDATE` (`main.py`) asks the analyst for a final
+`## Verdict Basis` section containing one fenced ```json block: 3–7 objects of
+`{factor_key, stance, materiality, observation}`.
+
+`_split_verdict_basis` parses it and **removes it from the report**, before the
+reconciliation gate, the critic, the stored report or the web UI see the text.
+The report is written for a reader with no finance background; a JSON array at
+the foot of it is noise to every human who opens it.
+
+The parser degrades in one direction only. A missing section, an unfenced array,
+a malformed object, a JSON object where an array was expected — each costs the
+ledger its factors and leaves the report entirely intact. **The analysis is the
+product; the bookkeeping is not.** The same principle governs the write: the
+`db_log_verdict` call is wrapped in its own `try/except` and is *not* routed
+through `_check_db`, so a ledger failure can never fail a run that has already
+been paid for.
+
+### What only gets logged once
+
+`db_log_verdict` is reached only on the **fresh-analysis path**. The reuse path
+(`db_find_reusable_report` → `db_copy_ticker_outputs`) returns long before it,
+and that is load-bearing: copying a prior report into a new run re-states an
+existing judgement rather than making a new one. Logging it again would enter the
+same observation into the track record twice, and one heavily re-run ticker would
+then dominate every base rate computed from the ledger. FISV alone has 15 stored
+reports.
+
+For the same reason, a legacy `HOLD`/`SELL` or an unparsed verdict is **not**
+logged at all rather than being coerced into a bucket. A wrong label is worse for
+a track record than a missing row.
+
+## The weekly snapshot job
+
+[`src/cron/run_outcome_snapshot.py`](../src/cron/run_outcome_snapshot.py) runs
+**on the Raspberry Pi**, alongside `magic-stock-tracker`'s daily sell check — not
+on the machine that runs the agents.
+
+```bash
+0 18 * * 5 /path/to/magic-stock-picker/.venv/bin/python /path/to/magic-stock-picker/src/cron/run_outcome_snapshot.py
+```
+
+It **imports nothing from the rest of this repo.** `main.py` and `mcp_server.py`
+pull in google-adk, pandas, edgartools and the Gemini SDK; none of that is needed
+to fetch quotes and subtract, and installing it on a Pi means building pandas
+from source for no benefit. So the job talks to PostgreSQL and FMP directly and
+duplicates a ~15-line quote helper. **That duplication is deliberate** — see the
+module docstring. Its dependencies are in
+[`requirements-cron.txt`](../requirements-cron.txt): `requests`,
+`psycopg2-binary`, `python-dotenv`, `pyyaml`. It needs `DATABASE_URL` and
+`FMP_API_KEY` and nothing else.
+
+It sends **no notifications**. A price being recorded is not news, and an
+alerting scoreboard trains its reader to ignore it. (The tracker repo owns the
+Pushover/Plunk channel for things that *are* news.)
+
+**Weekly, not at 30/90/180/365 days.** Fixed horizons lose a datapoint
+permanently whenever a run is missed on the day a horizon falls, and over a year
+a missed run is a certainty rather than a risk. "Due" is defined against the last
+snapshot rather than against a schedule, so a job that misses a week catches up
+on its next run. The horizon marks are derived from `age_days` at read time.
+
+**One quote call per symbol, deliberately.** `/stable/quote` does not batch: a
+comma-separated list returns HTTP 200 with an empty array — success-shaped, and
+it would write a whole week of nothing while logging no error. The real batch
+endpoints answer 402 Restricted on the Starter plan. Forty single calls once a
+week is nothing against the quota; a silently empty scoreboard is the one failure
+this job cannot afford, because nobody is watching it.
+
+## Provenance: why `prompt_version` is on every row
+
+`verdict_log` stores `_prompt_version()` (`main.py`) — a hash of every agent
+instruction plus the shared prompt fragments — and the git commit SHA beside it.
+
+Without it, the first prompt edit silently mixes two different systems into one
+track record, and *"our judgement got worse"* becomes indistinguishable from
+*"we changed the question."* The hash says two versions differ; the commit says
+how. `idx_verdict_log_verdict` is on `(verdict, prompt_version)` because mixing
+versions is the one comparison the ledger must never make by accident.
+
+A practical consequence: **batch prompt edits.** Every edit splits the sample and
+invalidates report reuse.
+
+## Benchmark handling
+
+`verdict_ledger.benchmark_symbol` (default `SPY`) is quoted **once per process**
+and cached by date — a 30-ticker run would otherwise make 30 identical calls and
+baseline every verdict against a slightly different intraday level.
+
+The level is captured *at verdict time* and stored on the row. Recovering a
+historical index level for an arbitrary past date years later means trusting a
+provider to still serve it; one extra quote now removes that dependency.
+
+Universe rows carry **no** benchmark baseline, and their `excess_return_pct` is
+NULL by design. They exist to be compared against the verdicts of the *same run*,
+and that comparison is like-for-like without an index in the middle.
+
+## Failure modes, all non-fatal
+
+| What breaks | What happens | What is lost |
+| :--- | :--- | :--- |
+| No `## Verdict Basis` section | warning; verdict row still written | that verdict's factors |
+| Malformed basis JSON | warning; report untouched | that verdict's factors |
+| Off-vocabulary `factor_key` | info; stored as `OTHER_<name>` | nothing |
+| Benchmark quote fails | warning; verdict logged with NULL baseline | excess return for that verdict |
+| Ledger write raises | warning; run continues | one ledger row |
+| Symbol stops quoting (delisted) | warning; other symbols still snapshot | that subject's later history |
+| Snapshot job misses a week | next run catches up | nothing |
+
+## Tests
+
+`python test_verdict_ledger.py` — 29 offline cases, no database, no network.
+It covers the numeric coercion (`$44.03`, `152.71%`, pandas `NaN` → NULL) and
+every parser degradation path. The NaN case matters more than it looks: pandas
+writes NaN for any metric it could not compute, and NaN inserted into a `NUMERIC`
+column is stored literally, poisoning every average taken over that column
+afterwards.
+
+## Where to look next
+
+- The schema itself, with the full argument for each column:
+  [`src/sql-schema.sql`](../src/sql-schema.sql), tables 6–9.
+- Tunables and the factor vocabulary: `verdict_ledger` in
+  [`src/specs/config.yaml`](../src/specs/config.yaml).
+- The other memory in this system, which *does* feed back into prompts:
+  [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md).
+- Where the buy triggers the ledger will eventually grade are written:
+  [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md).

@@ -1,0 +1,14 @@
+# Dependencies for src/cron/run_outcome_snapshot.py ONLY.
+#
+# The ledger snapshot job runs on the Raspberry Pi that already hosts
+# magic-stock-tracker's daily check, NOT on the Windows box that runs the
+# agents. It has no LLM in it — it fetches quotes and subtracts — so it must
+# never pull in google-adk, pandas or edgartools from requirements.txt.
+# Building pandas on a Pi is slow and buys nothing here.
+#
+# Install with:  pip install -r requirements-cron.txt
+# Needs two environment variables: DATABASE_URL and FMP_API_KEY.
+requests
+psycopg2-binary
+python-dotenv
+pyyaml
