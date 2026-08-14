@@ -159,9 +159,28 @@ Pushover/Plunk channel for things that *are* news.)
 
 ### Deploying it on a Pi that already runs the viewer
 
-The viewer (`webapp/`) lives inside this repo, so a Pi running it already has the
-checkout — `git pull` brings the job with it. Three things are still missing, and
-all three are easy to miss because the viewer does not need any of them.
+**Do not assume the Pi has a git checkout.** The viewer is deployed there by
+copying `webapp/` across, so `src/` may exist but be empty and there may be no
+`.git` at all. `git pull` is not the install path.
+
+What the job actually needs is two files, and it finds both by walking up from
+its own `__file__`:
+
+| File | Required? | Why |
+| :--- | :--- | :--- |
+| `src/cron/run_outcome_snapshot.py` | yes | the job |
+| `src/specs/config.yaml` | optional | benchmark symbol, interval, tracking window |
+
+With `config.yaml` absent the job logs a WARNING naming the built-in defaults it
+fell back to (`SPY`, 7 days, 400 days) and carries on, so a one-file copy still
+works. It is a warning rather than a silent default because a Pi quietly
+benchmarking against a different symbol than the config says is exactly the kind
+of divergence that hides for months. A config file that exists but does not parse
+is a hard error instead — running against settings nobody chose, while the file
+meant to govern the job sits there broken, is worse than stopping.
+
+Three other things are still missing, and all three are easy to miss because the
+viewer does not need any of them.
 
 **1. Two packages.** The viewer installs `flask, psycopg2-binary, python-dotenv,
 markdown`; this job also needs `requests` and `pyyaml`. Install the cron subset,
