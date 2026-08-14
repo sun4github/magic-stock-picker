@@ -157,6 +157,67 @@ It sends **no notifications**. A price being recorded is not news, and an
 alerting scoreboard trains its reader to ignore it. (The tracker repo owns the
 Pushover/Plunk channel for things that *are* news.)
 
+### Deploying it on a Pi that already runs the viewer
+
+The viewer (`webapp/`) lives inside this repo, so a Pi running it already has the
+checkout — `git pull` brings the job with it. Three things are still missing, and
+all three are easy to miss because the viewer does not need any of them.
+
+**1. Two packages.** The viewer installs `flask, psycopg2-binary, python-dotenv,
+markdown`; this job also needs `requests` and `pyyaml`. Install the cron subset,
+never the root `requirements.txt` — that one pulls google-adk, pandas and
+edgartools, and building pandas on a Pi is a long wait for code this job never
+runs:
+
+```bash
+cd ~/magic-stock-picker
+pip install -r requirements-cron.txt
+```
+
+**2. An FMP key.** The viewer only reads the database, so a Pi set up for it has
+no `FMP_API_KEY` at all. This job quotes prices and cannot work without one.
+
+**3. Somewhere for both to live.** The job reads the repo-root `.env` first, then
+falls back to `webapp/.env` — which on a viewer-only Pi is the only one that
+exists and already holds a working `DATABASE_URL`. So adding the key to that
+existing file is enough, and avoids a second copy of the same connection string
+in a second file:
+
+```bash
+echo 'FMP_API_KEY=your_key_here' >> ~/magic-stock-picker/webapp/.env
+```
+
+`preflight()` checks both variables before any work starts and names the missing
+one, the files it looked in, and why the viewer would not have had it. Without
+that, a missing `DATABASE_URL` surfaces as `psycopg2.connect(None)` complaining
+about a host, at 18:00 on a Friday, in a log nobody has a reason to open — so the
+cost of a misconfiguration is not one failed run but however many weeks pass
+before somebody notices the scoreboard stopped moving.
+
+**Then verify by hand before scheduling anything:**
+
+```bash
+cd ~/magic-stock-picker && python3 src/cron/run_outcome_snapshot.py
+```
+
+An empty ledger prints `No ledger subjects due for a snapshot. No API calls
+made.` and exits 0 — that is a pass, not a failure.
+
+**Finally, the crontab** (`crontab -e`), Friday evening after the close:
+
+```
+0 18 * * 5 cd /home/pi/magic-stock-picker && /usr/bin/python3 src/cron/run_outcome_snapshot.py >> /home/pi/magic-stock-picker/logs/cron-stdout.log 2>&1
+```
+
+The `cd` is belt-and-braces — the script resolves its own paths from `__file__`,
+so it does not depend on the working directory, but a wrong cwd is the classic
+cron failure and the guard costs nothing. The redirect catches anything that
+fails *before* logging is configured (a missing interpreter, a syntax error);
+everything after that point already goes to `logs/cron.log`.
+
+Use `/usr/bin/python3` explicitly. Cron runs with a minimal PATH, and `python3`
+alone is the second-classic cron failure.
+
 **Weekly, not at 30/90/180/365 days.** Fixed horizons lose a datapoint
 permanently whenever a run is missed on the day a horizon falls, and over a year
 a missed run is a certainty rather than a risk. "Due" is defined against the last

@@ -57,7 +57,44 @@ logging.basicConfig(
 )
 logger = logging.getLogger("verdict_ledger")
 
+# The repo root .env is the normal home for these, and is what exists on the
+# machine that runs the agents. The Raspberry Pi this job is deployed to is a
+# webapp-only checkout, where the ONLY .env is webapp/.env and it already holds a
+# working DATABASE_URL. Reading that as a fallback means the Pi does not need a
+# second copy of the same secret in a second file — two copies of one connection
+# string is a drift waiting to happen, and the one that goes stale is always the
+# one nobody looks at.
+#
+# `override=False` (the default) means the root file wins where both define a
+# key, and neither ever overrides a variable already set in the environment.
 load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+load_dotenv(os.path.join(PROJECT_ROOT, "webapp", ".env"))
+
+
+def preflight() -> None:
+    """Fail loudly, and with the fix in the message, before doing any work.
+
+    This job runs unattended on a Pi. Without this, a missing DATABASE_URL
+    surfaces as `psycopg2.connect(None)` raising something about a missing
+    host, and a missing FMP_API_KEY as every quote silently failing — both at
+    18:00 on a Friday, in a log nobody has a reason to open. The cost of a
+    misconfiguration is therefore not one failed run, it is however many weeks
+    pass before somebody notices the scoreboard stopped moving.
+    """
+    missing = [k for k in ("DATABASE_URL", "FMP_API_KEY") if not os.getenv(k)]
+    if not missing:
+        return
+    logger.error(
+        "Missing required environment variable(s): %s.\n"
+        "  Set them in %s (or, on a webapp-only checkout, in %s).\n"
+        "  DATABASE_URL is the same connection string the web viewer uses.\n"
+        "  FMP_API_KEY is needed for the price quotes and is NOT required by the\n"
+        "  viewer, so a Pi set up for the viewer alone will not have it yet.",
+        ", ".join(missing),
+        os.path.join(PROJECT_ROOT, ".env"),
+        os.path.join(PROJECT_ROOT, "webapp", ".env"),
+    )
+    raise SystemExit(2)
 
 FMP_QUOTE_URL = "https://financialmodelingprep.com/stable/quote"
 
@@ -162,6 +199,7 @@ def run_snapshot() -> dict:
     if not cfg.get("enabled", False):
         logger.info("verdict_ledger.enabled is false in config.yaml; nothing to do.")
         return {"snapshots": 0}
+    preflight()
 
     benchmark = str(cfg.get("benchmark_symbol", "SPY")).strip().upper()
     today = date.today()
