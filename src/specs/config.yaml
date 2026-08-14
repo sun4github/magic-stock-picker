@@ -506,7 +506,15 @@ rate_limits:
   sec_edgar:
     max_calls_per_second: 10
     delay_between_calls_seconds: 0.12 # Guarantees ~8 calls/sec max
-    user_agent: "Suneel MagicStockPicker/1.0 (suneel.kanuri@gmail.com)"
+    # SEC EDGAR requires a descriptive User-Agent carrying a real contact
+    # address, so the value is inherently personal and does not belong in a
+    # public file. It is read from the environment instead — see .env.example,
+    # and mcp_server.py:195, which is what actually sets it.
+    #
+    # Named the same way as `database.connection_string_env`: this file records
+    # the NAME of the variable, never its contents. The literal address that
+    # used to sit here was dead config — nothing has ever loaded this key.
+    user_agent_env: "SEC_USER_AGENT"   # e.g. "Your Name your.email@example.com"
   tavily_search:
     delay_between_calls_seconds: 0.5
 
