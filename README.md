@@ -903,7 +903,22 @@ is two tables that your *analysis runs* fill:
 | `run_universe` | every name that cleared the screen | an analysis run |
 
 Each week it prices everything in both that is still inside its tracking window, notes
-where the benchmark stood, and works out the return and the excess return.
+where the benchmark stood, works out the return and the excess return, and appends one
+row per subject to a third table:
+
+| Table | Holds | Filled by |
+| :--- | :--- | :--- |
+| `verdict_outcome` | one dated price per subject per week, with return and excess return | this job |
+
+**`verdict_outcome` is the scoreboard** — it is what every query in the next section
+reads. The two tables above are what the system *thought*; this one is what actually
+happened next.
+
+It appends rather than overwrites, so each subject accumulates a weekly price history
+rather than a single latest value. That is deliberate: a name up 40% at six months and
+flat at twelve is a different story from one that climbed steadily, and a single
+end-point reading cannot tell them apart. It also means a missed week costs nothing —
+the next run simply carries on.
 
 **It deliberately prices the names that were rejected, too.** That reads backwards at
 first, and it is the whole point: a record of only the names the analysis liked has
@@ -912,8 +927,10 @@ without them the next section's first question cannot be asked at all.
 
 Say a run screens 12 names and the analysis calls 5 of them Buy. `run_universe` gets 12
 rows, `verdict_log` gets 12 rows, and each week after that the job prices all 12 plus
-the benchmark. A year later that answers: *did the 5 it liked beat the 12 it screened?*
-— which needs the 7 it rejected just as much as the 5 it did not.
+the benchmark and writes 24 rows into `verdict_outcome` — the same companies tracked
+twice, once as a screened name and once as a verdict. A year later that answers: *did
+the 5 it liked beat the 12 it screened?* — which needs the 7 it rejected just as much as
+the 5 it did not.
 
 Until the first analysis run after you install it, both tables are empty and the job
 correctly reports `No ledger subjects due for a snapshot. No API calls made.` and exits.

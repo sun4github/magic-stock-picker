@@ -123,8 +123,38 @@ def run():
         print(f"{'PASS' if ok else 'FAIL'}  {name:<48} {verb}")
 
     print()
+    print("-- the unreadable-trigger streak --")
+    # The streak is what turns a permanent silent cost into one prompt to fix it.
+    # A buy case whose price trigger reads "below 8.0x forward earnings" is
+    # legitimate and unparseable, so it escalates to the model EVERY week and
+    # never becomes free to check. The document cannot repair itself.
+    #
+    streak_cases = [
+        ("first unreadable sweep", None, 0, 1),
+        ("second in a row", None, 1, 2),
+        ("third in a row reaches the default threshold", None, 2, 3),
+        # The reset matters more than the increment: without it a name that was
+        # briefly unreadable would carry the count for ever and eventually warn
+        # about a buy case that has been fine for months.
+        ("a parseable trigger resets it", 28.00, 5, 0),
+        ("stays reset while readable", 28.00, 0, 0),
+    ]
+    for name, trigger, prior_streak, expected in streak_cases:
+        got = sweep.next_unreadable_streak(trigger, {"unreadable_streak": prior_streak})
+        ok = got == expected
+        failures += [] if ok else [name]
+        print(f"{'PASS' if ok else 'FAIL'}  {name:<48} {prior_streak} -> {got}")
+
+    print()
     print("-- ordering and configuration --")
     checks = []
+
+    # An unreadable trigger must still escalate while the streak is counting.
+    # If the counter ever became a reason to SKIP, the sweep would stop checking
+    # exactly the names it is complaining about.
+    esc, _, _ = sweep._decide({"ticker": "A", "written_on": date(2026, 7, 1)},
+                              100.0, None, {"unreadable_streak": 9}, CFG, None)
+    checks.append(("a long streak still escalates, never skips", esc))
 
     # Urgency orders escalations so the per-sweep ceiling drops the least
     # urgent rather than an arbitrary tail.
@@ -151,7 +181,7 @@ def run():
         failures += [] if ok else [name]
         print(f"{'PASS' if ok else 'FAIL'}  {name:<48} {ok}")
 
-    total = len(_parse_cases()) + len(_decide_cases()) + len(checks)
+    total = len(_parse_cases()) + len(_decide_cases()) + len(streak_cases) + len(checks)
     print()
     print(f"{total - len(failures)}/{total} passed.")
     if failures:
