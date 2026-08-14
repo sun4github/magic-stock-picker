@@ -45,6 +45,17 @@ SRC_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The agent stack lives in src/ and imports its siblings by bare name.
 sys.path.insert(0, SRC_ROOT)
 
+# main.run_buy_check writes its report to a RELATIVE "reports/" path, as every
+# other command in this repo does — they are all run by hand from the project
+# root. A scheduled task is not: Task Scheduler starts a job in System32 unless
+# told otherwise, so the check would write to C:\Windows\System32\reports\ or
+# fail on a read-only directory, and the sweep would then read back nothing and
+# report WAIT for a ticker that had just fired.
+#
+# Fixed here rather than in the scheduler entry so it holds however the script is
+# launched — by the task, by hand from another directory, or from an IDE.
+os.chdir(PROJECT_ROOT)
+
 logger = logging.getLogger("buy_check_sweep")
 
 
