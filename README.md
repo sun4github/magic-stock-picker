@@ -942,7 +942,7 @@ The system records every verdict it reaches, the factors behind it, and the whol
 screened list it came from — then prices them week after week. That is the **verdict
 ledger** ([docs/12](docs/12-verdict-ledger.md)).
 
-Six questions are written out in [`src/ledger-queries.sql`](src/ledger-queries.sql), so
+Ten questions are written out in [`src/ledger-queries.sql`](src/ledger-queries.sql), so
 they get asked the same way every time:
 
 ```bash
@@ -957,6 +957,13 @@ psql "$DATABASE_URL" -f src/ledger-queries.sql
 | **Q4** | Did the critic improve outcomes, or only cost money? |
 | **Q5** | How did the positions you actually bought do? |
 | **Q6** | What is in the ledger right now? |
+| **Q7** | This pipeline's picks vs the ones you chose elsewhere vs the market |
+| **Q8** | The same, weighted by what you actually invested |
+| **Q9** | Names *both* streams landed on — and what deliberating cost |
+| **Q10** | **Every dollar in, against the same dollars in the index** |
+
+Q1–Q4 grade this system and all filter on `source = 'PIPELINE'`. Q7–Q9 compare the two
+streams. **Q10 is the one to run if you only run one** — see below.
 
 ### How to read the columns
 
@@ -980,6 +987,68 @@ n: 9      avg_vs_market: -14.2%      pct_read_correctly: 78%
   alongside the average, because one enormous winner can carry a pile of losers. Two
   strategies both averaging +10% are completely different animals if one is right 70%
   of the time and the other 20%.
+
+### Picks this system did not make
+
+Most people who run a screen do not buy only what it says. If the larger share of your
+money follows an outside recommendation, this pipeline can only ever be compared against
+the index — which flatters or damns both streams together depending on what the market
+happened to do.
+
+`verdict_log.source` fixes that. `PIPELINE` is a verdict this system reasoned its way to;
+anything else is a purchase made elsewhere, recorded so it is measured on the same
+arithmetic. [`src/sync_external_picks.py`](src/sync_external_picks.py) mirrors them in
+from a position tracker (see Q5), stamping each one with the benchmark's close on the day
+of the purchase.
+
+An externally-sourced row is a `BUY` dated to the **purchase**, priced at the **fill**.
+That is a deliberate choice about which question gets answered: it grades your money,
+including whatever was lost between reading an idea and acting on it. `prompt_version`,
+`git_sha` and factor rows are all absent, because no prompt produced these and no factors
+were articulated.
+
+**The one rule that is not optional:** every query grading *this system* must filter
+`source = 'PIPELINE'`. Without it the screen collects credit and blame for picks it never
+made — which does not add noise, it silently answers a different question.
+
+#### Finished picks, and why they must be graded to their exit
+
+A position you sold has to be measured to the **exit**, not to today's price. Measured to
+today it reports a return nobody earned, which is why `verdict_log` carries
+`exit_date`/`exit_price`: set, they mean the result is final, the last outcome row is the
+one priced at the sale, and the weekly snapshot stops marking it.
+
+This is not a detail. Before it existed, closed positions had to be left out of the
+scoreboard altogether — and that is not a neutral omission, because **the picks that go
+wrong are the ones most likely to have been sold**. A record built only from what you
+still hold reads far better than the truth. Expect the number to fall, possibly by half,
+the first time exits are included. That drop is the measurement working.
+
+The same reasoning applies to anything you cannot recover: if a broker's history does not
+reach back far enough to price some old purchases, those picks are absent, and they are
+absent non-randomly. Say so next to the result rather than quietly reporting the rest.
+
+#### Q10, if you only run one
+
+Q1–Q9 all average **picks**. Q10 follows **dollars**: for every purchase it takes the
+money actually spent, on the day it was spent, and grows it by what the benchmark did
+over that same holding period. Sum both sides and the difference is what the picking was
+worth, in currency.
+
+```
+stream       state          n   invested     worth    if_spy   vs_spy_dollars
+EVERYTHING   ALL           89     68,906   103,075    84,555          +18,520
+External     sold          53     36,595    40,747    41,790           -1,043
+External     still held    32     30,512    60,472    40,878          +19,594
+```
+
+Read the `sold` and `still held` split before the total. Sold rows are settled and cannot
+change; open rows are marked at today's price and still can. A strong total resting
+entirely on the open rows is a position, not a result.
+
+It is also a verdict on **decisions, not a portfolio valuation** — sold positions
+contribute their exit proceeds, and that money was presumably reinvested into something
+else that also appears in the table.
 
 ### Which question to care about
 

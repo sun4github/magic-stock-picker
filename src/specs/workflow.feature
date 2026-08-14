@@ -357,6 +357,24 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     And running it twice in one day records one observation, not two
     And it sends no notification, because a price being recorded is not news
 
+  Scenario: Measure the picks this system did not make, on the same arithmetic
+    Given the holder buys names chosen elsewhere as well as names this pipeline chose
+    When those purchases are recorded
+    Then each is logged as a Buy dated to the purchase and priced at the fill, carrying the benchmark's level that day
+    And it is marked with a source, so it is never counted as a verdict this system reached
+    And every query that grades this system filters on that source, because a pick it never made must not earn it credit or blame
+    And no prompt version, commit or factors are attached, since no prompt produced it and no factors were articulated
+    Because comparing the pipeline only against the index flatters or damns both streams together depending on what the market did
+
+  Scenario: Grade a sold position to its exit, not to today
+    Given a recorded purchase has since been sold at a known price
+    When the ledger is updated
+    Then its final observation is priced at the sale, against the benchmark's level on the day of the sale
+    And it is never re-priced afterwards, because a position no longer held cannot keep drifting with a market it has left
+    And any observation dated after the sale is discarded, since every query reads the latest one and a hypothetical must not overwrite a settled result
+    And a sale with no recorded price is reported and left out rather than guessed at, because the exit price is what decides whether the pick was good
+    Because measuring a sold position against today's price reports a return nobody earned — and since the picks that go wrong are the ones most likely to have been sold, leaving them out makes every average read better than the record was
+
   # ---------------------------------------------------------------------------
   # The weekly buy-check sweep. Runs on the machine hosting the agents, unlike
   # the ledger snapshot above. See docs/11-buy-case-and-buy-check.md.
