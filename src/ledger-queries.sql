@@ -5,9 +5,13 @@
 -- Nothing reads it automatically — these are the questions it was built to
 -- answer, written out so they are asked the same way every time.
 --
--- Run any of them with:
+-- Run the whole file with:
 --     psql "$DATABASE_URL" -f src/ledger-queries.sql
--- or paste one into any client.
+--
+-- Individual queries can be pasted into any client. Run the FILE with psql
+-- specifically, though: Q5 is guarded by `\gset` / `\if` so it skips itself on
+-- an installation that has no position tracker, and those are psql meta-commands
+-- that other clients will reject. Everything else here is plain SQL.
 --
 -- WHEN TO START TRUSTING THE ANSWERS
 -- Each query reports its own sample size (`n`). Below roughly n=30 with 6+
@@ -153,16 +157,42 @@ SELECT v.verdict_stage,
 -- Q5. REAL MONEY: how did the positions actually bought do, against the
 --     verdict that led to them?
 --
--- Joins the tracker's lots (stock_tracker schema, same database) to the
--- verdict that produced them via lots.run_id.
+-- ***********************************************************************
+-- * OPTIONAL. This is the one query here that reads a table THIS PROJECT *
+-- * DOES NOT CREATE, and most installations will not have it.            *
+-- ***********************************************************************
 --
--- !! This query returns nothing until lots are recorded WITH a run_id. Every
--- !! lot currently in the table has run_id NULL, so there is no link from a
--- !! purchase back to the analysis that justified it. Setting that field at
--- !! purchase time is the single cheapest thing that makes this question
--- !! answerable — without it the ledger can grade its own opinions but never
--- !! the decisions actually taken.
+-- `stock_tracker.lots` is a position ledger kept by a SEPARATE application —
+-- one row per purchase: ticker, shares, buy price, purchase date. This project
+-- deliberately tracks no positions of its own (see the README), so if you want
+-- to grade the trades you actually made rather than the opinions the system
+-- formed, that record has to come from wherever you already keep it.
+--
+-- The join key is the pipeline `run_id`, stored against each purchase. It is the
+-- only link from a trade back to the analysis that justified it, and it cannot
+-- be reconstructed afterwards — a ticker alone will not do it, because the same
+-- name can be analysed many times and reach different verdicts.
+--
+-- TO USE THIS WITH YOUR OWN SETUP, change three things below:
+--   * `stock_tracker.lots`  -> wherever your purchases live
+--   * `l.run_id`            -> your column holding the pipeline run id
+--   * `l.buy_price`, `l.purchase_date`, `l.ticker` -> your column names
+--
+-- The guard below skips the whole query when that table is absent, so this file
+-- runs cleanly end to end on an installation that has no position tracker at
+-- all. Nothing else in this file depends on it.
+--
+-- Two returns are reported, and the difference is the point: the VERDICT's
+-- return grades the analysis, the LOT's return grades your execution. They
+-- diverge whenever you bought at a different price or on a different day from
+-- the verdict, which is the normal case.
+--
+-- Returns no rows (rather than skipping) when the table exists but no purchase
+-- carries a run_id yet.
 -- ---------------------------------------------------------------------------
+SELECT to_regclass('stock_tracker.lots') IS NOT NULL AS has_lots \gset
+\if :has_lots
+
 SELECT l.ticker,
        l.purchase_date,
        l.buy_price,
@@ -186,6 +216,11 @@ SELECT l.ticker,
          ORDER BY o2.as_of DESC LIMIT 1
        ) o ON TRUE
  ORDER BY l.purchase_date DESC;
+
+\else
+\echo '-- Q5 skipped: no stock_tracker.lots table in this database.'
+\echo '-- That is expected unless you keep purchases in one. See the notes above Q5.'
+\endif
 
 
 -- ---------------------------------------------------------------------------
