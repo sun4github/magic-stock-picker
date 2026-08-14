@@ -3148,7 +3148,8 @@ def run_sell_check(ticker: str, company_name: str = None, run_id: str = None):
     logger.info(f"[{ticker}] Sell-condition check complete — Recommendation: {recommendation}. Saved to {out_path}")
 
 
-def run_buy_check(ticker: str, company_name: str = None, run_id: str = None):
+def run_buy_check(ticker: str, company_name: str = None, run_id: str = None,
+                  origin: str = "manual", escalation_reason: str = ""):
     """On-demand buy-condition check for a single stock. The `--sell-check` of the
     other side: loads a stored BUY_CASE (the entry price range and buy triggers
     written when the verdict was Watch) and tests, against CURRENT data, whether they
@@ -3160,9 +3161,16 @@ def run_buy_check(ticker: str, company_name: str = None, run_id: str = None):
     company. Pin a run when you want to test the conditions a particular report set,
     for instance to see whether a case you rejected in March would have fired since.
 
-    Lightweight, like the sell-check: it reads the stored conditions and writes a
-    local report file, but creates no pipeline_runs / ticker_runs record, so it never
-    appears in the web UI's run lists."""
+    Lightweight, like the sell-check: it creates no pipeline_runs / ticker_runs
+    record, so it never appears in the web UI's RUN LISTS. It does store the check
+    itself against the run whose buy case it tested, which is what gives the Buy
+    Check tab its history — the local report file is overwritten by the next check
+    and so cannot answer when a trigger first fired.
+
+    `origin` and `escalation_reason` are provenance for the weekly sweep
+    (cron/run_buy_check_sweep.py), which reaches here only for tickers its
+    pre-filter escalated. Returns the recommendation string, or None if the check
+    could not be completed."""
     ticker = ticker.strip().upper()
     company_name = company_name or ticker
     pin = f" (pinned to run {run_id})" if run_id else ""
@@ -3211,7 +3219,16 @@ def run_buy_check(ticker: str, company_name: str = None, run_id: str = None):
     # authority for the price trigger and is fetched here rather than left to a tool
     # call, exactly as it is when the buy case is written.
     logger.info(f"[{ticker}] Fetching current price + FMP metrics + quarterly trends...")
-    price_data = buy_case_agent.price_data_block(ticker)
+    # Fetched as a dict first, then rendered, so the price can be recorded on the
+    # stored check alongside the recommendation. Re-quoting for the record would
+    # risk stamping a check with a price a minute away from the one it actually
+    # tested — the single number the whole exercise turns on.
+    try:
+        price_snapshot = json.loads(buy_case_agent.fmp_price_snapshot(ticker))
+    except Exception as e:
+        logger.warning(f"[{ticker}] Price snapshot failed ({e}).")
+        price_snapshot = {"error": str(e)}
+    price_data = buy_case_agent.price_data_block(ticker, price_snapshot)
     metrics_data = fmp_metrics_extractor(ticker)
     quarterly_data = fmp_quarterly_trends(ticker)
 
@@ -3235,8 +3252,52 @@ def run_buy_check(ticker: str, company_name: str = None, run_id: str = None):
         f.write(result)
 
     recommendation = buy_case_agent.extract_buy_recommendation(result)
+
+    # Persist the check, not just the file. The file is overwritten by the next
+    # check, so on its own it answers "what does this say today" and nothing
+    # else — no history of when a trigger first fired, no record of the
+    # reasoning behind an alert, and nothing the verdict ledger could ever grade.
+    # "Our triggers fired and then the stock did X" is the fastest-arriving
+    # accuracy signal this system can produce, and it needs the checks kept.
+    #
+    # Stored against the run whose buy case was TESTED, which is what pins a
+    # check to the conditions it was checking. Repeated checks of the same buy
+    # case accumulate as separate rows — that is the history, so nothing here
+    # deduplicates.
+    #
+    # No embedding: these are operational records read by ticker and date, never
+    # by semantic similarity, and a weekly sweep would otherwise add an embedding
+    # call per ticker per week forever.
+    if data.get("run_id"):
+        _check_db(
+            db_store_agent_output(
+                data["run_id"], ticker, "BUY_CHECK",
+                _with_run_header(result, data["run_id"], ticker),
+                json.dumps({
+                    "ticker": ticker,
+                    # Denormalised so the ledger and the web UI can filter and
+                    # count without re-parsing markdown prose.
+                    "recommendation": recommendation,
+                    "checked_on": datetime.now().date().isoformat(),
+                    "price_at_check": _present(price_snapshot.get("price")),
+                    # "manual" for `--buy-check`, "sweep" for the weekly job.
+                    # Kept because the two have different selection biases: the
+                    # sweep only checks tickers its pre-filter escalated, so a
+                    # base rate computed over both without distinguishing them
+                    # would be measuring two different populations.
+                    "origin": origin,
+                    "escalation_reason": escalation_reason or None,
+                }),
+                embed=False,
+            ),
+            f"{ticker} buy check",
+        )
+
     logger.info(f"[{ticker}] Buy-condition check complete — Recommendation: "
                 f"{recommendation}. Saved to {out_path}")
+    # Returned so a caller (the weekly sweep) does not have to read the report
+    # file back off disk to learn the answer it just paid for.
+    return recommendation
 
 
 if __name__ == "__main__":

@@ -423,6 +423,11 @@
         <button class="tab" data-kind="buy" id="buyTab" style="display:none;">Buy Case</button>
         <!-- Hidden unless this run actually has critic reviews, so an ordinary
              analysis run does not show a permanently empty tab. -->
+        <!-- Hidden unless this run's buy case has actually been checked. Every
+             check ever run against it is stacked here newest-first, which is the
+             only place that history exists: reports/TICKER_Buy_Check.md is
+             overwritten by the next check. -->
+        <button class="tab" data-kind="buycheck" id="buyCheckTab" style="display:none;">Buy Checks</button>
         <button class="tab" data-kind="critic" id="criticTab" style="display:none;">Critic Review</button>
       </div>
       <div class="panel">
@@ -541,6 +546,9 @@
       // verdict was Watch. Both are reset on every report load below, so switching
       // between runs can never leave the viewer parked on a hidden tab.
       $("buyTab").style.display = d.has_buy ? "" : "none";
+      // And the same again for the buy checks: a Watch that has never been
+      // checked has a buy case but no checks, so the two are independent.
+      $("buyCheckTab").style.display = d.has_buycheck ? "" : "none";
       // No need to guard state.kind here: loadReport resets it to "final" on every
       // report load, so switching from a refinement to an ordinary run cannot leave
       // the viewer parked on a tab that is now hidden.

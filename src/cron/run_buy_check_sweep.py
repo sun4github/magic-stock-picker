@@ -214,7 +214,6 @@ def run_sweep(dry_run: bool = False) -> dict:
     # pay the multi-second cost of loading ADK and the Gemini SDK.
     import main
     from mcp_server import fmp_earnings_calendar
-    import buy_case_agent
 
     conn = psycopg2.connect(os.getenv("DATABASE_URL"))
     cur = conn.cursor()
@@ -305,13 +304,20 @@ def run_sweep(dry_run: bool = False) -> dict:
         try:
             # The existing on-demand command, unchanged: one code path for the
             # scheduled sweep and the manual `--buy-check`, so a fix to either
-            # is a fix to both.
-            main.run_buy_check(ticker, run_id=c["run_id"])
-            report_path = os.path.join("reports", f"{ticker}_Buy_Check.md")
-            recommendation = "WAIT"
-            if os.path.exists(report_path):
-                with open(report_path, "r", encoding="utf-8") as fh:
-                    recommendation = buy_case_agent.extract_buy_recommendation(fh.read())
+            # is a fix to both. It stores the check against the buy case's own
+            # run and returns the recommendation, so nothing here has to read the
+            # report file back off disk to learn the answer it just paid for.
+            recommendation = main.run_buy_check(
+                ticker, run_id=c["run_id"], origin="sweep",
+                escalation_reason=c["reason"],
+            )
+            if not recommendation:
+                # The check aborted somewhere inside — it has already logged why.
+                # Treated as "no answer", not as WAIT: recording a WAIT the agent
+                # never gave would put a false negative into the stored history.
+                logger.warning(f"[{ticker}] Buy check produced no recommendation; "
+                               f"leaving it for next sweep.")
+                continue
         except Exception as e:
             logger.error(f"[{ticker}] Buy check failed ({e}); leaving it for next sweep.")
             continue

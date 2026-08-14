@@ -340,6 +340,32 @@ def _fetch_reports(run_id: str, ticker: str):
         (run_id, ticker),
     )
     rounds = cur.fetchall()
+
+    # Buy checks, NEWEST first — the opposite of the critic rounds above, and
+    # deliberately. A critic exchange is an argument that reads forwards; a run's
+    # buy checks are repeated answers to the same question on different dates,
+    # where the current answer is what a reader came for and the older ones are
+    # the history behind it.
+    cur.execute(
+        """SELECT COALESCE(metadata->>'checked_on', created_at::date::text),
+                  COALESCE(metadata->>'recommendation', '?'),
+                  metadata->>'price_at_check',
+                  metadata->>'escalation_reason',
+                  raw_content
+           FROM agent_outputs
+           WHERE run_id = %s AND ticker = %s AND agent_type = 'BUY_CHECK'
+           ORDER BY created_at DESC""",
+        (run_id, ticker),
+    )
+    checks = []
+    for checked_on, recommendation, price, reason, body in cur.fetchall():
+        header = f"## {checked_on} — {recommendation}"
+        if price:
+            header += f" (at ${float(price):,.2f})"
+        if reason:
+            header += f"\n\n*Checked because: {reason}*"
+        checks.append(f"{header}\n\n{_demote_headings(body)}")
+    buy_checks = "\n\n---\n\n".join(checks)
     # Each review is a standalone document whose own sections are '##'. Stacked under
     # a '## Review round N' heading unchanged they would tie with their container, so
     # the tab's outline would read as one flat run of sections with no indication of
@@ -375,6 +401,7 @@ def _fetch_reports(run_id: str, ticker: str):
         "bull": parts.get("BULL_CASE", ""),
         "sale": parts.get("SALE_CASE", ""),
         "buy": parts.get("BUY_CASE", ""),
+        "buycheck": buy_checks,
         "critic": critic,
         "final": fr[0] if fr else "",
         "verdict": fr[1] if fr else "",
@@ -400,7 +427,7 @@ def api_report():
         "critic_rounds": r["critic_rounds"],
         "source_run_id": r["source_run_id"],
     }
-    for kind in ("bear", "bull", "sale", "buy", "critic", "final"):
+    for kind in ("bear", "bull", "sale", "buy", "buycheck", "critic", "final"):
         payload[f"{kind}_html"] = render_md(r[kind])
         payload[f"has_{kind}"] = bool(r[kind])
     return jsonify(payload)
@@ -411,7 +438,7 @@ def download():
     """Download a report's raw markdown to the viewing device."""
     run_id = request.args.get("run_id")
     ticker = (request.args.get("ticker") or "").strip().upper()
-    kind = (request.args.get("kind") or "final").lower()  # bear|bull|sale|buy|critic|final
+    kind = (request.args.get("kind") or "final").lower()  # bear|bull|sale|buy|buycheck|critic|final
     if not run_id or not ticker:
         abort(400)
     r = _fetch_reports(run_id, ticker)
@@ -424,6 +451,7 @@ def download():
         "bull": "Bull_Case",
         "sale": "Sale_Advisory",
         "buy": "Buy_Case",
+        "buycheck": "Buy_Checks",
         "critic": "Critic_Review",
         "final": f"Final_Report_{(verdict or 'NA').title()}",
     }.get(kind, "Report")

@@ -1682,11 +1682,20 @@ def db_copy_ticker_outputs(src_run_id: str, dst_run_id: str, ticker: str) -> str
              ORDER BY created_at DESC LIMIT 1
         ''', (dst_run_id, src_run_id, ticker))
         reports = cur.rowcount
+        # BUY_CHECK is excluded on purpose. The other rows are ARTEFACTS of the
+        # analysis being reused, and the new run needs its own copies or the web
+        # UI lists the ticker and then fails to load anything for it. A buy check
+        # is not an artefact of the analysis — it is a dated observation of
+        # whether that analysis's triggers had fired on some later day, and a run
+        # accumulates as many as it has been checked. Copying them would clone
+        # the entire check history under a new run id every time a report is
+        # reused, inflating every count taken over it and inventing checks that
+        # never happened.
         cur.execute('''
             INSERT INTO agent_outputs (run_id, ticker, agent_type, raw_content, metadata, embedding)
             SELECT %s, ticker, agent_type, raw_content, metadata, embedding
               FROM agent_outputs
-             WHERE run_id = %s AND ticker = %s
+             WHERE run_id = %s AND ticker = %s AND agent_type <> 'BUY_CHECK'
         ''', (dst_run_id, src_run_id, ticker))
         outputs = cur.rowcount
         conn.commit()

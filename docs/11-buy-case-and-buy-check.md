@@ -303,6 +303,46 @@ exactly the weeks when an event trigger's answer changes.
 - **State** lives in `buy_check_sweep_state` (`sql-schema.sql` table 10) — not
   ledger data, just what the sweep saw last time.
 
+### Every check is stored, not just the latest file
+
+`reports/TICKER_Buy_Check.md` is overwritten by the next check, so on its own it
+answers "what does this say today" and nothing else. Each check is therefore also
+written to `agent_outputs` as `agent_type='BUY_CHECK'`, against **the run whose
+buy case it tested** — which is what pins a check to the conditions it checked.
+
+Repeated checks accumulate as separate rows. That is the point: it is the only
+record of when a trigger first fired, and of the reasoning behind an alert.
+"Our triggers fired and then the stock did X" is the fastest-arriving accuracy
+signal this system can produce, and it needs the checks kept.
+
+The metadata is denormalised so the ledger and the UI never have to parse prose:
+
+```json
+{"recommendation": "WAIT", "checked_on": "2026-08-13", "price_at_check": 33.08,
+ "origin": "sweep", "escalation_reason": "reported on 2026-08-06, after the buy case was last tested"}
+```
+
+`origin` distinguishes `manual` (`--buy-check`) from `sweep`, because the two
+have different selection biases — the sweep only ever checks tickers its
+pre-filter escalated, so a base rate computed over both without separating them
+would be measuring two different populations.
+
+No embedding: these are read by ticker and date, never by semantic similarity,
+and a weekly sweep would otherwise add an embedding call per ticker per week
+forever.
+
+**`db_copy_ticker_outputs` skips `BUY_CHECK`.** The other rows are artefacts of
+the analysis being reused and the new run needs its own copies. A buy check is
+not an artefact — it is a dated observation of whether that analysis's triggers
+had fired on some later day. Copying them would clone the whole check history
+under a new run id each time a report is reused, inflating every count taken over
+it and inventing checks that never happened.
+
+The web UI shows them under a **Buy Checks** tab, newest first — the opposite
+order to the critic rounds, because a critic exchange is an argument that reads
+forwards, while repeated checks are answers to the same question on different
+dates and the current one is what you came for.
+
 Tests: `python test_buy_check_sweep.py` — 22 offline cases over the parser and
 the escalate/skip decision. Every ambiguous case is asserted to escalate, because
 an unreadable trigger costs $0.08 and a missed one costs the trade.

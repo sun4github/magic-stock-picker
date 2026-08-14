@@ -178,3 +178,24 @@ places it appears there, or the two pages silently disagree.
   [`sql-schema.sql`](../src/sql-schema.sql).
 - Deployment (systemd, port configuration): the root
   [`README.md`](../README.md) and [`webapp/README.md`](../webapp/README.md).
+
+## The Buy Checks tab
+
+Shows every `--buy-check` ever run against this run's buy case, newest first,
+each headed with its date, recommendation and the price it was checked at — plus
+the reason the weekly sweep escalated it, when it came from the sweep rather than
+from a manual check.
+
+Hidden unless the run actually has checks, on the same principle as the Buy Case
+and Critic Review tabs: an empty tab implies something failed, where absence here
+is simply "nobody has checked this yet".
+
+Newest-first is deliberate, and the opposite of the Critic Review tab. A critic
+exchange is an argument that reads forwards; buy checks are repeated answers to
+the same question on different dates, so the latest answer is what a reader came
+for and the older ones are the history behind it.
+
+This tab is the ONLY place that history exists —
+`reports/TICKER_Buy_Check.md` is overwritten by the next check. Source rows are
+`agent_outputs` with `agent_type='BUY_CHECK'`; see
+[11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md).
