@@ -356,3 +356,57 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     And it takes a snapshot every week rather than at fixed anniversaries, so a missed run costs nothing and a later run catches up
     And running it twice in one day records one observation, not two
     And it sends no notification, because a price being recorded is not news
+
+  # ---------------------------------------------------------------------------
+  # The weekly buy-check sweep. Runs on the machine hosting the agents, unlike
+  # the ledger snapshot above. See docs/11-buy-case-and-buy-check.md.
+  # ---------------------------------------------------------------------------
+
+  Scenario: Check every open buy case on a schedule, without paying to ask about all of them
+    Given several Watch verdicts each carry a buy case with a price trigger and event triggers
+    When the weekly sweep runs
+    Then a free arithmetic pass decides which of them could plausibly have changed since the last sweep
+    And only those are put to the agent, so a quiet week costs nothing at all
+    And a ticker is escalated when its price is at or below its own price trigger, or within a small band of it
+    And a ticker is escalated when the company has reported since the last sweep, whatever its price has done
+    Because most event triggers are written against reported figures, so a fresh report is the one moment a price-only check would miss
+
+  Scenario: Prefer spending a few cents to losing a name off the watchlist
+    Given a buy case whose price trigger cannot be read, because its formatting differs from what the parser expects
+    When the sweep evaluates it
+    Then it is escalated to the agent rather than skipped
+    Because the cost of asking is a few cents and the cost of not asking is a trigger firing unseen
+
+  Scenario: Leave alone the names the analysis has moved on from
+    Given a ticker has a stored buy case but its most recent verdict is no longer Watch
+    When the sweep runs
+    Then that ticker is not checked and the reason is logged
+    Because its triggers test a case the pipeline has already abandoned
+
+  Scenario: Keep one scheduled job from becoming an unbounded bill
+    Given a market-wide fall has put more buy cases over the escalation line than the sweep's ceiling allows
+    When the sweep runs
+    Then it checks only up to the ceiling, taking those closest to their triggers first
+    And it names the ones it deferred, which are picked up by the next sweep
+
+  Scenario: Tell the investor when a trigger has actually fired
+    Given an escalated ticker's buy conditions are evaluated and read Buy
+    When the sweep completes
+    Then a push notification and an email name the price, the trigger it cleared, and why that ticker was looked at
+    And nothing is sent for a Wait, because a weekly message that always says the same thing is one that stops being read
+    And a signal that fires and stays fired is not re-sent on every subsequent sweep
+
+  Scenario: Preview the sweep without spending anything or changing anything
+    Given an investor wants to know what the sweep would do before letting it run
+    When they run it in dry-run mode
+    Then it reports which tickers would be checked and why
+    And it makes no agent calls, sends no notifications, and records nothing
+    Because a preview that quietly recorded what it had seen would make the next real sweep decline to escalate the very thing it predicted
+
+  Scenario: Keep every check, not just the latest one
+    Given a buy case has been checked several times over several weeks
+    When each check completes
+    Then it is stored against the run whose buy case it tested, alongside the earlier ones
+    And the recommendation, the date, the price at the time and the reason for checking are recorded with it
+    And the local report file holds only the most recent check, so the stored history is the only record of when a trigger first fired
+    And a check that is stored is one the ledger can eventually grade, which the local file could never be

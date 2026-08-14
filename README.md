@@ -769,9 +769,10 @@ down them, read each final report, and take 6.
 
 **Then do something with the Watch verdicts**, which are usually the largest group.
 Each has a **Buy Case** tab holding the price range and the events that would make it
-a Buy. Skim those, note the ones whose triggers look close, and between runs test them
-with `python main.py --buy-check TICKER` — a couple of cents each, and it is the
-difference between a watchlist you act on and a list of tickers you never revisit.
+a Buy. Skim those and note the ones whose triggers look close. You can test any of them
+on demand with `python main.py --buy-check TICKER` (a couple of cents each) — but the
+weekly sweep now does this for you, so the watchlist checks itself rather than waiting
+for you to remember. See [What runs between your runs](#what-runs-between-your-runs).
 
 Split the run if you would rather see the shortlist before spending anything:
 
@@ -796,14 +797,171 @@ python main.py --sell-check TICKER --run <RUN_ID>
 Using the latest `SALE_CASE` instead would test a thesis you never acted on. This tool
 tracks no positions and no purchase dates; keep those wherever you already do.
 
-The buy side of the same rhythm: names that came back `Watch` in an earlier run carry
-a buy case, so before each buying run is a natural moment to run `--buy-check` over
-the handful whose triggers were closest. A trigger that has fired is a candidate you
+The buy side of the same rhythm is largely automatic now: the weekly sweep tests every
+open buy case and alerts you when one reads Buy, so a fired trigger reaches you in the
+week it fires rather than at your next run. A trigger that has fired is a candidate you
 already did the work on. If a buy case is more than a run or two old, regenerate it
 first (`python buy_case.py TICKER`) so its price range is anchored to today's market
-rather than to the one it was written in.
+rather than to the one it was written in — the sweep tests the triggers as written and
+will happily keep measuring against a stale price.
+
+## What runs between your runs
+
+Two scheduled jobs run on their own between buying runs. They do opposite things and
+live on different machines, which is the quickest way to keep them straight:
+
+| | Weekly buy-check sweep | Ledger snapshot |
+| :--- | :--- | :--- |
+| Asks | "has a trigger fired?" | "how did past calls turn out?" |
+| Uses a model | yes (ADK + Gemini) | **no** — arithmetic only |
+| Runs on | the machine with the agent stack | the Raspberry Pi |
+| Schedule | Saturday 09:00 | Friday 18:00 |
+| Notifies | yes, when something fires | never |
+| Costs | ~$0.08 per escalated ticker | nothing |
+
+### The weekly buy-check sweep
+
+Every `Watch` verdict carries a buy case: a price trigger plus two to four event
+triggers that would make it a Buy. Before this existed, those were only checked when
+you remembered to. Most never were — and a watchlist nobody revisits is just a list of
+tickers.
+
+The sweep tests all of them, every Saturday after the close. **What keeps it cheap is
+that it does not ask the model about most of them.** A free arithmetic pass runs first,
+using the price the buy case itself wrote down:
+
+| Condition | Escalates? | Why |
+| :--- | :--- | :--- |
+| Price at or below the buy case's price trigger | yes | it has fired |
+| Price within 5% of it | yes | about a week's movement — it could fire before the next sweep |
+| Company reported since the last sweep | yes | most event triggers are written against reported figures |
+| Trigger price could not be read | yes | $0.08 beats silently dropping a name |
+| None of the above | no | costs nothing |
+
+Only the escalated ones reach the model. A real sweep over five open buy cases:
+
+```
+[CNC]  skip     — price $66.05 is 29.1% above the $51.16 trigger
+[FN]   skip     — price $566.49 is 31.5% above the $430.75 trigger
+[MRVL] skip     — price $222.18 is 56.7% above the $141.80 trigger
+[SNDK] ESCALATE — reported on 2026-08-05, after the buy case was last tested
+[VNT]  ESCALATE — reported on 2026-08-06, after the buy case was last tested
+```
+
+Three free. Both escalations were **earnings-driven, not price-driven** — a price-only
+filter would have missed them, and those are exactly the weeks an event trigger's
+answer changes. Cost that week: $0.15 rather than $0.40; in a quiet week, zero.
+
+**What you get.** When a check comes back `Buy`, a Pushover push and an email arrive
+naming the price, the trigger it cleared, and why the sweep looked at that ticker at
+all. Only on `Buy`, and not twice for the same standing signal — a trigger that fires
+and stays fired would otherwise alert every week until you stopped opening the
+notification.
+
+**What it writes.** Three places, and the difference matters:
+
+- `reports/TICKER_Buy_Check.md` — the full check: every trigger marked MET / NOT MET /
+  UNCLEAR with evidence and dates. **Overwritten by the next check.**
+- **The database**, as a `BUY_CHECK` record against the run whose buy case it tested.
+  This is the durable one — it accumulates, so you can see when a trigger first fired
+  and what the reasoning was. The viewer shows them under a **Buy Checks** tab, newest
+  first.
+- `logs/buy_check_sweep.log` — every decision, including the free skips.
+
+Set it up once with `tools\setup_weekly_jobs.cmd`. Preview it any time without spending
+anything:
+
+```bash
+python src\cron\run_buy_check_sweep.py --dry-run
+```
+
+That runs the pre-filter and reports who *would* be checked. No model calls, no alerts,
+and it changes nothing.
+
+### The ledger snapshot
+
+Silent by design. Once a week it records the price of every verdict and every screened
+name still inside its tracking window, notes where the benchmark stood, and works out
+the return and the excess return. A price being recorded is not news, so it never
+notifies.
+
+It exists so that the next section can eventually be answered.
+
+## Reading the track record
+
+The system records every verdict it reaches, the factors behind it, and the whole
+screened list it came from — then prices them week after week. That is the **verdict
+ledger** ([docs/12](docs/12-verdict-ledger.md)).
+
+Six questions are written out in [`src/ledger-queries.sql`](src/ledger-queries.sql), so
+they get asked the same way every time:
+
+```bash
+psql "$DATABASE_URL" -f src/ledger-queries.sql
+```
+
+| | Answers |
+| :--- | :--- |
+| **Q1** | Did filtering the screen beat *not* filtering it? |
+| **Q2** | Do Buy / Watch / Avoid actually return different things? |
+| **Q3** | **Which factors do we read well, and which badly?** |
+| **Q4** | Did the critic improve outcomes, or only cost money? |
+| **Q5** | How did the positions you actually bought do? |
+| **Q6** | What is in the ledger right now? |
+
+### How to read the columns
+
+A row from Q3 might look like:
+
+```
+factor_key: customer_concentration   stance: BEAR
+n: 9      avg_vs_market: -14.2%      pct_read_correctly: 78%
+```
+
+- **`n`** — how many times. The trust dial. At `n=3` ignore the row; at `n=30` start
+  listening. Every query reports its own.
+- **`stance`** — which way we argued. `BEAR` = a reason not to buy, `BULL` = a reason
+  to. You need it because "were we right" flips with the side taken: BEAR plus a stock
+  that fell is a hit; BULL plus the same stock is a miss.
+- **`avg_vs_market`** — **not** "did the stock go up". It is the return *minus* the
+  benchmark's return over the same window. A stock up 21% while the market rose 30%
+  scores **−9%**: the analysis lost you money even though the price rose. Raw returns
+  would call you a genius in every rising market, until suddenly they didn't.
+- **the `%` columns** — hit rate: how *often* we were right, not how *much*. Read it
+  alongside the average, because one enormous winner can carry a pile of losers. Two
+  strategies both averaging +10% are completely different animals if one is right 70%
+  of the time and the other 20%.
+
+### Q1 is the one that matters most
+
+Greenblatt's method is a basket: its edge comes from holding many screened names,
+*including* uncomfortable ones. Every verdict this tool produces is a filter applied on
+top of a strategy that did not ask to be filtered — and a bear/bull/analyst chain is
+structurally best at building an articulate case against exactly the cheapest names.
+
+Q1 settles that empirically. It compares the **whole screened list** against **the names
+the agents approved**, using prices the ledger captured for both. If "approved" does not
+beat "all", the analysis layer is subtracting value, and the honest response is to buy
+the whole screen.
+
+Nothing else in this repo can answer that, and it costs nothing extra to collect — the
+screener already computes every figure.
+
+### When to start believing any of it
+
+Not yet. These need roughly **30 subjects with 6+ months elapsed** before the numbers
+mean anything, which realistically puts the first honest read in **spring 2027**.
+
+That is not a flaw, it is what "track record" means. It is also exactly why the
+recording had to ship before anything that uses it: the reasoning can be built at any
+time, but the months of data underneath it cannot be recovered afterwards.
+
+Q5 is the exception, and it needs one thing from you: **record the `run_id` on each lot
+when you buy.** It is the only link from a purchase back to the analysis that justified
+it, and without it that query stays empty forever.
 
 ## Web UI (report viewer)
+
 
 A separate, read-only Flask web app in [`webapp/`](webapp/) lets you browse the
 stored reports: pick a ticker, choose a run (by date), and view the Bear / Bull /
