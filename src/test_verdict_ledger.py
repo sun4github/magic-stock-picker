@@ -21,7 +21,9 @@ emit, rather than against tidy ones.
 """
 import json
 
-import main
+from agents import analyst_agent
+from pipeline import _extract_verdict, _split_verdict_basis
+from settings import LEDGER_FACTOR_TAXONOMY
 from mcp_server import _num
 
 
@@ -109,7 +111,7 @@ def run():
     print()
     print("-- basis parsing (main._split_verdict_basis) --")
     for name, text, expected_keys in _parser_cases():
-        cleaned, factors = main._split_verdict_basis(text, "TEST")
+        cleaned, factors = _split_verdict_basis(text, "TEST")
         keys = [f["factor_key"] for f in factors]
         ok = keys == expected_keys
         failures += [] if ok else [name]
@@ -119,7 +121,7 @@ def run():
     print("-- the report survives the split --")
     checks = []
 
-    cleaned, factors = main._split_verdict_basis(_report(BASIS), "TEST")
+    cleaned, factors = _split_verdict_basis(_report(BASIS), "TEST")
     checks.append(("basis block removed from the report",
                    "Verdict Basis" not in cleaned and "factor_key" not in cleaned))
     checks.append(("prose above it is untouched",
@@ -128,13 +130,13 @@ def run():
     # critic run. If it ever ate the verdict line, every downstream consumer
     # would silently fall back to the 'WATCH' default.
     checks.append(("verdict still extractable after the strip",
-                   main._extract_verdict(cleaned) == "WATCH"))
+                   _extract_verdict(cleaned) == "WATCH"))
     checks.append(("stance and materiality normalised",
                    factors[0]["stance"] == "BEAR" and factors[0]["materiality"] == "HIGH"))
 
     # A malformed block must still leave a readable report behind, or one bad
     # JSON emission costs a report that was paid for.
-    broken, _ = main._split_verdict_basis(
+    broken, _ = _split_verdict_basis(
         REPORT_HEAD + "\n## Verdict Basis\n```json\n[{oops}]\n```\n", "TEST")
     checks.append(("malformed basis still yields a clean report",
                    "## Final Verdict" in broken and "oops" not in broken))
@@ -142,16 +144,16 @@ def run():
     # An empty vocabulary would silently send the analyst a prompt asking it to
     # choose from a list that is not there, so the taxonomy has to be present
     # and the prompt has to actually carry it.
-    checks.append(("taxonomy loaded from config", len(main.LEDGER_FACTOR_TAXONOMY) > 0))
+    checks.append(("taxonomy loaded from config", len(LEDGER_FACTOR_TAXONOMY) > 0))
     checks.append(("prompt carries the vocabulary",
-                   "customer_concentration" in main.analyst_agent.instruction))
+                   "customer_concentration" in analyst_agent.instruction))
     checks.append(("prompt asks for the section",
-                   "## Verdict Basis" in main.analyst_agent.instruction))
+                   "## Verdict Basis" in analyst_agent.instruction))
     # The screen's own entry criteria must stay out of the ledger: every
     # candidate has them, so recording them would swamp the base rates with a
     # constant that distinguishes nothing.
     checks.append(("screen criteria excluded from the vocabulary",
-                   not any(k in main.LEDGER_FACTOR_TAXONOMY
+                   not any(k in LEDGER_FACTOR_TAXONOMY
                            for k in ("high_return_on_capital", "high_earnings_yield",
                                      "low_peg", "eps_growth"))))
 

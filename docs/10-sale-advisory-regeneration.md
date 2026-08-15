@@ -35,7 +35,7 @@ this time **stripped of its staleness warning** (the note-stacking guard removes
 old note and the `carried` branch writes the confident one). A stale advisory that
 now looks fresh is worse than a stale advisory that says so.
 
-## Control flow, `sale_advisory.py:67` (`generate_sale_advisory`)
+## Control flow, `sale_advisory.py:83` (`generate_sale_advisory`)
 
 | Step | Line | What happens |
 | :--- | ---: | :--- |

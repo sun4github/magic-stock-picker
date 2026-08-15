@@ -29,7 +29,10 @@ import re
 import json
 import contextlib
 
-import main
+from pipeline import _analysis_key
+from report import _format_price_section, _format_verified_figures
+from usage import _new_usage
+import pipeline.reuse
 import refine
 import buy_case_agent
 
@@ -129,7 +132,8 @@ def run():
               buy_case_agent.count_triggers(text) == expected)
 
     print("\n--- prompt files are safe to embed in an ADK instruction ---")
-    for name in ("buy-case-instructions.md", "buy-check-instructions.md"):
+    for name in (os.path.join("prompts", "buy-case.md"),
+                 os.path.join("prompts", "buy-check.md")):
         with open(os.path.join(os.path.dirname(__file__), name), encoding="utf-8") as fh:
             body = fh.read()
         check(f"{name} contains no '{{' or '}}'",
@@ -161,22 +165,26 @@ def run():
     print("\n--- the reuse fingerprint separates the skip variants ---")
     base = {"BalanceSheetDate": "2026-03-31"}
     keys = {
-        "full": main._analysis_key("FISV", dict(base)),
-        "no-phase-c": main._analysis_key("FISV", dict(base), skip_sale_advisor=True),
-        "no-buy-case": main._analysis_key("FISV", dict(base), skip_buy_case=True),
-        "neither": main._analysis_key("FISV", dict(base), True, True),
+        "full": _analysis_key("FISV", dict(base)),
+        "no-phase-c": _analysis_key("FISV", dict(base), skip_sale_advisor=True),
+        "no-buy-case": _analysis_key("FISV", dict(base), skip_buy_case=True),
+        "neither": _analysis_key("FISV", dict(base), True, True),
     }
     check("all four skip variants have distinct keys", len(set(keys.values())) == 4)
     check("no variant is empty", all(keys.values()))
     # A buy-case prompt edit must invalidate reuse: a reused report carries the buy
     # case copied alongside it, so serving it would serve a document written under
     # the old instructions.
-    original = main._DOWNSTREAM_PROMPTS
-    with _patched(main, _DOWNSTREAM_PROMPTS=original + "\nAn extra instruction."):
-        moved = main._analysis_key("FISV", dict(base)) != keys["full"]
+    # Patched on `pipeline.reuse`, where the value lives and where `_prompt_version`
+    # reads it. `main` no longer re-exports it precisely so that this cannot be
+    # written against a copy that the fingerprint never consults.
+    original = pipeline.reuse._DOWNSTREAM_PROMPTS
+    with _patched(pipeline.reuse,
+                  _DOWNSTREAM_PROMPTS=original + "\nAn extra instruction."):
+        moved = _analysis_key("FISV", dict(base)) != keys["full"]
     check("buy-case prompt edit -> different key", moved)
     check("key restored after the edit is reverted",
-          main._analysis_key("FISV", dict(base)) == keys["full"])
+          _analysis_key("FISV", dict(base)) == keys["full"])
 
     print("\n--- price block degrades honestly when the quote is unavailable ---")
     with _patched(buy_case_agent,
@@ -206,8 +214,8 @@ def run():
             "yearLow": 61.44, "yearHigh": 329.88, "pct_from_52w_high": -43.1,
             "pct_above_52w_low": 205.3, "priceAvg50": 239.45, "priceAvg200": 135.07,
             "marketCap": 164_260_000_000, "as_of": "2026-07-31T16:00"}
-    section = main._format_price_section(snap, "ZZZZ")
-    figures = main._format_verified_figures({"TotalDebt": 5.28e9}, snap)
+    section = _format_price_section(snap, "ZZZZ")
+    figures = _format_verified_figures({"TotalDebt": 5.28e9}, snap)
     with _patched(buy_case_agent, fmp_price_snapshot=lambda t: (_ for _ in ()).throw(
             AssertionError("re-fetched a quote it was handed"))):
         block = buy_case_agent.price_data_block("ZZZZ", snap)
@@ -222,9 +230,9 @@ def run():
           "LIVE market figure, not a filing figure" in figures)
     check("the prompt block reuses the handed-over snapshot", "$187.56" in block)
     check("no price section is faked when the quote is missing",
-          "could not be retrieved" in main._format_price_section({}, "ZZZZ"))
+          "could not be retrieved" in _format_price_section({}, "ZZZZ"))
     check("a missing quote does not lose the rest of VERIFIED_FIGURES",
-          "Total debt" in main._format_verified_figures({"TotalDebt": 5.28e9}, {}))
+          "Total debt" in _format_verified_figures({"TotalDebt": 5.28e9}, {}))
 
     print("\n--- the refinement decision table (refine._refresh_buy_case) ---")
     ticker = "ZZTESTBC"
@@ -246,7 +254,7 @@ def run():
             with contextlib.redirect_stdout(io.StringIO()):
                 origin = refine._refresh_buy_case(
                     ticker, "Test Co", "old-run", "new-run", "report body",
-                    "figures", "quarters", {}, verdict, revised, main._new_usage(),
+                    "figures", "quarters", {}, verdict, revised, _new_usage(),
                     0.0, 5.0, 0.0,
                 )
         check(f"{name}: origin is {expect_origin!r}", origin == expect_origin)
@@ -282,7 +290,7 @@ def run():
         with contextlib.redirect_stdout(io.StringIO()):
             origin = refine._refresh_buy_case(
                 ticker, "Test Co", "old-run", "new-run", "report body", "figures",
-                "quarters", {}, "WATCH", True, main._new_usage(),
+                "quarters", {}, "WATCH", True, _new_usage(),
                 99.0, 5.0, 0.0,          # spent 99 against a 5.00 ceiling
             )
     check("unaffordable + prior exists -> carried with a staleness label",
@@ -297,7 +305,7 @@ def run():
         with contextlib.redirect_stdout(io.StringIO()):
             origin = refine._refresh_buy_case(
                 ticker, "Test Co", "old-run", "new-run", "report body", "figures",
-                "quarters", {}, "WATCH", True, main._new_usage(), 99.0, 5.0, 0.0,
+                "quarters", {}, "WATCH", True, _new_usage(), 99.0, 5.0, 0.0,
             )
     check("unaffordable + nothing to carry -> no buy case", origin == "none")
 

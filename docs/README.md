@@ -22,18 +22,20 @@ Come here once you need to change or extend the code.
 
 | Doc | Covers | Primary source files |
 | :--- | :--- | :--- |
-| [01-orchestration-and-cli.md](01-orchestration-and-cli.md) | CLI entry point, the five execution modes, and the per-ticker control flow that ties everything together | `src/main.py` |
-| [02-agents-and-reasoning-graph.md](02-agents-and-reasoning-graph.md) | The `LlmAgent` definitions, their prompts, and how they hand off state | `src/main.py`, `src/research-instructions.md`, `src/bullish-research-instructions.md`, `src/sale-advisor-instructions.md` |
-| [03-mcp-tools-and-persistence.md](03-mcp-tools-and-persistence.md) | Every MCP tool (data fetch + database) the agents and orchestrator call | `src/mcp_server.py` |
+| [architecture.md](architecture.md) | What the system is, the shape of a run, the layer boundaries and why they fall where they do, and the two mechanisms that exist purely to bound cost | all of `src/` |
+| [00-module-map.md](00-module-map.md) | Where every file lives, why the package boundaries fall where they do, and the four tools that verify a change did not move anything it should not have | all of `src/` |
+| [01-orchestration-and-cli.md](01-orchestration-and-cli.md) | CLI entry point, the five execution modes, and the per-ticker control flow that ties everything together | `src/main.py`, `src/pipeline/` |
+| [02-agents-and-reasoning-graph.md](02-agents-and-reasoning-graph.md) | The `LlmAgent` definitions, their prompts, and how they hand off state | `src/agents/`, `src/prompts/`, `src/prompt_loader.py` |
+| [03-mcp-tools-and-persistence.md](03-mcp-tools-and-persistence.md) | Every MCP tool (data fetch + database) the agents and orchestrator call | `src/data/`, `src/persistence/`, `src/mcp_server.py` |
 | [04-screener-internals.md](04-screener-internals.md) | Phase A: universe fetch, Greenblatt's eligibility gates, ranking, CSV output | `src/magic_formula_starter_screener.py` |
-| [05-guardrails-cost-and-reuse.md](05-guardrails-cost-and-reuse.md) | Verified figures, the reconciliation gate, budget ceilings, duplicate-run reuse, and cost accounting | `src/main.py` |
+| [05-guardrails-cost-and-reuse.md](05-guardrails-cost-and-reuse.md) | Verified figures, the reconciliation gate, budget ceilings, duplicate-run reuse, and cost accounting | `src/report/reconciliation.py`, `src/usage.py`, `src/pipeline/reuse.py`, `src/settings.py` |
 | [06-webapp.md](06-webapp.md) | The read-only Flask report viewer | `webapp/app.py`, `webapp/templates/index.html` |
-| [07-observability-and-logging.md](07-observability-and-logging.md) | How logging is actually wired up (three independent loggers), where each diagnostic ends up, and two verified logging quirks (duplicate console lines, CWD-relative log directory) | `src/main.py`, `src/mcp_server.py`, `src/magic_formula_starter_screener.py` |
+| [07-observability-and-logging.md](07-observability-and-logging.md) | How logging is actually wired up (three independent loggers), where each diagnostic ends up, and two verified logging quirks (duplicate console lines, CWD-relative log directory) | `src/main.py`, `src/mcp_app.py`, `src/magic_formula_starter_screener.py` |
 | [08-gates-and-validation-inventory.md](08-gates-and-validation-inventory.md) | Every validation/eligibility/integrity/resilience gate in the system, consolidated into one table by category, with fail-loud-vs-fail-open behavior called out | all of the above |
-| [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md) | Phase D: the independent critic, the analyst/critic feedback loop, its spend ceiling, and the cross-run critic memory that keeps it from relitigating settled points | `src/critic_agent.py`, `src/refine.py`, `src/critic-instructions.md` |
+| [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md) | Phase D: the independent critic, the analyst/critic feedback loop, its spend ceiling, and the cross-run critic memory that keeps it from relitigating settled points | `src/critic_agent.py`, `src/refine.py`, `src/prompts/critic.md` |
 | [10-sale-advisory-regeneration.md](10-sale-advisory-regeneration.md) | The standalone `sale_advisory.py` command: generating or repairing a Phase C sale advisory for any stored report, and why its artefact and its cost land on different runs | `src/sale_advisory.py` |
-| [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md) | Phase E: the buy case written for a `Watch` verdict (the entry price range and the triggers that would make it a Buy), the forward-looking feeds only it reads, and the `--buy-check` command that tests it later | `src/buy_case_agent.py`, `src/buy_case.py`, `src/buy-case-instructions.md`, `src/buy-check-instructions.md` |
-| [12-verdict-ledger.md](12-verdict-ledger.md) | The verdict ledger: what each verdict claimed, what the stock did next, and the off-box weekly job that grades it by arithmetic. Records only — it feeds nothing back into any prompt | `src/sql-schema.sql`, `src/mcp_server.py`, `src/main.py`, `src/cron/run_outcome_snapshot.py` |
+| [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md) | Phase E: the buy case written for a `Watch` verdict (the entry price range and the triggers that would make it a Buy), the forward-looking feeds only it reads, and the `--buy-check` command that tests it later | `src/buy_case_agent.py`, `src/buy_case.py`, `src/prompts/buy-case.md`, `src/prompts/buy-check.md` |
+| [12-verdict-ledger.md](12-verdict-ledger.md) | The verdict ledger: what each verdict claimed, what the stock did next, and the off-box weekly job that grades it by arithmetic. Also the externally-sourced picks this system did not make, graded to their exit on the same arithmetic. Records only — it feeds nothing back into any prompt | `src/sql-schema.sql`, `src/persistence/ledger.py`, `src/pipeline/analysis.py`, `src/cron/run_outcome_snapshot.py`, `src/sync_external_picks.py`, `src/ledger-queries.sql` |
 
 ## What is *not* in the runtime path
 
@@ -48,6 +50,11 @@ not. Put anything similar there rather than in `src/`.
 
 ## Reading order for a first pass
 
+0. **architecture.md** first, for what the system is and the shape of a run, then **00** for one page on where everything lives. Worth two minutes before **01**:
+   `main.py` and `mcp_server.py` are now largely re-export facades over `pipeline/`,
+   `report/`, `agents/`, `data/` and `persistence/`, so a doc that says "in
+   `main.py`" below usually means "reachable as `main.something`" rather than
+   "defined in that file."
 1. **01** to see the shape of a run end to end (`python main.py` → screener →
    per-ticker analysis → reports/DB).
 2. **02** to see what each agent actually reads and writes.
@@ -73,10 +80,19 @@ not. Put anything similar there rather than in `src/`.
 
 ## Conventions used in these docs
 
-- `path/to/file.py:123` means "read this starting at line 123 of that file
-  as of this writing." Line numbers drift as the code changes — if a
-  reference looks off, search for the function/symbol name instead of
-  trusting the number blindly.
+- `path/to/file.py:123` means "read this starting at line 123 of that file."
+  Paths are relative to `src/`.
+
+  These are checked, not hoped for. `python tools/check_doc_refs.py` verifies
+  every one of them: the file exists, the line is in range, and — where the
+  reference sits beside a symbol name, which is the house style here — that the
+  line falls inside that symbol. Run it after moving code, and re-point what it
+  reports. Nothing executes a document, so that tool is what stops these decaying
+  between reads.
+
+  It cannot check a reference to a REGION rather than a symbol ("the CLI
+  parsing, `main.py:678-825`"); it reports how many of those it is taking on
+  trust. If a number still looks off, search for the symbol name.
 - Diagrams are [Mermaid](https://mermaid.js.org/); they render directly in
   GitHub and most Markdown viewers.
 - Phase letters match `agent_architecture.md`: A = screener, B = bear/bull/analyst

@@ -16,7 +16,12 @@ Changes ("rose by $11B") and figures pinned to another period ("$24.4B in 2023")
 are legitimately different from today's balance sheet and must stay silent, or the
 warnings that matter get lost in noise.
 """
-import main
+from report import (
+    _finding_basis,
+    _format_reconciliation_section,
+    _reconcile_agent_figures,
+    reconciliation_warning,
+)
 
 # FISV as of the 2026-03-31 balance sheet — the run that motivated the gate.
 CANDIDATE = {
@@ -195,7 +200,7 @@ def run():
     ):
         print(f"--- {group} ---")
         for name, text, should_flag in cases:
-            found = main._reconcile_agent_figures(text, candidate, "test")
+            found = _reconcile_agent_figures(text, candidate, "test")
             ok = bool(found) == should_flag
             print(f"{'PASS' if ok else 'FAIL'}  {name:<40} "
                   f"expected={'flag' if should_flag else 'silent':<6} got={_fmt(found)}")
@@ -206,14 +211,14 @@ def run():
     # A candidate with no verified figures must never flag anything: an on-demand
     # run whose Magic Formula metrics could not be computed has no ground truth to
     # check against, and guessing would be worse than staying quiet.
-    if main._reconcile_agent_figures("Total debt of $99 billion.", {}, "test"):
+    if _reconcile_agent_figures("Total debt of $99 billion.", {}, "test"):
         failures.append("empty candidate should produce no findings")
         print("FAIL  empty candidate produced findings")
     else:
         print(f"PASS  {'no verified figures -> silent':<40} expected=silent got=silent")
 
     # Re-checking a stored report must not re-flag its own warning table.
-    found = main._reconcile_agent_figures(STORED_REPORT_WITH_WARNINGS, VICR_CANDIDATE, "test")
+    found = _reconcile_agent_figures(STORED_REPORT_WITH_WARNINGS, VICR_CANDIDATE, "test")
     if found:
         failures.append("warning table re-scanned")
         print(f"FAIL  {'stored warning table not re-scanned':<40} "
@@ -229,16 +234,16 @@ def run():
     # `buy_case.py`, where the report being checked is older than the figures.
     print("--- finding provenance ---")
     basis_checks = [
-        ("debt is a filings figure", main._finding_basis("TotalDebt") == "filings"),
-        ("cash is a filings figure", main._finding_basis("Cash") == "filings"),
+        ("debt is a filings figure", _finding_basis("TotalDebt") == "filings"),
+        ("cash is a filings figure", _finding_basis("Cash") == "filings"),
         ("market cap is market-derived",
-         main._finding_basis("LiveMarketCap") == "market price"),
+         _finding_basis("LiveMarketCap") == "market price"),
         ("enterprise value is market-derived, since it is built on market cap",
-         main._finding_basis("EnterpriseValue") == "market price"),
+         _finding_basis("EnterpriseValue") == "market price"),
     ]
-    debt_finding = main._reconcile_agent_figures(
+    debt_finding = _reconcile_agent_figures(
         "Vicor carries total debt of $8.92B.", VICR_CANDIDATE, "Bull case")
-    cap_finding = main._reconcile_agent_figures(
+    cap_finding = _reconcile_agent_figures(
         "Vicor's market capitalisation is $88.35M.", VICR_CANDIDATE, "Bull case")
     basis_checks += [
         ("a debt finding is tagged filings",
@@ -247,13 +252,13 @@ def run():
          bool(cap_finding) and cap_finding[0]["basis"] == "market price"),
     ]
     if debt_finding:
-        w = main.reconciliation_warning("VICR", debt_finding[0])
+        w = reconciliation_warning("VICR", debt_finding[0])
         basis_checks += [
             ("a filings warning still says 'the filings show'", "the filings show" in w),
             ("and does not excuse itself as market movement", "move every session" not in w),
         ]
     if cap_finding:
-        w = main.reconciliation_warning("VICR", cap_finding[0])
+        w = reconciliation_warning("VICR", cap_finding[0])
         basis_checks += [
             ("a market warning does NOT claim the filings show it",
              "the filings show" not in w),
@@ -262,13 +267,13 @@ def run():
             ("and warns it may be the clock, not an error",
              "passage of time rather than an error" in w),
         ]
-        section = main._format_reconciliation_section(cap_finding)
+        section = _format_reconciliation_section(cap_finding)
         basis_checks += [
             ("the report table carries a Basis column", "| Basis |" in section),
             ("and explains what a market-price row means",
              "can simply mean the stock has moved since" in section),
         ]
-        filed_only = main._format_reconciliation_section(debt_finding)
+        filed_only = _format_reconciliation_section(debt_finding)
         basis_checks.append(
             ("the market-price note is omitted when no such row exists",
              "the stock has moved since" not in filed_only))

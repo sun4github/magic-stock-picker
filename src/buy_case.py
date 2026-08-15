@@ -52,7 +52,11 @@ critic refinement.
 import json
 import uuid
 
-import main
+from persistence import _check_db
+from report import _format_verified_figures, _price_snapshot
+from run_log import logger
+from settings import BUDGET_DAY_WINDOW_HOURS, BUDGET_ENABLED, BUDGET_PER_DAY_USD
+from usage import _collect_embedding_usage, _finalize_run, _new_usage, _prior_day_spend
 import refine
 import buy_case_agent
 from mcp_server import (
@@ -62,7 +66,7 @@ from mcp_server import (
     db_get_agent_output,
 )
 
-logger = main.logger
+logger = logger
 
 
 def generate_buy_case(ticker: str, company_name: str = None,
@@ -131,13 +135,13 @@ def generate_buy_case(ticker: str, company_name: str = None,
     # 3. The rolling daily ceiling still applies. There is no per-invocation ceiling:
     # this is one deliberate call for a known artefact, so a second number to tune
     # would be ceremony.
-    if main.BUDGET_ENABLED and not ignore_budget:
-        prior = main._prior_day_spend()
+    if BUDGET_ENABLED and not ignore_budget:
+        prior = _prior_day_spend()
         projected = prior + refine.SEED_BUY_CASE_USD
-        if projected >= main.BUDGET_PER_DAY_USD:
+        if projected >= BUDGET_PER_DAY_USD:
             logger.error(
-                f"[{ticker}] Refusing to start: the {main.BUDGET_DAY_WINDOW_HOURS}h "
-                f"ceiling ${main.BUDGET_PER_DAY_USD:.2f} would be reached "
+                f"[{ticker}] Refusing to start: the {BUDGET_DAY_WINDOW_HOURS}h "
+                f"ceiling ${BUDGET_PER_DAY_USD:.2f} would be reached "
                 f"(${prior:.2f} already spent, this needs about "
                 f"${refine.SEED_BUY_CASE_USD:.2f}). Use --no-budget to override."
             )
@@ -155,8 +159,8 @@ def generate_buy_case(ticker: str, company_name: str = None,
     quarterly_data = fmp_quarterly_trends(ticker)
     # One quote, used for both the figures block the agent reads and the price block
     # its triggers are measured against.
-    price = main._price_snapshot(ticker)
-    verified_figures = main._format_verified_figures(candidate, price)
+    price = _price_snapshot(ticker)
+    verified_figures = _format_verified_figures(candidate, price)
     price_data = buy_case_agent.price_data_block(ticker, price)
     # Logged before anything is billed: the price is what the whole document turns on,
     # and seeing it here is what lets an operator abort a refresh that is about to be
@@ -166,10 +170,10 @@ def generate_buy_case(ticker: str, company_name: str = None,
     # 5. Its own cost row — see the module docstring for why this is not folded into
     # the target run's totals.
     case_run_id = str(uuid.uuid4())
-    main._check_db(db_create_pipeline_run(case_run_id, [ticker]),
+    _check_db(db_create_pipeline_run(case_run_id, [ticker]),
                    "create buy-case run")
 
-    usage = main._new_usage()
+    usage = _new_usage()
     stored = buy_case_agent.write_buy_case(
         target_run, ticker, company_name, report_body, verified_figures,
         quarterly_data, candidate, usage,
@@ -179,15 +183,15 @@ def generate_buy_case(ticker: str, company_name: str = None,
         price_data=price_data,
     )
     if not stored:
-        main._finalize_run(case_run_id, usage, "Buy Case Run", status="FAILED")
+        _finalize_run(case_run_id, usage, "Buy Case Run", status="FAILED")
         return
 
-    main._collect_embedding_usage(usage)
+    _collect_embedding_usage(usage)
     logger.info(
         f"[{ticker}] Buy case stored on run {target_run}. "
         f"`python main.py --buy-check {ticker} --run {target_run}` will now use it."
     )
-    main._finalize_run(case_run_id, usage, "Buy Case Run")
+    _finalize_run(case_run_id, usage, "Buy Case Run")
 
 
 def _origin_note(target_run: str, case_run_id: str) -> str:

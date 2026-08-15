@@ -49,7 +49,17 @@ import json
 
 from google.adk.agents import LlmAgent
 
-import main
+from agents import PIPELINE_INCLUDE_CONTENTS, VERIFIED_FIGURES_MANDATE
+from persistence import _check_db
+from report import (
+    _format_reconciliation_section,
+    _reconcile_agent_figures,
+    reconciliation_warning,
+    _with_run_header,
+)
+from run_log import logger
+from settings import AGENT_MODEL
+from usage import _log_usage, _merge_usage
 from mcp_server import (
     db_store_agent_output,
     fmp_price_snapshot,
@@ -63,7 +73,7 @@ from mcp_server import (
 )
 from critic_agent import run_agent
 
-logger = main.logger
+logger = logger
 
 # The agent output type stored in `agent_outputs`, and the section heading the buy
 # case is written under. Both are referenced from several modules; naming them once
@@ -76,9 +86,9 @@ _here = os.path.dirname(__file__)
 # embed in a state-templated ADK instruction. Adding a brace to either would be read
 # by ADK as a session-state key and would fail the run at template time — there is a
 # test covering this in test_buy_case.py.
-with open(os.path.join(_here, "buy-case-instructions.md"), "r", encoding="utf-8") as f:
+with open(os.path.join(_here, "prompts", "buy-case.md"), "r", encoding="utf-8") as f:
     buy_case_instructions = f.read()
-with open(os.path.join(_here, "buy-check-instructions.md"), "r", encoding="utf-8") as f:
+with open(os.path.join(_here, "prompts", "buy-check.md"), "r", encoding="utf-8") as f:
     buy_check_instructions = f.read()
 
 
@@ -115,7 +125,7 @@ def is_watch(verdict: str) -> bool:
 #   web_search_tool         reported deals, capital-spending plans, analyst commentary.
 buy_case_agent = LlmAgent(
     name="buy_case_agent",
-    model=main.AGENT_MODEL,
+    model=AGENT_MODEL,
     instruction=(
         buy_case_instructions
         + "\n\n## How to run this analysis\n"
@@ -147,7 +157,7 @@ buy_case_agent = LlmAgent(
         "leave it out or write it as **UNVERIFIED (from background knowledge, not "
         "confirmed by a source in this session)**. Never label an unconfirmed item "
         "CONFIRMED — that word means a source in front of you says so.\n\n"
-        + main.VERIFIED_FIGURES_MANDATE
+        + VERIFIED_FIGURES_MANDATE
         + "## The price you are writing against\n"
         "PRICE_DATA below was fetched for this document and is the ONLY price you may "
         "quote as current. Every threshold in Section 5 must be stated against it, "
@@ -187,14 +197,14 @@ buy_case_agent = LlmAgent(
            fmp_revenue_segments, fmp_pending_ma_filings, fmp_company_profile,
            fmp_stock_news, web_search_tool],
     output_key="buy_data",
-    include_contents=main.PIPELINE_INCLUDE_CONTENTS,
+    include_contents=PIPELINE_INCLUDE_CONTENTS,
 )
 
 
 # --- The buy-condition checker (the `--buy-check` counterpart to `--sell-check`) ---
 buy_check_agent = LlmAgent(
     name="buy_check_agent",
-    model=main.AGENT_MODEL,
+    model=AGENT_MODEL,
     instruction=(
         buy_check_instructions
         + "\n\n## How to run this check\n"
@@ -224,7 +234,7 @@ buy_check_agent = LlmAgent(
     tools=[fmp_forward_estimates, fmp_price_snapshot, fmp_earnings_calendar,
            fmp_pending_ma_filings, fmp_stock_news, web_search_tool],
     output_key="buy_check",
-    include_contents=main.PIPELINE_INCLUDE_CONTENTS,
+    include_contents=PIPELINE_INCLUDE_CONTENTS,
 )
 
 
@@ -362,9 +372,9 @@ def write_buy_case(run_id: str, ticker: str, company_name: str, report_body: str
         logger.error(f"[{ticker}] Buy-case advisor failed: {e}")
         return ""
 
-    cost = main._log_usage(f"{ticker} buy case", buy_usage)
+    cost = _log_usage(f"{ticker} buy case", buy_usage)
     if usage is not None:
-        main._merge_usage(usage, buy_usage)
+        _merge_usage(usage, buy_usage)
     if not text.strip():
         logger.warning(f"[{ticker}] Buy-case advisor produced no output; nothing "
                        f"stored. The attempt still cost ${cost:.4f}.")
@@ -376,20 +386,20 @@ def write_buy_case(run_id: str, ticker: str, company_name: str, report_body: str
     # is a wrong number with a long half-life. Findings are appended to the document
     # as well as logged — the log line is seen once, by whoever ran the pipeline; the
     # document is read later, by whoever is deciding.
-    findings = main._reconcile_agent_figures(text, candidate, "Buy case")
+    findings = _reconcile_agent_figures(text, candidate, "Buy case")
     for f in findings:
         logger.warning(
-            main.reconciliation_warning(ticker, f)
+            reconciliation_warning(ticker, f)
         )
     if not findings:
         logger.info(f"[{ticker}] Reconciliation gate passed on the buy case.")
 
-    stored = main._with_run_header(
-        origin_note + text + main._format_reconciliation_section(findings), run_id, ticker
+    stored = _with_run_header(
+        origin_note + text + _format_reconciliation_section(findings), run_id, ticker
     )
     meta = {"ticker": ticker, "triggers": count_triggers(text)}
     meta.update(metadata or {})
-    main._check_db(
+    _check_db(
         db_store_agent_output(run_id, ticker, BUY_CASE_TYPE, stored, json.dumps(meta)),
         f"{ticker} buy case",
     )

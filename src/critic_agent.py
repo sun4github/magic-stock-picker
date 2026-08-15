@@ -18,7 +18,7 @@ FIGURES; nothing catches wrong REASONING.
 
 The critic is deliberately outside that lineage:
 
-- its own instruction file (`critic-instructions.md`), written without reference
+- its own instruction file (`prompts/critic.md`), written without reference
   to the analyst's prompt, so it is not primed to accept the analyst's framing;
 - its own tools (FMP news/profile/metrics/quarterly + Tavily), so it can check the
   report's load-bearing claims against the world rather than against the same
@@ -47,7 +47,22 @@ from google.adk.agents import LlmAgent
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-import main
+from agents import (
+    APP_NAME,
+    PIPELINE_INCLUDE_CONTENTS,
+    _build_runner,
+    _is_rate_limit_error,
+    analyst_agent,
+    resolve_model,
+)
+from run_log import logger
+from settings import (
+    AGENT_MODEL,
+    BASE_BACKOFF_SECONDS,
+    CRITIC_MODEL,
+    MAX_AGENT_RETRIES,
+)
+from usage import _add_event_usage, _check_metered, _new_usage
 from mcp_server import (
     fmp_stock_news,
     fmp_company_profile,
@@ -56,11 +71,11 @@ from mcp_server import (
     web_search_tool,
 )
 
-logger = main.logger
+logger = logger
 
 # The critic's own instruction set. Like the other instruction files it contains no
 # '{' or '}', so it is safe to embed in a state-templated ADK instruction.
-_critic_path = os.path.join(os.path.dirname(__file__), "critic-instructions.md")
+_critic_path = os.path.join(os.path.dirname(__file__), "prompts", "critic.md")
 with open(_critic_path, "r", encoding="utf-8") as f:
     critic_instructions = f.read()
 
@@ -86,7 +101,14 @@ _CRITIC_CONTEXT_BLOCKS = (
 
 critic_agent = LlmAgent(
     name="critic_agent",
-    model=main.AGENT_MODEL,
+    # CRITIC_MODEL, not AGENT_MODEL. It defaults to AGENT_MODEL, so this is the same
+    # model as everything else until `agents.critic_model` is set in config.yaml —
+    # at which point the critic, and ONLY the critic, moves. A reviewer that shares
+    # its target's weights shares its blind spots; see the note in config.yaml.
+    #
+    # `reviser_agent` below deliberately stays on AGENT_MODEL: it is built from
+    # analyst_agent.instruction verbatim, so it IS the analyst revising its own work.
+    model=resolve_model(CRITIC_MODEL),
     instruction=(
         critic_instructions
         + "\n\n## This review\n"
@@ -129,7 +151,7 @@ critic_agent = LlmAgent(
     output_key="critic_review",
     # Same reasoning as the pipeline agents: everything this agent reads is templated
     # from state, so replaying a transcript would only duplicate it at full price.
-    include_contents=main.PIPELINE_INCLUDE_CONTENTS,
+    include_contents=PIPELINE_INCLUDE_CONTENTS,
 )
 
 
@@ -144,10 +166,10 @@ RESPONSE_MARKER = "<<<RESPONSE TO CRITIC>>>"
 
 reviser_agent = LlmAgent(
     name="reviser_agent",
-    model=main.AGENT_MODEL,
+    model=AGENT_MODEL,
     instruction=(
         # Identical rules to the pipeline analyst — see the module docstring.
-        main.analyst_agent.instruction
+        analyst_agent.instruction
         + "\n\n## You are REVISING an existing report\n"
         "You already produced the report in PRIOR_REPORT below. An independent critic, "
         "who did not write it and has its own research tools, has reviewed it; its "
@@ -200,7 +222,7 @@ reviser_agent = LlmAgent(
     ),
     tools=[],
     output_key="revised_report",
-    include_contents=main.PIPELINE_INCLUDE_CONTENTS,
+    include_contents=PIPELINE_INCLUDE_CONTENTS,
 )
 
 
@@ -397,16 +419,16 @@ async def _run_agent_async(agent, state: dict, message_text: str, usage: dict) -
     session_service = InMemorySessionService()
     session_id = f"refine:{agent.name}:{uuid.uuid4().hex[:8]}"
     await session_service.create_session(
-        app_name=main.APP_NAME, user_id="critic_loop", session_id=session_id, state=state,
+        app_name=APP_NAME, user_id="critic_loop", session_id=session_id, state=state,
     )
-    runner = main._build_runner(agent, session_service)
+    runner = _build_runner(agent, session_service)
     message = types.Content(role="user", parts=[types.Part(text=message_text)])
     async for event in runner.run_async(
         user_id="critic_loop", session_id=session_id, new_message=message
     ):
-        main._add_event_usage(usage, event)
+        _add_event_usage(usage, event)
     final = await session_service.get_session(
-        app_name=main.APP_NAME, user_id="critic_loop", session_id=session_id
+        app_name=APP_NAME, user_id="critic_loop", session_id=session_id
     )
     return dict(final.state) if final else {}
 
@@ -418,17 +440,18 @@ def run_agent(agent, state: dict, message_text: str) -> tuple:
     rate-limited attempt are counted rather than dropped — the loop's budget guard
     reads this number, and a guard fed an understated cost is not a guard.
     """
-    usage = main._new_usage()
-    for attempt in range(main.MAX_AGENT_RETRIES):
+    usage = _new_usage()
+    for attempt in range(MAX_AGENT_RETRIES):
         try:
             state_out = asyncio.run(_run_agent_async(agent, state, message_text, usage))
+            _check_metered(agent.name, usage)
             return (state_out.get(agent.output_key, "") or ""), usage
         except Exception as e:
-            if main._is_rate_limit_error(e) and attempt < main.MAX_AGENT_RETRIES - 1:
-                wait = main.BASE_BACKOFF_SECONDS * (2 ** attempt)
+            if _is_rate_limit_error(e) and attempt < MAX_AGENT_RETRIES - 1:
+                wait = BASE_BACKOFF_SECONDS * (2 ** attempt)
                 logger.warning(
                     f"{agent.name} rate limited (429). Backing off {wait}s "
-                    f"(attempt {attempt + 1}/{main.MAX_AGENT_RETRIES})."
+                    f"(attempt {attempt + 1}/{MAX_AGENT_RETRIES})."
                 )
                 time.sleep(wait)
                 continue

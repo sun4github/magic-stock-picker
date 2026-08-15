@@ -194,6 +194,36 @@ CREATE TABLE verdict_log (
     -- question rather than an assumption.
     verdict_stage VARCHAR(16) NOT NULL DEFAULT 'INDEPENDENT'
         CHECK (verdict_stage IN ('INDEPENDENT', 'POST_CRITIC', 'MEMORY')),
+    -- Who made this call. PIPELINE is a verdict this system reasoned its way
+    -- to; anything else is a purchase made on an outside recommendation,
+    -- recorded here so it can be measured on the same arithmetic.
+    --
+    -- This is what makes the ledger answer a question it otherwise could not:
+    -- most of the money in this household follows external picks, and without
+    -- a row for them there is nothing to compare the pipeline against except
+    -- the index. External rows carry NULL prompt_version and git_sha (no
+    -- prompt produced them) and usually no verdict_basis rows (no factors were
+    -- articulated) — both are expected, not missing data.
+    --
+    -- EVERY query that computes a base rate for this system MUST filter on
+    -- source = 'PIPELINE'. An external pick counted as a pipeline verdict
+    -- credits or blames the screen for a decision it never made, which is the
+    -- one error that invalidates the whole scoreboard. See ledger-queries.sql.
+    source VARCHAR(32) NOT NULL DEFAULT 'PIPELINE',
+    -- Set only when the position behind this row was SOLD. Their presence means
+    -- the result is final: the snapshot job stops marking the row to market, and
+    -- the last verdict_outcome row is the one priced at the exit.
+    --
+    -- Without these, a sold position could only be measured to today's price —
+    -- a return nobody earned — so closed picks had to be excluded from the
+    -- scoreboard altogether. That is not a neutral omission: the picks that go
+    -- wrong are the ones most likely to have been sold, so leaving them out
+    -- makes every average read better than the record actually was.
+    --
+    -- Kept here rather than read from the position tracker so this repo stays
+    -- able to run without one (see ledger-queries.sql Q5).
+    exit_date DATE,
+    exit_price NUMERIC(14, 4),
     -- Point-in-time snapshot. Duplicated from run_universe rather than joined
     -- to it because an on-demand single-ticker run has no universe row at all,
     -- and because a verdict must stay gradeable if its run is ever deleted.
@@ -354,6 +384,16 @@ CREATE INDEX idx_verdict_log_date ON verdict_log(verdict_date DESC);
 -- Base rates are computed per (verdict, prompt version): mixing versions is the
 -- one comparison the ledger must never make silently.
 CREATE INDEX idx_verdict_log_verdict ON verdict_log(verdict, prompt_version);
+-- The head-to-head read path: "every external pick, oldest first".
+CREATE INDEX idx_verdict_log_source ON verdict_log(source, verdict_date DESC);
+-- What makes the external-pick sync safe to re-run. A purchase is identified by
+-- (source, ticker, purchase date), so a second sync conflicts instead of
+-- entering the same buy twice and letting one position count double in every
+-- average. Partial, because the pipeline legitimately reaches several verdicts
+-- for one ticker on one day (INDEPENDENT and POST_CRITIC) and must not be
+-- constrained by this.
+CREATE UNIQUE INDEX idx_verdict_log_external_dedup
+    ON verdict_log(source, ticker, verdict_date) WHERE source <> 'PIPELINE';
 -- The factor-level base rate — "every time we cited X, what happened" — is the
 -- ledger's primary read, and it starts from the factor rather than the ticker.
 CREATE INDEX idx_verdict_basis_factor ON verdict_basis(factor_key, stance);

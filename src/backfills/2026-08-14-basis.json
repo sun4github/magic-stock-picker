@@ -1,0 +1,102 @@
+[
+  {
+    "ticker": "CROX",
+    "run_id": "c6ec224e-ed16-4826-aeff-307b542837d7",
+    "factors": [
+      {"factor_key": "organic_growth_declining", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "Revenue growth decelerated from +11.5% in FY2023 to +3.0% in FY2024 to +1.5% in FY2025. Top-line growth has stalled to low single digits while the multiple still rests on prior earnings power."},
+      {"factor_key": "margin_compression", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "Operating margin fell from 26.4% to 22.0% over two years, more than 400bps, on higher SG&A and markdowns at HEYDUDE. Free cash flow contracted from $948.8M in 2024 to $756.2M in 2025."},
+      {"factor_key": "acquisition_track_record_poor", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "HEYDUDE was bought for $2.5B near the top of the market and has since seen declining sales, wholesale cancellations and inventory markdowns. Management committed roughly $2B of debt to an asset that now drags enterprise profitability."},
+      {"factor_key": "cyclical_peak_earnings", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "The bear case argues the ~8x P/E and #25 Magic Formula rank are backward-looking signals reflecting historical peak earnings rather than future earnings power. Explicitly flagged as a classic value trap setup."},
+      {"factor_key": "OTHER_single_product_concentration", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "Earnings power depends overwhelmingly on one silhouette, the Classic Clog, and one proprietary resin, Croslite. HEYDUDE is too weak to cushion a collapse in core clog demand, leaving no secondary product pillar."},
+      {"factor_key": "supplier_concentration", "stance": "BEAR", "materiality": "MEDIUM",
+       "observation": "Roughly 45% of Crocs Brand and 44% of HEYDUDE production sits in Vietnam, with most of the remainder in China, via third-party factories. Near-zero domestic manufacturing flexibility in a rising tariff environment."},
+      {"factor_key": "moat_brand_or_network", "stance": "BULL", "materiality": "HIGH",
+       "observation": "Twenty-plus years as a public company across multiple cycles, with over 48% of Crocs Brand sales outside the US and China growing 30% in 2025. The bull case argues this is a global category creator aligned to casualization and personalization, not a pandemic fad."},
+      {"factor_key": "pricing_power_demonstrated", "stance": "BULL", "materiality": "HIGH",
+       "observation": "Gross margin near 57% is among the highest in global footwear, giving unusual room to absorb trade friction. Crocs absorbed a 130-150bps tariff headwind in 2025 and still delivered a 22.3% adjusted operating margin."},
+      {"factor_key": "buyback_accretive", "stance": "BULL", "materiality": "HIGH",
+       "observation": "Roughly 10% of the float was retired in 2025 at a mid-single-digit multiple, with capacity to repurchase 5-8% of shares annually on $650-700M of free cash flow. Net leverage sits at the low end of the 1.0x-1.5x EBITDA target."},
+      {"factor_key": "expectations_already_low", "stance": "BULL", "materiality": "HIGH",
+       "observation": "At roughly 8x P/E the market is pricing a low-growth mature business, so the stock only needs 2-3% revenue growth and ~20% operating margins to justify the price. It does not require high growth to work."}
+    ]
+  },
+  {
+    "ticker": "VNT",
+    "run_id": "c6ec224e-ed16-4826-aeff-307b542837d7",
+    "factors": [
+      {"factor_key": "organic_growth_declining", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "FY2026 revenue is forecast to contract 1.4%, and total revenue of $3.08B remains below the $3.18B posted in 2022. Software gains are replacing lost hardware revenue rather than adding to it."},
+      {"factor_key": "end_market_secular_decline", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "Over 45% of revenue is tied to legacy fossil-fuel dispensing hardware and underground tank monitoring. As EV adoption scales, the terminal value of these core assets continuously shrinks."},
+      {"factor_key": "leverage_elevated", "stance": "BEAR", "materiality": "MEDIUM",
+       "observation": "$2.09B of total debt against a $5.45B market cap, with interest expense above $100M annually consuming cash that could fund buybacks or software acquisitions. Refinancing windows are the sudden-risk scenario."},
+      {"factor_key": "competitive_intensity_rising", "stance": "BEAR", "materiality": "MEDIUM",
+       "observation": "Expanding Invenco, DRB and Driivz means competing with enterprise POS players such as NCR Voyix and Toast. Elevated software R&D and customer acquisition costs could compress consolidated operating margins."},
+      {"factor_key": "moat_switching_costs", "stance": "BULL", "materiality": "HIGH",
+       "observation": "Invenco and DRB are pre-integrated into forecourt hardware and regulatory compliance systems, which the bull case argues makes switching costs prohibitively high. Roughly 30% of revenue is already recurring SaaS, processing and services."},
+      {"factor_key": "OTHER_regulatory_mandated_demand", "stance": "BULL", "materiality": "MEDIUM",
+       "observation": "Underground tank leak monitoring and PCI/EMV data security mandates force convenience stores to maintain upgrade cycles regardless of broader capex budgets. This partially decouples revenue from discretionary equipment spending."},
+      {"factor_key": "margin_expansion", "stance": "BULL", "materiality": "MEDIUM",
+       "observation": "Operating margins are guided from 18.26% toward 19.5-20.0% on software mix shift and Vontier Business System efficiencies. Gross margins already expanded from 44.8% to 47.8% across the 2022-2024 inflation spike."},
+      {"factor_key": "buyback_accretive", "stance": "BULL", "materiality": "HIGH",
+       "observation": "Directing roughly $300M per year into repurchases at about 10x free cash flow shrinks the share count 5-6% annually. On $400-450M of annual FCF this compounds EPS at 8-12% per year without any revenue acceleration."},
+      {"factor_key": "expectations_already_low", "stance": "BULL", "materiality": "HIGH",
+       "observation": "Trading at 10.5x forward earnings and roughly 9x expected FCF, well below the $41.20 consensus target, on a 9.51% earnings yield and 152.94% ROC. The bull case frames this as a classic Magic Formula mispricing."}
+    ]
+  },
+  {
+    "ticker": "CRMD",
+    "run_id": "e8742f3a-c097-4d08-b8a0-bc84cde1645b",
+    "factors": [
+      {"factor_key": "one_time_earnings_distortion", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "TTM operating profit of $193.67M reflects the TDAPA window, during which DefenCath was reimbursed at 100% ASP. The bear case calls the resulting 235% ROC and 35.05% earnings yield screening artifacts rather than durable earnings power."},
+      {"factor_key": "regulatory_overhang", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "TDAPA expired on 1 July 2026 and CMS reimbursement drops sharply for Q3/Q4 2026. Dialysis clinics operating under fixed bundle payments may cut utilization or demand net pricing near $50/vial against a $250 WAC."},
+      {"factor_key": "goodwill_heavy_balance_sheet", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "$398.77M of goodwill and acquired intangibles from the Melinta deal represents 48.9% of total assets of $815.64M. Underperformance would trigger large non-cash impairment charges."},
+      {"factor_key": "catalyst_speculative", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "Replacing dialysis revenue depends on the Phase 3 ReSPECT readout for REZZAYO in Q2 2026 and a Phase 3 TPN readout in 2027. Either missing its primary endpoint would remove the main long-term growth driver."},
+      {"factor_key": "net_cash_position", "stance": "BULL", "materiality": "HIGH",
+       "observation": "$178.09M of cash and short-term investments against $147.41M of total debt is a net cash position of +$30.68M as of 31 March 2026. FY2025 free cash flow of $175.8M could extinguish the entire debt balance in under twelve months."},
+      {"factor_key": "catalyst_confirmed", "stance": "BULL", "materiality": "HIGH",
+       "observation": "Multi-year supply agreements already cover roughly 60% of US outpatient dialysis centers, and a June 2026 Federal Circuit win upheld MINOCIN IV patent validity. CMS methodology sets the 2027 post-TDAPA add-on at 3x to 5x the temporary H2 2026 rate."},
+      {"factor_key": "pricing_power_demonstrated", "stance": "BULL", "materiality": "MEDIUM",
+       "observation": "A single CRBSI event costs $63,000 in acute hospitalization and DefenCath cuts hospitalizations by about 70%. Providers under value-based or risk-sharing contracts therefore have a direct economic reason not to drop it."},
+      {"factor_key": "expectations_already_low", "stance": "BULL", "materiality": "HIGH",
+       "observation": "An enterprise value of $552.62M is under 2.9x TTM EBIT and 3.1x FY2025 free cash flow. The bull case argues the market is pricing CRMD as if post-TDAPA net income falls to zero."}
+    ]
+  },
+  {
+    "ticker": "WEX",
+    "run_id": "68f13b34-bd67-42a2-a984-55b2ea8841dc",
+    "factors": [
+      {"factor_key": "end_market_secular_decline", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "Over 55% of revenue comes from commercial fleet fuel cards tied to a closed-loop gas station network. As fleets electrify, fueling moves to depots and homes, forcing WEX to compete on lower-margin open-loop processing."},
+      {"factor_key": "leverage_elevated", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "$5.36B of total debt with interest coverage of just 2.8x and interest expense above $52M per quarter. The bear case notes the $6.10B cash balance is largely restricted custodial float and bank deposits, not unencumbered cash."},
+      {"factor_key": "buyback_funded_by_debt", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "Roughly 13% of shares were repurchased in 2025, funded by $550M of 6.500% senior unsecured notes and $450M of term loans. Buying back stock with high-cost debt while organic growth decelerates to ~5% is characterised as unsustainable financial engineering."},
+      {"factor_key": "goodwill_heavy_balance_sheet", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "Goodwill and acquired intangibles of $4.08B are 24.7% of total assets and over 300% of shareholders' equity of $1.34B. Magic Formula ROC of 274.86% excludes intangibles; including them drops true ROIC to 118.56%."},
+      {"factor_key": "free_cash_flow_conversion_weak", "stance": "BEAR", "materiality": "HIGH",
+       "observation": "Q2 2026 showed operating cash flow of -$78M and free cash flow of -$121M despite $108M of reported net income. Quarterly cash generation is highly volatile against a fixed interest burden."},
+      {"factor_key": "customer_or_end_market_credit_risk", "stance": "BEAR", "materiality": "MEDIUM",
+       "observation": "WEX Bank extends short-term credit to small freight and service fleets. A freight recession would spike default rates while interest expense stays fixed."},
+      {"factor_key": "net_cash_position", "stance": "BULL", "materiality": "HIGH",
+       "observation": "The bull case reads $6.10B of cash and short-term investments against $5.36B of debt as a net cash position of +$743M, with enterprise value of $5.49B below the $6.24B market cap. This is directly disputed by the bear case, which treats that balance as restricted custodial float."},
+      {"factor_key": "buyback_accretive", "stance": "BULL", "materiality": "HIGH",
+       "observation": "Repurchasing 13% of shares at roughly 9x forward adjusted EPS buys a ~13% intrinsic earnings yield against a ~4.7% after-tax cost of debt. On that spread the bull case treats the buyback as textbook value creation rather than engineering."},
+      {"factor_key": "margin_expansion", "stance": "BULL", "materiality": "HIGH",
+       "observation": "Corporate Payments and Benefits SaaS carry gross margins above 65% and are compounding faster than fuel cards. Management guided to more than 100bps of YoY operating margin expansion in H2 2026, helped by generative AI in fraud, underwriting and support."},
+      {"factor_key": "moat_switching_costs", "stance": "BULL", "materiality": "MEDIUM",
+       "observation": "WEX launched a unified RFID fleet card processing both petroleum fueling and DC fast-charging across CPOs including Electric Era, Greenlane and Synop. Mixed-energy fleets want one control dashboard, which embeds WEX software deeper rather than displacing it."},
+      {"factor_key": "expectations_already_low", "stance": "BULL", "materiality": "HIGH",
+       "observation": "Roughly 9x forward adjusted earnings against a historical average nearer 18-22x, on a 12.96% earnings yield. A modest re-rating alone would roughly double the stock without top-line acceleration."}
+    ]
+  }
+]

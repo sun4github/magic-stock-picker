@@ -134,7 +134,10 @@ def main():
         ratio = args.actual / test
         print(f"actual ${args.actual:.4f} vs estimated ${test:.4f}  ->  {ratio:.2f}x off")
         print()
-        from main import MODEL_PRICES  # imported late: pulls in the whole pipeline
+        # `settings` reads config.yaml and nothing else. This used to import `main`
+        # for the same table, which dragged in ADK, pandas and edgartools to print a
+        # price list.
+        from settings import MODEL_PRICES
         for model, entry in MODEL_PRICES.items():
             p_in = float(entry.get("input_usd_per_1m", 0))
             p_out = float(entry.get("output_usd_per_1m", 0))

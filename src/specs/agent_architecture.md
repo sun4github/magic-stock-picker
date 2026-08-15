@@ -52,16 +52,16 @@ flowchart TD
     subgraph PerTicker["Phase B + C — per ticker (analyze_ticker)"]
         direction TB
         Gather["Direct tool calls (no LLM):\nSEC 10-K, FMP metrics,\nquarterly trends, verified figures"]
-        Gather --> Bear["Bear Agent\n(research-instructions.md)"]
-        Bear -->|bear_data| Bull["Bull Agent\n(bullish-research-instructions.md)"]
+        Gather --> Bear["Bear Agent\n(prompts/bear.md)"]
+        Bear -->|bear_data| Bull["Bull Agent\n(prompts/bull.md)"]
         Bull -->|bull_data| Analyst["Analyst Agent\n(neutral judge)"]
-        Analyst -->|final_report| SaleAdvisor["Sale Advisor Agent\n(sale-advisor-instructions.md)\nskippable: --skip-sale-advisor"]
+        Analyst -->|final_report| SaleAdvisor["Sale Advisor Agent\n(prompts/sale-advisor.md)\nskippable: --skip-sale-advisor"]
     end
 
     PhaseB --> PerTicker
     PerTicker --> Persist["Persist to Postgres:\nagent_outputs, final_reports,\nticker_runs"]
     Persist --> VerdictGate{"Verdict == Watch?"}
-    VerdictGate -->|"yes (and not --skip-buy-case)"| BuyCase["Phase E: Buy Case Agent\n(buy-case-instructions.md)\nforward estimates, earnings calendar,\nsegments, M&A filings, live price"]
+    VerdictGate -->|"yes (and not --skip-buy-case)"| BuyCase["Phase E: Buy Case Agent\n(prompts/buy-case.md)\nforward estimates, earnings calendar,\nsegments, M&A filings, live price"]
     VerdictGate -->|"Buy / Avoid"| Reports
     BuyCase --> Reports["Write reports/*.md"]
 
@@ -95,8 +95,8 @@ flowchart TD
    These are gathered once and seeded into session state (`sec_data`, `metrics_data`, `quarterly_data`, `verified_figures`, `screen_context`) for the three reasoning agents below.
 
    **Reasoning — three roles run in sequence over one shared session (bear, then bull, then the neutral judge):** implemented as a plain ordered list of `LlmAgent`s run one after another against the same ADK session (`output_key` handoff), not ADK's `SequentialAgent` class — see §5B "Per-agent retry" for why: it lets a mid-graph 429 retry only the role that failed instead of re-running (and re-paying for) every role before it.
-   - **Agent 1: Bear Agent** — instruction = `research-instructions.md` (skeptical). Uses `fmp_stock_news` + `web_search_tool` (Tavily, bear queries) plus the SEC/metrics data to build the **bear case** → `state['bear_data']`.
-   - **Agent 2: Bull Agent** — instruction = `bullish-research-instructions.md`. Runs **after** the bear agent (its Section 4 directly refutes the bear case). Uses `fmp_stock_news` + `web_search_tool` (Tavily, bull queries) plus SEC/metrics/`screen_context` to build the **bull case** → `state['bull_data']`.
+   - **Agent 1: Bear Agent** — instruction = `prompts/bear.md` (skeptical). Uses `fmp_stock_news` + `web_search_tool` (Tavily, bear queries) plus the SEC/metrics data to build the **bear case** → `state['bear_data']`.
+   - **Agent 2: Bull Agent** — instruction = `prompts/bull.md`. Runs **after** the bear agent (its Section 4 directly refutes the bear case). Uses `fmp_stock_news` + `web_search_tool` (Tavily, bull queries) plus SEC/metrics/`screen_context` to build the **bull case** → `state['bull_data']`.
    - **Agent 3: Analyst Agent (Neutral Judge)** — carries **no** skeptical prompt. Weighs `bear_data` vs `bull_data` (plus `screen_context`, `quarterly_data`, `verified_figures`) and emits a combined Markdown report with `## Recent Quarter Check`, `## Bull Case`, `## Bear Case`, `## Final Verdict`, and `## What Would Make This Wrong` sections.
         - **Recent Quarter Check (written first):** reports what the most recent quarter did year-over-year and states whether it **confirms or contradicts** the longer-term picture the two cases argue over. The verdict may not be reached without addressing a contradiction.
         - **Verdict:** exactly one of `Buy` / `Watch` / `Avoid`, written for an investor who does **not** currently own the stock (Buy = passes the screen on its own merits; Watch = not compelling now / watchlist; Avoid = actively unattractive), with a one-paragraph justification of how the two cases net out.
@@ -142,13 +142,13 @@ flowchart TD
 
 3. **Phase C: Sale Advisory** (per ticker)
    **Sale advisor - a agent that finds advserse business events:**
-   - **Agent: Sale Advisor agent**: - instruction = `sale-advisor-instructions.md`. Uses `fmp_stock_news` + `web_search_tool` (Tavily)
+   - **Agent: Sale Advisor agent**: - instruction = `prompts/sale-advisor.md`. Uses `fmp_stock_news` + `web_search_tool` (Tavily)
    - **Thresholds must be anchored.** Every numeric sell trigger has to be derived from `verified_figures` or `quarterly_data`, and the report must print the **current actual value beside each threshold** ("total debt above $32B — currently $29.3B"). A trigger calibrated off a wrong baseline is worse than no trigger: it silently cannot fire. This is not hypothetical — see §2.E.
 
 3b. **Phase E: Buy Case** (per ticker, `Watch` verdict ONLY — see §12)
    **Buy-case advisor — the entry conditions a 'Watch' leaves unstated:**
    - **Agent: Buy Case Agent** (`src/buy_case_agent.py`) — instruction =
-     `buy-case-instructions.md`. Runs AFTER the reasoning graph, not inside it, because
+     `prompts/buy-case.md`. Runs AFTER the reasoning graph, not inside it, because
      it is conditional on a verdict that only exists once `_extract_verdict` has read
      the analyst's finished prose. Skippable with `--skip-buy-case`.
    - **The only forward-looking role in the system.** It reads analyst consensus
@@ -172,7 +172,7 @@ flowchart TD
 
 5. **Buy-Condition Check** (on-demand, single stock — Phase E follow-up)
    **Buy-condition evaluator — tests whether the stored buy triggers are now met:**
-   - **Agent: Buy Check Agent** — instruction = `buy-check-instructions.md`. Loads a
+   - **Agent: Buy Check Agent** — instruction = `prompts/buy-check.md`. Loads a
      stored `BUY_CASE` via `db_get_buy_case(ticker, run_id)`, fetches the **current
      price** by direct call (the authority for the price trigger — never a price
      quoted inside the stored buy case, which is the baseline it was written at),
@@ -1088,8 +1088,8 @@ Phase B distinguishes **data-relay** steps from **reasoning** steps:
   100% data fidelity (no LLM summarization) and costs zero tokens.
 - **Reasoning — an ordered list of four `LlmAgent` roles run over one shared
   ADK session (`PIPELINE_AGENTS` in `main.py`), not ADK's `SequentialAgent`
-  class:** `bear_agent` (`research-instructions.md`, → `bear_data`) →
-  `bull_agent` (`bullish-research-instructions.md`, → `bull_data`; runs after
+  class:** `bear_agent` (`prompts/bear.md`, → `bear_data`) →
+  `bull_agent` (`prompts/bull.md`, → `bull_data`; runs after
   bear so §4 can refute it) → `analyst_agent` (neutral judge → `final_report`)
   → `sale_advisor_agent` (Phase C, → `sale_data`). Both advocates read
   `{sec_data}` / `{metrics_data}` / `{screen_context}`; the bull agent also
@@ -1104,7 +1104,7 @@ Phase B distinguishes **data-relay** steps from **reasoning** steps:
   §5B "Per-agent retry".
 
 Phase C makes predictive analysis and uses **reasoning**:
-(`sale-advisor-instructions.md` + FMP news search + Web search) -> `SALE_CASE`; runs after Phase B is complete and `analyst_agent`
+(`prompts/sale-advisor.md` + FMP news search + Web search) -> `SALE_CASE`; runs after Phase B is complete and `analyst_agent`
 produced its final analyst report. Uses the Investment thesis from final analyst report (in context with output key `final_report`). 
 Ignores the verdict, assumes that the stock is purchased and advises on sale conditions for that stock.
 
@@ -1903,7 +1903,7 @@ loop terminate (§C, §D), and how it avoids paying to relitigate settled ground
 
 Implementation: [`critic_agent.py`](../critic_agent.py) (agents + parsers),
 [`refine.py`](../refine.py) (loop, spend control, CLI),
-[`critic-instructions.md`](../critic-instructions.md) (the critic's prompt).
+[`prompts/critic.md`](../prompts/critic.md) (the critic's prompt).
 Developer walkthrough: [`docs/09-critic-and-refinement-loop.md`](../../docs/09-critic-and-refinement-loop.md).
 
 ### A. The gap it closes
@@ -1937,6 +1937,24 @@ its prompt:
 - It **does** get the bear and bull cases the analyst was given, because "the
   summary misrepresents the case" and "the summary drops its strongest point" are
   both real findings and neither is checkable without the originals.
+
+- **Optionally its own MODEL.** `agents.critic_model` in `config.yaml` points the
+  critic at a different model from `agents.model`; empty means the same one, which
+  is the default. Everything above makes the critic independent in what it SEES,
+  but a critic sharing the analyst's weights still shares its blind spots — if the
+  analyst's model misreads a disclosure a certain way, the same model reviewing it
+  tends to misread it the same way. A different lineage decorrelates the errors,
+  which is the one axis of independence a prompt cannot buy.
+
+  Only the critic moves. `reviser_agent` stays on `agents.model` because it IS the
+  analyst revising (below), so a model swap changes who CHALLENGES a report, never
+  who writes it. A replacement needs tool calling and a long context; a bare model
+  name is read by ADK as a Gemini model, so anything else carries a LiteLLM-style
+  `provider/model` prefix that `agents.resolve_model()` routes on.
+
+  Measured on five reports (2026-08-15, `ollama_chat/glm-5.2:cloud`): one clean
+  pass, one BLOCKING, three in between — neither a rubber stamp nor a noise
+  generator. See `docs/09` for the table and the caveats.
 
 `reviser_agent` inherits `analyst_agent.instruction` **verbatim** — see §11.E.
 
@@ -2020,6 +2038,23 @@ MINOR by title, with its "Required fix" line carried verbatim (`finding_summary`
 because a MINOR reaches the reader only when it was NOT corrected, so what the reader
 needs is the fix that never happened, not a critique of prose they are about to
 read). A clean agreement with zero findings still says nothing extra.
+
+**The UN-agreed banner is the mirror of that, and is deliberately narrow.** It lists
+only the blocking and material objections still STANDING — title and one-line summary
+— then names the run whose `CRITIC_REVIEW` output holds the full review. It does not
+reproduce the review itself, and it does not repeat MINOR findings, which by
+definition did not block and therefore are not standing.
+
+That is a correction made 2026-08-15. The banner previously pasted the critic's
+entire final review underneath, including its "Independent Verification" section —
+the list of everything the critic checked and found CORRECT. On a live NLST run with
+a single material objection that meant six paragraphs of successful verification
+sitting beneath a warning header, and grew the document from 15.8KB to 24.1KB. It
+inverted the signal the banner exists to send: a reader skimming saw a wall of critic
+prose and inferred a heavily disputed report, when most of that prose said the
+opposite. The full review is stored either way, so nothing was lost by pointing at it
+instead of pasting it — the same reasoning as the MINOR listing above, applied in the
+other direction. Say what is unresolved, and no more.
 
 The original run's rows and report file are left untouched. The refinement gets its
 own `run_id`, its own `pipeline_runs` cost row, and its own `final_reports` row with
@@ -2159,7 +2194,7 @@ Three things prevent it, and they are deliberately in three different places:
    computed today. It is the only signal available: `strip_generated_sections` removes
    the report's own `## Price` section before review, so without this neither agent can
    tell that the prose and the figures are from different days.
-2. **A rule in `critic-instructions.md`'s agent block** — a market-derived figure that
+2. **A rule in `prompts/critic.md`'s agent block** — a market-derived figure that
    has merely *moved* is not an error and must not be raised as one, however large the
    gap; a mismatch in a filing-derived figure still is. Where the valuation has moved
    far enough to change the argument, that is a finding about the **reasoning**, not a
@@ -2194,7 +2229,7 @@ for real, against `refinement.max_budget_usd: 2.00`:
 | Ticker | Source verdict | Rounds | Cost | Finding |
 | :--- | :--- | ---: | ---: | :--- |
 | HRB | Buy | 1, AGREE | $0.1248 | MINOR — Q3 net income +17.4% was inflated by an $84.1M one-off IRS settlement; not visible in any feed the pipeline gives its agents (`fmp_quarterly_trends` returns figures, not 10-Q narrative). |
-| LLY | Watch | 1, AGREE | $0.0959 | MINOR — "What Would Make This Wrong" named no specific quarter (`critic-instructions.md`'s "Unfalsifiable 'What Would Make This Wrong'" checklist item). |
+| LLY | Watch | 1, AGREE | $0.0959 | MINOR — "What Would Make This Wrong" named no specific quarter (`prompts/critic.md`'s "Unfalsifiable 'What Would Make This Wrong'" checklist item). |
 | FISV | Watch | 2, AGREE after 1 revision | $0.2556 | BLOCKING — cited Magic Formula ROC (136.73%) alone on a company where goodwill is 59.1% of assets; goodwill-inclusive ROIC is 9.4%, §2.F exactly. Plus 1 MATERIAL (market cap/P-E contradicted VERIFIED_FIGURES) and 2 MINOR. All four fixed in one revision; round 2 returned zero findings. |
 
 FISV is the load-bearing case: its report was written on 2026-07-24, **before** the
@@ -2280,7 +2315,7 @@ paraphrase from memory three sections later.
 
 ### E. The output contract
 
-Seven sections, fixed (`buy-case-instructions.md`): why this is a Watch; the forward
+Seven sections, fixed (`prompts/buy-case.md`): why this is a Watch; the forward
 valuation; what analysts expect (growth and deals); the ecosystem; **the buy
 triggers**; what would take it off the watchlist; how to use it. Section 5 is the one
 that gets checked later, and the rules that make it checkable are:

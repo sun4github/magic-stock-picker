@@ -11,7 +11,7 @@
 ## 1. Capital Allocation & Compounding Efficiency
 *Focus strictly on how Earnings Yield and ROC prove superior value generation.*
 
-1. **ROC Reinvestment Potential:** Given the provided ROC of [Insert %], how effectively can the company reinvest its free cash flow back into the business at these high rates of return to compound earnings over the next 3–5 years?
+1. **ROC Reinvestment Potential:** Given the provided ROC of [Insert %], how effectively can the company reinvest its free cash flow back into the business at these high rates of return to compound earnings over the next 3â€“5 years?
     * *(Example: If a company has a 25% ROC, reinvesting $10M of earnings generates an additional $2.5M in operating profit each year, creating a powerful compounding engine that lower-ROC competitors cannot match.)*
 2. **Earnings Yield Value Disconnect:** How does the provided Earnings Yield of [Insert %] indicate that the market is mispricing the company's underlying earnings power relative to prevailing interest rates or industry peers?
 
@@ -35,3 +35,19 @@
 2. **Risk Mitigation & Balance Sheet Defense:** For the top three risks identified in the Bear Case report, what specific balance sheet strengths, capital flexibility, or management hedges ensure these risks will not impair long-term shareholder value?
     * *(Example: If the Bear Case cites high interest rates as a primary threat, a Bull Case refutation would show that 90% of the company's debt is locked into fixed long-term rates below 4% and backed by strong net cash flow.)*
 3. **Historical Resilience:** What past instances demonstrate the company successfully navigating and emerging stronger from the exact macro or industry downturns feared by bears?
+
+
+## How to run this research
+You are building the BULL case for {company_name} ({ticker}). The required inputs — Earnings Yield, ROC, and the PEG growth test — are in MAGIC_FORMULA_CONTEXT below, and the Bear Case Research Output is in BEAR_CASE below. Use your tools: call fmp_stock_news for positive catalysts, and web_search_tool for bull-thesis evidence (moat/pricing power, growth catalysts, historical resilience). Answer every bullish question above; for Section 4, directly refute the specific points raised in BEAR_CASE. Do not invent facts; cite sources.
+
+<<RECENCY_MANDATE>>A refutation that ignores a deteriorating recent quarter is not a refutation. Where the bear case cites recent-quarter weakness, either explain concretely why it is temporary (naming the specific mechanism and when it reverses) or concede it.
+
+<<VERIFIED_FIGURES_MANDATE>>If the BEAR_CASE states a figure that contradicts VERIFIED_FIGURES, correct it explicitly in your Section 4 rather than arguing against the wrong number.
+
+## Distinguish confirmed from speculative
+When your case rests on a catalyst, label it: CONFIRMED (already reported, contracted, or filed) or SPECULATIVE (rumoured transaction, press report of talks, management target for a future year, analyst projection). State each catalyst's label inline. A rumoured deal is optionality, not a plan.
+
+<<REFERENCE_DATA_BLOCKS>><<RESEARCH_SOURCE_BLOCKS>>
+<BEAR_CASE>
+{bear_data}
+</BEAR_CASE>

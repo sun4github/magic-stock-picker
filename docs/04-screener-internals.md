@@ -4,7 +4,7 @@ Primary file:
 [`src/magic_formula_starter_screener.py`](../src/magic_formula_starter_screener.py)
 (1,172 lines). Runs as a plain script (`main()`) invoked either directly
 (`python magic_formula_starter_screener.py`) or wrapped by
-`run_magic_formula_screener` in `mcp_server.py:40`. Its output — a ranked CSV
+`run_magic_formula_screener` in `data/screener.py:35`. Its output — a ranked CSV
 — is the sole hand-off to Phase B; there is no in-memory sharing between this
 script and `main.py` beyond that file (and, for a single ticker, the
 `compute_company_metrics_detailed` function imported directly).
@@ -25,7 +25,7 @@ checks at each gate site below.
 important because `mcp_server.py` and `webapp/app.py` both need to find the
 same stable file regardless of where the process was launched from.
 
-## `fmp_get`, `magic_formula_starter_screener.py:132-173`
+## `fmp_get`, `magic_formula_starter_screener.py:175-216`
 
 Shared HTTP helper (also used by `compute_company_metrics_detailed`). Retries
 transient failures — timeouts, `RETRYABLE_STATUS = {429, 500, 502, 503,
@@ -106,7 +106,7 @@ flowchart TD
 ## Metrics computation, `compute_company_metrics_detailed`, `:395-683`
 
 The core per-company math (called once per survivor of gate 1, and directly
-by `compute_ticker_magic_metrics` in `mcp_server.py:61` for on-demand
+by `compute_ticker_magic_metrics` in `data/screener.py:56` for on-demand
 tickers). Returns `{"ok": False, "reason": ..., "message": ...}` on any
 disqualifying condition instead of raising, via the `_skip()` helper
 (`:388-394`), so callers can render *why* a company or ticker has no ratios.

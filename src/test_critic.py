@@ -15,7 +15,8 @@ model prose. The two failures that matter:
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'webapp'))
 
-import main
+from agents import sale_advisor_agent
+from settings import BUDGET_PER_DAY_USD
 import refine
 import critic_agent as ca
 import app as wapp   # the viewer, for its borrowed-content labels
@@ -250,7 +251,7 @@ def _budget_cases():
         # applies, and a session that ignored it would route around the guard that
         # exists to stop exactly this kind of ad-hoc spending.
         ("the rolling daily ceiling still binds",
-         bool(refine._affordable(0.10, 0.20, 99.0, main.BUDGET_PER_DAY_USD - 0.15))),
+         bool(refine._affordable(0.10, 0.20, 99.0, BUDGET_PER_DAY_USD - 0.15))),
         ("a comfortable day total does not block",
          refine._affordable(0.10, 0.20, 99.0, 0.0) == ""),
     ]
@@ -386,7 +387,7 @@ def _standalone_advisory_cases():
          sadv.refine.run_sale_advisor is refine.run_sale_advisor),
         ("the generator drives the pipeline's own sale advisor agent",
          "sale_advisor_agent" in refine.run_sale_advisor.__doc__
-         or main.sale_advisor_agent.output_key == "sale_data"),
+         or sale_advisor_agent.output_key == "sale_data"),
     ] + _staleness_cases()
 
 

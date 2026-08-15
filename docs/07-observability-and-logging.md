@@ -5,8 +5,10 @@ log shipping). Observability in this codebase is three separate mechanisms,
 each covering a different slice of the system, and they do not share a
 common backend:
 
-1. **Python `logging`, per-process** — `main.py`'s own logger and
-   `mcp_server.py`'s own logger, described below. This is the "what happened
+1. **Python `logging`, per-process** — the pipeline logger (configured in
+   `run_log.py`, not `main.py` — every entry point imports it, which is what
+   let `refine`/`buy_case`/`sale_advisory` stop importing the CLI) and the
+   `"mcp_server"` logger (created in `mcp_app.py`), described below. This is the "what happened
    during this run" record.
 2. **A persisted usage/cost ledger in Postgres** (`pipeline_runs` columns) —
    the "what did this run cost" record. See
@@ -25,27 +27,33 @@ not structured fields — see below) are the only correlation mechanism.
 
 | Logger | Set up in | Handlers | Where it writes |
 | :--- | :--- | :--- | :--- |
-| `"InvestmentAgentPipeline"` | `main.py:54-67` | Its own `StreamHandler` (console) + `FileHandler` (`logs/run_<timestamp>.log`) | Console **and** the per-run file |
-| `"mcp_server"` | `mcp_server.py:24-25` | None of its own — relies on `logging.basicConfig(level=logging.INFO)`, which installs a `StreamHandler` on the **root** logger | Console only |
+| `"InvestmentAgentPipeline"` | `run_log.py:44-62` | Its own `StreamHandler` (console) + `FileHandler` (`logs/run_<timestamp>.log`) | Console **and** the per-run file |
+| `"mcp_server"` | `mcp_app.py` | None of its own — relies on `logging.basicConfig(level=logging.INFO)`, which installs a `StreamHandler` on the **root** logger | Console only |
 | Flask (`webapp/app.py`) | Not configured at all | Whatever Flask/Werkzeug's dev server does by default | Console only, request lines — no application-level `logger.*` calls exist in `app.py` |
 
 Two consequences worth knowing before you go looking for a log line:
 
-- **`mcp_server.py`'s own log lines (SEC/DB errors, embedding failures) never
-  reach the per-run file.** `mcp_server.py` is imported by `main.py` (`main.py:22`)
-  *before* `main.py` sets up its own logger (`main.py:54`), so
-  `mcp_server.py`'s `logging.basicConfig()` call runs first and configures the
-  **root** logger with a console-only handler. `mcp_server.py`'s own
-  `logger.error(...)` calls (e.g. `mcp_server.py:775-780` on an embedding
-  failure) go out through that root handler — console only, never the
-  timestamped file `main.py` creates for the run. If you're debugging an
-  embedding or DB-write failure after the fact from a saved log file, it
-  won't be there; you need to have been watching the console, or capture
-  stdout/stderr yourself when running the process.
+- **The `"mcp_server"` logger's own lines (SEC errors, embedding failures) never
+  reach the per-run file.** `mcp_server` is imported by `main.py` *before*
+  `main.py` sets up its own logger, so the `logging.basicConfig()` call in
+  `mcp_app.py` runs first and configures the **root** logger with a console-only
+  handler. Those `logger.error(...)` calls — e.g. in
+  [`persistence/embeddings.py`](../src/persistence/embeddings.py) on an embedding
+  failure — go out through that root handler: console only, never the timestamped
+  file `main.py` creates for the run. If you're debugging an embedding failure
+  after the fact from a saved log file, it won't be there; you need to have been
+  watching the console, or capture stdout/stderr yourself.
+
+  **One deliberate exception:** the `DB ok` / `DB persistence failed` lines from
+  `_check_db` ([`persistence/results.py`](../src/persistence/results.py)) go to the
+  **pipeline** logger, so they *do* land in the run file. That is the point of it —
+  the db_* tools return a status string rather than raising, so a failed insert is
+  otherwise completely silent, and a record of it that only ever existed on a
+  console nobody was watching would not be a record.
 - **`main.py`'s own log lines print to the console twice.** Its
   `"InvestmentAgentPipeline"` logger never sets `propagate = False`, and by
   the time it's created the root logger already has the `StreamHandler` from
-  `mcp_server.py`'s `basicConfig()` call. So every `logger.info(...)` in
+  `mcp_app.py`'s `basicConfig()` call. So every `logger.info(...)` in
   `main.py` fires three times: once via its own `c_handler` (console), once
   via its own `f_handler` (the run's file — exactly once, correctly), and
   once more via propagation up to root's `StreamHandler` (console again).
@@ -76,14 +84,14 @@ uses a manually-formatted bracketed prefix in the message string — there are
 no `extra={}` fields, no JSON logs, no correlation IDs threaded through a
 logging context:
 
-- `[{ticker}]` — per-ticker lines, e.g. `main.py:1130` (`"[{ticker}] Reusing
+- `[{ticker}]` — per-ticker lines, e.g. `pipeline/analysis.py:105` (`"[{ticker}] Reusing
   the report from run..."`).
 - `[{ticker} {agent.name}]` — per-agent-per-ticker lines, e.g.
-  `main.py:950` (`"[{ticker}] {agent.name} rate limited (429)..."`) and the
-  per-agent cost breakdown at `main.py:963` (`_log_usage(f"{ticker}
+  `pipeline/execution.py:107` (`"[{ticker}] {agent.name} rate limited (429)..."`) and the
+  per-agent cost breakdown at `usage.py:289` (`_log_usage(f"{ticker}
   {agent.name}", agent_usage)`).
-- `RUN {run_id} TOTAL` — the run-level cost rollup, `main.py:867`.
-- `BUDGET:` — budget-guard breaches, `main.py:1039` / `_check_budget`.
+- `RUN {run_id} TOTAL` — the run-level cost rollup, `usage.py:297`.
+- `BUDGET:` — budget-guard breaches, `usage.py:60` / `_check_budget`.
 
 If you pipe this to a log aggregator, these prefixes are what you'd parse on
 — there's no other machine-readable correlation key in the log stream
@@ -94,14 +102,14 @@ itself (the `run_id` UUID *is* embedded in these strings, though, so a
 
 | Concern | Logged via | Level | Also visible in |
 | :--- | :--- | :--- | :--- |
-| Per-agent token usage & cost | `_log_usage` (`main.py:832`) | INFO | `pipeline_runs` columns (`_finalize_run`) |
-| Per-run total usage & cost | `_log_usage` + `_finalize_run` (`main.py:863`) | INFO | `pipeline_runs` row |
-| Rate-limit (429) retries | `main.py:949, 1045` | WARNING | — (not persisted; only in the log) |
-| Reconciliation findings (a figure contradicts the filings) | `main.py:1239-1248` | WARNING | The report itself, `## Data Reconciliation Warnings` |
+| Per-agent token usage & cost | `_log_usage` (`usage.py:289`) | INFO | `pipeline_runs` columns (`_finalize_run`) |
+| Per-run total usage & cost | `_log_usage` + `_finalize_run` (`usage.py:293`) | INFO | `pipeline_runs` row |
+| Rate-limit (429) retries | `pipeline/execution.py:107` | WARNING | — (not persisted; only in the log) |
+| Reconciliation findings (a figure contradicts the filings) | `pipeline/analysis.py:224` | WARNING | The report itself, `## Data Reconciliation Warnings` |
 | Budget ceiling breach | `main.py:617, 2039` | ERROR (halt) / WARNING (warn mode) | `pipeline_runs.status = 'BUDGET_EXCEEDED'` |
-| DB write failures | `_check_db` (`main.py:1055`) | ERROR (failure) / INFO (success) | — (fails open; the run continues) |
-| Embedding failures | `mcp_server.py:774-780` | ERROR (first 3 per process, then suppressed) | A zero vector silently stored in the row (unsearchable, but present) |
-| Missing verified-figures columns for a ticker | `main.py:1170` | WARNING | — (reconciliation gate is silently weaker for that ticker) |
+| DB write failures | `_check_db` (`persistence/results.py:19`) | ERROR (failure) / INFO (success) | — (fails open; the run continues) |
+| Embedding failures | `persistence/embeddings.py:93` | ERROR (first 3 per process, then suppressed) | A zero vector silently stored in the row (unsearchable, but present) |
+| Missing verified-figures columns for a ticker | `pipeline/analysis.py:151` | WARNING | — (reconciliation gate is silently weaker for that ticker) |
 | Screener gate counts / warnings (Phase A) | **`print()`**, not `logging` | n/a | Console/stdout only — see below |
 | Critic round verdict + every finding's severity/title (Phase D) | `refine.py:486-492` | INFO | `agent_outputs` (`CRITIC_REVIEW`) and `critic_memory` rows |
 | Critic verdict overridden by the severity cross-check | `refine.py:484` | WARNING | — (the override reason is only in the log; the shipped report shows the resulting standing, not that it was overridden) |
@@ -129,7 +137,7 @@ stdout. This means Phase A's diagnostics are **not** captured in
 `main.py`'s timestamped `logs/run_<timestamp>.log` file at all — that file
 only exists once `main.py`'s own logger is set up, and by then the
 screener's `main()` (invoked via `run_magic_formula_screener` in
-`mcp_server.py:39`) has already run and printed its output straight to the
+`data/screener.py:35`) has already run and printed its output straight to the
 console. If you need a durable record of a screening run's gate counts,
 redirect stdout yourself (`python main.py --screen-only > screen.log`) —
 the pipeline does not do this for you.

@@ -51,7 +51,47 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-import main
+from agents import sale_advisor_agent
+from persistence import _check_db
+from pipeline import (
+    _benchmark_price,
+    _extract_verdict,
+    _git_sha,
+    _prompt_version,
+    _split_verdict_basis,
+)
+from report import (
+    _RECONCILIATION_HEADING,
+    _format_magic_formula_section,
+    _format_price_section,
+    _format_reconciliation_section,
+    _format_screen_context,
+    _format_verified_figures,
+    _normalize_candidate,
+    _present,
+    _price_snapshot,
+    _reconcile_agent_figures,
+    reconciliation_warning,
+    _with_run_header,
+)
+from run_log import logger
+from settings import (
+    BUDGET_DAY_WINDOW_HOURS,
+    BUDGET_ENABLED,
+    BUDGET_PER_DAY_USD,
+    LEDGER_BENCHMARK,
+    LEDGER_ENABLED,
+    config,
+)
+from usage import (
+    _collect_embedding_usage,
+    _finalize_run,
+    _log_usage,
+    _merge_usage,
+    _new_usage,
+    _prior_day_spend,
+    _total_cost,
+)
 import critic_agent
 import buy_case_agent
 from critic_agent import (
@@ -68,7 +108,9 @@ from critic_agent import (
 from mcp_server import (
     compute_ticker_magic_metrics,
     fmp_quarterly_trends,
+    db_copy_inherited_outputs,
     db_create_pipeline_run,
+    db_log_verdict,
     db_store_agent_output,
     db_store_final_report,
     db_store_ticker_run,
@@ -80,9 +122,9 @@ from mcp_server import (
     db_resolve_critic_findings,
 )
 
-logger = main.logger
+logger = logger
 
-_cfg = main.config.get("refinement", {}) or {}
+_cfg = config.get("refinement", {}) or {}
 MAX_BUDGET_USD = float(_cfg.get("max_budget_usd", 2.25))
 MAX_ROUNDS = int(_cfg.get("max_rounds", 3))
 # Seed estimates for the first ceiling check, before either role has been measured
@@ -133,7 +175,7 @@ def strip_generated_sections(markdown: str) -> str:
     """
     text = markdown or ""
     text = _RUN_BANNER_RE.sub("", text, count=1)
-    for trailer in (CRITIC_SECTION_HEADING, main._RECONCILIATION_HEADING):
+    for trailer in (CRITIC_SECTION_HEADING, _RECONCILIATION_HEADING):
         text = text.split(trailer)[0]
     idx = text.find(_ANALYST_FIRST_SECTION)
     if idx > 0:
@@ -168,7 +210,7 @@ def _load_candidate(ticker: str) -> dict:
             f"reviser will see this stated rather than a figures block, and the "
             f"reconciliation gate cannot run on the revised report."
         )
-    return main._normalize_candidate(candidate)
+    return _normalize_candidate(candidate)
 
 
 def _load_source_case(ticker: str, run_id: str, agent_type: str) -> str:
@@ -261,11 +303,11 @@ def _affordable(spent: float, need: float, ceiling: float, prior_day: float) -> 
     if spent + need > ceiling:
         return (f"refinement ceiling ${ceiling:.2f} would be exceeded "
                 f"(${spent:.2f} spent, next round needs about ${need:.2f})")
-    if main.BUDGET_ENABLED:
+    if BUDGET_ENABLED:
         day_total = prior_day + spent + need
-        if day_total >= main.BUDGET_PER_DAY_USD:
-            return (f"the {main.BUDGET_DAY_WINDOW_HOURS}h ceiling "
-                    f"${main.BUDGET_PER_DAY_USD:.2f} would be reached "
+        if day_total >= BUDGET_PER_DAY_USD:
+            return (f"the {BUDGET_DAY_WINDOW_HOURS}h ceiling "
+                    f"${BUDGET_PER_DAY_USD:.2f} would be reached "
                     f"(${prior_day:.2f} spent before this session, ${spent:.2f} in it, "
                     f"next round needs about ${need:.2f})")
     return ""
@@ -322,20 +364,56 @@ def _agreed_banner(rounds: int, cost: float, findings: list) -> str:
     return "\n".join(lines)
 
 
-def _not_agreed_banner(rounds: int, cost: float, findings: list, stop_reason: str) -> str:
-    blocking = sum(1 for f in findings if f["severity"] == "BLOCKING")
-    material = sum(1 for f in findings if f["severity"] == "MATERIAL")
-    return (
-        f"{CRITIC_SECTION_HEADING}\n\n"
+def _not_agreed_banner(rounds: int, cost: float, findings: list, stop_reason: str,
+                       run_id: str = "") -> str:
+    """The un-agreed case: what is still standing, and nothing else.
+
+    This used to staple the critic's ENTIRE final review onto the report, including
+    its "Independent Verification" section — a list of everything the critic checked
+    and found CORRECT. On a run with a single material objection that meant six
+    paragraphs of successful verification sitting under a warning banner, about a
+    third of the document. It inverts the signal: a reader skimming sees a wall of
+    critic prose and infers the report is heavily disputed, when most of that prose
+    says the opposite.
+
+    So only the objections actually STANDING are reproduced. The full review is
+    stored as this run's CRITIC_REVIEW agent output and is pointed at rather than
+    pasted — nothing here is the only copy of it.
+    """
+    unresolved = [f for f in findings if f["severity"] in BLOCKING_SEVERITIES]
+    blocking = sum(1 for f in unresolved if f["severity"] == "BLOCKING")
+    material = sum(1 for f in unresolved if f["severity"] == "MATERIAL")
+
+    lines = [
+        CRITIC_SECTION_HEADING,
+        "",
         f"**The independent critic has NOT agreed this report.** After {rounds} "
         f"round(s) of review (${cost:.2f}), {blocking} blocking and {material} "
         f"material objection(s) were still standing when the review stopped: "
-        f"{stop_reason}.\n\n"
-        f"Treat the verdict above as unconfirmed. The critic's final review is "
-        f"reproduced below in full — read it before acting, because the objections "
-        f"in it are about the reasoning that produced that verdict, not about "
-        f"presentation.\n\n"
-    )
+        f"{stop_reason}.",
+        "",
+        "Treat the verdict above as unconfirmed. These objections are about the "
+        "reasoning that produced that verdict, not about presentation:",
+        "",
+    ]
+    for item in unresolved:
+        summary = finding_summary(item)
+        lines.append(f"- **[{item['severity']}] {item['title']}**"
+                     + (f" — {summary}" if summary else ""))
+    if not unresolved:
+        # The severity cross-check can withhold agreement with nothing blocking or
+        # material left standing. Say that, rather than printing an empty list.
+        lines.append("- The critic did not record its agreement, but left no "
+                     "blocking or material objection standing.")
+    lines += [
+        "",
+        "The critic's full review — including the checks it ran that came back "
+        "clean — is stored as this run's `CRITIC_REVIEW` output"
+        + (f" (run `{run_id}`)." if run_id else "."),
+        "",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 _HEADING_RE = re.compile(r"^(#{1,4})(?=\s)", re.MULTILINE)
@@ -384,7 +462,7 @@ def run_sale_advisor(ticker: str, company_name: str, report_body: str,
     assembled report with the deterministic Magic Formula section prepended.
     """
     return run_agent(
-        main.sale_advisor_agent,
+        sale_advisor_agent,
         {
             "ticker": ticker,
             "company_name": company_name,
@@ -468,8 +546,8 @@ def _refresh_sale_advisory(ticker: str, company_name: str, src_run: str,
                     return "", "none"
                 origin, text = "carried_stale", prior_text
             else:
-                cost = main._log_usage(f"{ticker} sale advisor (post-review)", adv_usage)
-                main._merge_usage(usage, adv_usage)
+                cost = _log_usage(f"{ticker} sale advisor (post-review)", adv_usage)
+                _merge_usage(usage, adv_usage)
                 logger.info(f"[{ticker}] Sale advisory re-derived (${cost:.4f}).")
                 if not text.strip():
                     logger.warning(f"[{ticker}] Sale advisor produced no output; "
@@ -488,7 +566,7 @@ def _refresh_sale_advisory(ticker: str, company_name: str, src_run: str,
         if body.startswith("> **" + marker):
             body = body.split("\n\n", 1)[-1]
     stamped = _ADVISORY_NOTE[origin].format(src=src_run) + body
-    return main._with_run_header(stamped, refine_run_id, ticker), origin
+    return _with_run_header(stamped, refine_run_id, ticker), origin
 
 
 # --- The buy case ---------------------------------------------------------------
@@ -631,9 +709,9 @@ def _refresh_buy_case(ticker: str, company_name: str, src_run: str, refine_run_i
         marker = note.split("**")[1]
         if body.startswith("> **" + marker):
             body = body.split("\n\n", 1)[-1]
-    stamped = main._with_run_header(
+    stamped = _with_run_header(
         _BUY_CASE_NOTE[origin].format(src=src_run) + body, refine_run_id, ticker)
-    main._check_db(
+    _check_db(
         db_store_agent_output(
             refine_run_id, ticker, buy_case_agent.BUY_CASE_TYPE, stamped,
             json.dumps({"ticker": ticker, "origin": f"refinement_{origin}",
@@ -671,18 +749,18 @@ def _assemble(candidate: dict, report_body: str, recon_findings: list,
     weighed against — not the one from the run being reviewed, which may be days old.
     """
     parts = [
-        main._format_price_section(price or {}, ticker),
+        _format_price_section(price or {}, ticker),
         "",
-        main._format_magic_formula_section(candidate),
+        _format_magic_formula_section(candidate),
         "",
         report_body,
-        main._format_reconciliation_section(recon_findings),
+        _format_reconciliation_section(recon_findings),
         "",
         critic_section,
     ]
-    if not agreed and final_review:
-        parts += ["### The critic's final review, in full", "",
-                  _demote_headings(final_review), ""]
+    # The full review is deliberately NOT appended here any more; the banner lists
+    # the standing objections and points at the stored CRITIC_REVIEW output. See
+    # `_not_agreed_banner` for why pasting all of it made the report read worse.
     return "\n".join(p for p in parts if p is not None)
 
 
@@ -742,10 +820,10 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     # One quote for the whole session: the critic and the reviser argue against the
     # same price the refined report will print at the top, and the buy case (if the
     # verdict lands on Watch) sets its triggers against that one too.
-    price = main._price_snapshot(ticker)
-    verified_figures = main._format_verified_figures(candidate, price)
+    price = _price_snapshot(ticker)
+    verified_figures = _format_verified_figures(candidate, price)
     screen_context = (
-        main._format_screen_context(candidate) if candidate.get("ROC_Pct")
+        _format_screen_context(candidate) if candidate.get("ROC_Pct")
         else ("Magic Formula ROC / Earnings Yield could not be recomputed for this "
               "ticker at review time, so no value/quality signal is available to "
               "check the report's use of one against.")
@@ -797,11 +875,19 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     # single-ticker analysis, both to a reader of the table and to the web UI, which
     # joins on it to pair the two runs and to borrow the bear/bull/sale cases this
     # run never re-ran.
-    main._check_db(db_create_pipeline_run(refine_run_id, [ticker], src_run),
+    _check_db(db_create_pipeline_run(refine_run_id, [ticker], src_run),
                    "create refinement run")
 
-    usage = main._new_usage()
-    prior_day_usd = main._prior_day_spend() if main.BUDGET_ENABLED else 0.0
+    # Carry the artefacts this run inherits but never regenerates — the bear and bull
+    # cases, the SEC text, the metrics. Without them the refinement lists in the web
+    # UI as a run whose Bear Case and Bull Case tabs load nothing, because those rows
+    # only ever existed under the run being reviewed. Same failure the duplicate-run
+    # skip already guards against, one run type along.
+    _check_db(db_copy_inherited_outputs(src_run, refine_run_id, ticker),
+              f"{ticker} carry inherited outputs")
+
+    usage = _new_usage()
+    prior_day_usd = _prior_day_spend() if BUDGET_ENABLED else 0.0
     est = _Estimator()
 
     blocked = _affordable(0.0, est.critique, ceiling, prior_day_usd)
@@ -810,7 +896,7 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
             f"[{ticker}] Cannot start: {blocked}. Raise --max-budget (a first review "
             f"round costs roughly ${est.critique:.2f}) or wait for the rolling window."
         )
-        main._finalize_run(refine_run_id, usage, "Refinement Run", status="BUDGET_EXCEEDED")
+        _finalize_run(refine_run_id, usage, "Refinement Run", status="BUDGET_EXCEEDED")
         return
 
     report_body = strip_generated_sections(source["markdown_report"])
@@ -848,8 +934,8 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
             logger.error(f"[{ticker}] Critic failed in round {rnd}: {e}")
             stop_reason = f"the critic failed in round {rnd}"
             break
-        critique_cost = main._log_usage(f"{ticker} critic r{rnd}", critique_usage)
-        main._merge_usage(usage, critique_usage)
+        critique_cost = _log_usage(f"{ticker} critic r{rnd}", critique_usage)
+        _merge_usage(usage, critique_usage)
         est.observe("critique", critique_cost)
         rounds_done = rnd
 
@@ -873,16 +959,16 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
 
         final_review = review
         final_findings = findings
-        main._check_db(
+        _check_db(
             db_store_agent_output(
                 refine_run_id, ticker, "CRITIC_REVIEW",
-                main._with_run_header(review, refine_run_id, ticker),
+                _with_run_header(review, refine_run_id, ticker),
                 json.dumps({"ticker": ticker, "iteration": rnd, "verdict": verdict,
                             "source_run_id": src_run}),
             ),
             f"{ticker} critic review r{rnd}",
         )
-        main._check_db(
+        _check_db(
             db_store_critic_findings(ticker, src_run, refine_run_id, rnd, json.dumps(findings)),
             f"{ticker} critic memory r{rnd}",
         )
@@ -906,7 +992,7 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
             stop_reason = f"the {rounds_allowed}-round limit was reached"
             logger.warning(f"[{ticker}] {stop_reason}; the critic's objections stand.")
             break
-        spent = main._total_cost(usage)
+        spent = _total_cost(usage)
         blocked = _affordable(spent, est.full_round, ceiling, prior_day_usd)
         if blocked:
             stop_reason = blocked
@@ -931,8 +1017,8 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
             logger.error(f"[{ticker}] Reviser failed in round {rnd}: {e}")
             stop_reason = f"the analyst failed to revise in round {rnd}"
             break
-        revise_cost = main._log_usage(f"{ticker} reviser r{rnd}", revise_usage)
-        main._merge_usage(usage, revise_usage)
+        revise_cost = _log_usage(f"{ticker} reviser r{rnd}", revise_usage)
+        _merge_usage(usage, revise_usage)
         est.observe("revision", revise_cost)
 
         revised_text, analyst_response = split_revision(raw)
@@ -950,7 +1036,7 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
                 f"were rebutted and may repeat them."
             )
         else:
-            main._check_db(
+            _check_db(
                 db_record_analyst_response(refine_run_id, ticker, rnd, analyst_response),
                 f"{ticker} analyst response r{rnd}",
             )
@@ -960,27 +1046,43 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
         report_body = strip_generated_sections(revised_text)
         revised = True
         logger.info(f"[{ticker}] Round {rnd} revision complete (${revise_cost:.4f}). "
-                    f"Verdict now: {main._extract_verdict(report_body)}.")
+                    f"Verdict now: {_extract_verdict(report_body)}.")
 
     # 4. Assemble and persist whatever the loop ended on.
     # Drained here, before the cost is quoted in the report's own banner, so the
     # figure a reader sees includes the embeddings the stored critiques already
     # billed. Drained again at the end for the final report's own vector.
-    main._collect_embedding_usage(usage)
+    _collect_embedding_usage(usage)
     # Quoted in the report's own banner, so it must be the cost of the REVIEW —
     # captured before the sale advisory below, which is a separate piece of work and
     # would otherwise inflate the figure a reader is told the review cost.
     # `_finalize_run` still records the true session total.
-    review_cost = main._total_cost(usage)
+    review_cost = _total_cost(usage)
     if not report_body.strip():
         logger.error(f"[{ticker}] No report survived the refinement; nothing stored.")
-        main._finalize_run(refine_run_id, usage, "Refinement Run", status="FAILED")
+        _finalize_run(refine_run_id, usage, "Refinement Run", status="FAILED")
         return
 
     # The verdict of the report as it now stands. Read before the derived documents
     # below rather than after, because one of them — the buy case — exists only for a
     # 'Watch' and a review is entirely capable of moving the verdict onto or off it.
-    verdict = main._extract_verdict(report_body)
+    verdict = _extract_verdict(report_body)
+
+    # Strip the machine-readable Verdict Basis tail, exactly as the pipeline does in
+    # `analyze_ticker`. The reviser inherits `analyst_agent.instruction` verbatim, so
+    # it is told to emit that JSON block and duly does — and without this the block
+    # shipped inside every refined report. A reader with no finance background opened
+    # a document that ended in a factor dump; the block exists for the ledger, not for
+    # them. It is taken AFTER `_extract_verdict` above, since the verdict line sits
+    # before it and stripping first would not change the answer but does change what
+    # a later reader of `report_body` sees.
+    # Splitting serves two purposes. It keeps the JSON tail out of the reader-facing
+    # report (the pipeline does the same in `analyze_ticker`; without it every refined
+    # report ended in a factor dump). And the factors it parses out are the basis for
+    # the POST_CRITIC ledger row written at the end of this function — a revision that
+    # changes the reasoning changes the factors behind it, so the refined verdict must
+    # be recorded with its OWN basis rather than inheriting the pipeline's.
+    report_body, _refined_factors = _split_verdict_basis(report_body, ticker)
 
     # 4a. Give this run its own sale advisory — re-derived if the report changed,
     # carried forward if it did not. See _refresh_sale_advisory for why both cases
@@ -997,26 +1099,27 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     buy_origin = _refresh_buy_case(
         ticker, company_name, src_run, refine_run_id, report_body, verified_figures,
         quarterly_data, candidate, verdict, revised, usage,
-        main._total_cost(usage), ceiling, prior_day_usd, price,
+        _total_cost(usage), ceiling, prior_day_usd, price,
     )
 
     recon_findings = []
     for label, body in (("Refined report", report_body), ("Critic review", final_review),
                         ("Sale advisory", sale_data)):
-        recon_findings.extend(main._reconcile_agent_figures(body, candidate, label))
+        recon_findings.extend(_reconcile_agent_figures(body, candidate, label))
     if recon_findings:
         for f in recon_findings:
             logger.warning(
-                main.reconciliation_warning(ticker, f)
+                reconciliation_warning(ticker, f)
             )
     else:
         logger.info(f"[{ticker}] Reconciliation gate passed on the refined report.")
 
     critic_section = (
         _agreed_banner(rounds_done, review_cost, final_findings) if agreed
-        else _not_agreed_banner(rounds_done, review_cost, final_findings, stop_reason)
+        else _not_agreed_banner(rounds_done, review_cost, final_findings, stop_reason,
+                                refine_run_id)
     )
-    report_stored = main._with_run_header(
+    report_stored = _with_run_header(
         _assemble(candidate, report_body, recon_findings, critic_section, final_review,
                   agreed, price, ticker),
         refine_run_id, ticker,
@@ -1025,21 +1128,21 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     # analysis_key is deliberately empty: a refined report must never be served by the
     # pipeline's duplicate-run skip in place of a fresh analysis. Its provenance is a
     # review session, not a filing, and reuse keys on filings.
-    main._check_db(db_store_final_report(refine_run_id, ticker, verdict, report_stored, ""),
+    _check_db(db_store_final_report(refine_run_id, ticker, verdict, report_stored, ""),
                    f"{ticker} refined report")
-    main._check_db(
+    _check_db(
         db_store_ticker_run(refine_run_id, ticker, company_name, verdict,
-                            main._present(candidate.get("Final_Rank")),
+                            _present(candidate.get("Final_Rank")),
                             price.get("price"), price.get("as_of")),
         f"{ticker} ticker_run (refinement)",
     )
-    main._check_db(
+    _check_db(
         db_resolve_critic_findings(refine_run_id, ticker,
                                    "RESOLVED" if agreed else "UNRESOLVED"),
         f"{ticker} settle critic findings",
     )
     if sale_data:
-        main._check_db(
+        _check_db(
             db_store_agent_output(
                 refine_run_id, ticker, "SALE_CASE", sale_data,
                 json.dumps({"ticker": ticker, "origin": sale_origin,
@@ -1057,9 +1160,9 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     if final_review:
         review_path = os.path.join("reports", f"{ticker}_Critic_Review.md")
         with open(review_path, "w", encoding="utf-8") as f:
-            f.write(main._with_run_header(final_review, refine_run_id, ticker))
+            f.write(_with_run_header(final_review, refine_run_id, ticker))
 
-    main._collect_embedding_usage(usage)
+    _collect_embedding_usage(usage)
     status = "COMPLETED" if agreed else ("BUDGET_EXCEEDED" if "ceiling" in stop_reason
                                          else "NOT_AGREED")
     verdict_moved = (source.get("verdict") or "").upper() != verdict.upper()
@@ -1067,6 +1170,56 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     # usually run one ticker at a time and read immediately: 'buy case regenerated' is
     # the difference between `--buy-check --run <this id>` working and not.
     derived = f"Sale advisory: {sale_origin}. Buy case: {buy_origin}."
+
+    # --- The ledger: a POST_CRITIC verdict, but only when the review moved something.
+    #
+    # The INDEPENDENT row written by `analyze_ticker` is left exactly as it was. This
+    # ADDS a second row rather than correcting the first, which is what makes "does
+    # the critic change outcomes, or only cost money" answerable at all: grading the
+    # refined call needs the pre-critic call still standing beside it, against the
+    # same subsequent prices. Overwrite it and you have deleted the control group.
+    # `verdict_log.verdict_stage` and the partial dedup index were built for exactly
+    # this pairing; until now nothing wrote the second row.
+    #
+    # Only when something actually moved. A refinement where the critic agreed and no
+    # revision ran reached the same verdict on the same reasoning, and a duplicate row
+    # saying so is noise that would dilute every rate computed over the table. On the
+    # measured history that is most of them: 1 refinement in 9 has changed a verdict.
+    #
+    # Not wrapped in _check_db, and swallowed on failure, for the same reason as the
+    # pipeline's call — this is bookkeeping, and it must never cost a refinement that
+    # has already been paid for.
+    if LEDGER_ENABLED and (verdict_moved or revised):
+        try:
+            db_log_verdict(
+                refine_run_id, ticker, verdict, json.dumps(_refined_factors or []),
+                company_name=company_name or ticker,
+                verdict_stage="POST_CRITIC",
+                price=_present((price or {}).get("price")) or 0.0,
+                market_cap=_present((candidate or {}).get("LiveMarketCap")) or 0.0,
+                shares_outstanding=_present((candidate or {}).get("SharesOutstanding")) or 0.0,
+                sector=(candidate or {}).get("Sector") or "",
+                industry=(candidate or {}).get("Industry") or "",
+                magic_rank=int(_present((candidate or {}).get("Final_Rank")) or 0),
+                benchmark_symbol=LEDGER_BENCHMARK,
+                benchmark_price=_benchmark_price(),
+                prompt_version=_prompt_version(),
+                git_sha=_git_sha(),
+                # Deliberately empty, exactly as the refined report's is. An
+                # analysis_key keys on filings and prompts; a refinement's provenance
+                # is a review session, and letting it match the duplicate-run skip
+                # would serve a reviewed report in place of a fresh analysis.
+                analysis_key="",
+            )
+            logger.info(
+                f"[{ticker}] Ledger: logged a POST_CRITIC verdict ({verdict}) beside "
+                f"the pipeline's {source.get('verdict')}. Both now grade to their own "
+                f"return, which is how the critic's worth gets measured."
+            )
+        except Exception as e:
+            logger.warning(f"[{ticker}] POST_CRITIC ledger write failed ({e}); the "
+                           f"refinement is unaffected.")
+
     logger.info(
         f"[{ticker}] Refinement finished after {rounds_done} round(s): "
         f"{'AGREED' if agreed else 'NOT AGREED'} ({stop_reason}). "
@@ -1074,7 +1227,7 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
         f"{' (CHANGED by review)' if verdict_moved else ' (unchanged)'}. "
         f"{derived} Saved to {report_path}."
     )
-    main._finalize_run(refine_run_id, usage, "Refinement Run", status=status)
+    _finalize_run(refine_run_id, usage, "Refinement Run", status=status)
 
 
 if __name__ == "__main__":

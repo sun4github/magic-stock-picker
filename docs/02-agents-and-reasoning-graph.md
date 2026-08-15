@@ -1,7 +1,11 @@
 # Agents & Reasoning Graph Walkthrough
 
 All five agents in this doc are `google.adk.agents.LlmAgent` instances defined in
-[`src/main.py`](../src/main.py). None of them call each other directly —
+[`src/agents/definitions.py`](../src/agents/definitions.py), with their
+instructions in [`src/prompts/`](../src/prompts/) — both moved out of `main.py`,
+which re-exports them, so `main.analyst_agent` still resolves. A local package
+named `agents` does not shadow `google.adk.agents`; absolute imports resolve on the
+full dotted path. None of them call each other directly —
 `_run_pipeline_async` (see
 [01-orchestration-and-cli.md](01-orchestration-and-cli.md)) runs them in
 order over one shared ADK session, and they communicate only through
@@ -21,7 +25,7 @@ session-state keys (`output_key` on write, `{key_name}` templating on read).
 There is **no** SEC/metrics/search "agent" — that data is fetched by direct
 Python function calls (`fetch_sec_10k_data`, `fmp_metrics_extractor`,
 `fmp_quarterly_trends` in `mcp_server.py`) with zero LLM tokens spent, called
-directly from `analyze_ticker` (`main.py:1153-1160`) before any agent runs.
+directly from `analyze_ticker` (`pipeline/analysis.py:68-340`) before any agent runs.
 
 ## Which tools each agent can call, and where those tools reach
 
@@ -62,10 +66,10 @@ rather than duplicated:
 
 | Constant | Line | Purpose |
 | :--- | :--- | :--- |
-| `RECENCY_MANDATE` | `main.py:142` | Forces every reasoning role to read `QUARTERLY_DATA` and state whether the latest quarter confirms/contradicts the annual trend, before concluding anything. |
-| `REFERENCE_DATA_BLOCKS` | `main.py:180` | The `<MAGIC_FORMULA_CONTEXT>` / `<VERIFIED_FIGURES>` / `<QUARTERLY_DATA>` XML-ish blocks, given to every reasoning agent. |
-| `RESEARCH_SOURCE_BLOCKS` | `main.py:190` | The `<METRICS_DATA>` / `<SEC_DATA>` blocks, given **only** to the two advocates (bear/bull) — the judge and sale advisor work from the advocates' arguments plus verified figures, not the raw filing dump, to save ~10k tokens/turn. |
-| `VERIFIED_FIGURES_MANDATE` | `main.py:195` | Forbids any agent from stating a debt/cash/market-cap/EV/P-E/growth/PEG figure that contradicts the deterministically-computed `VERIFIED_FIGURES` block. |
+| `RECENCY_MANDATE` | `agents/definitions.py:57` | Forces every reasoning role to read `QUARTERLY_DATA` and state whether the latest quarter confirms/contradicts the annual trend, before concluding anything. |
+| `REFERENCE_DATA_BLOCKS` | `agents/definitions.py:81` | The `<MAGIC_FORMULA_CONTEXT>` / `<VERIFIED_FIGURES>` / `<QUARTERLY_DATA>` XML-ish blocks, given to every reasoning agent. |
+| `RESEARCH_SOURCE_BLOCKS` | `agents/definitions.py:87` | The `<METRICS_DATA>` / `<SEC_DATA>` blocks, given **only** to the two advocates (bear/bull) — the judge and sale advisor work from the advocates' arguments plus verified figures, not the raw filing dump, to save ~10k tokens/turn. |
+| `VERIFIED_FIGURES_MANDATE` | `agents/definitions.py:89` | Forbids any agent from stating a debt/cash/market-cap/EV/P-E/growth/PEG figure that contradicts the deterministically-computed `VERIFIED_FIGURES` block. |
 
 `PIPELINE_INCLUDE_CONTENTS = "none"` (`main.py:241`) is set on every reasoning
 agent's `include_contents`, so each agent only sees the current turn (its own
@@ -78,10 +82,10 @@ justified this.
 ```mermaid
 sequenceDiagram
     participant Sess as Shared session state
-    participant Bear as bear_agent<br/>main.py:245
-    participant Bull as bull_agent<br/>main.py:271
-    participant Judge as analyst_agent<br/>main.py:307
-    participant Sale as sale_advisor_agent<br/>main.py:419
+    participant Bear as bear_agent<br/>agents/definitions.py:146
+    participant Bull as bull_agent<br/>agents/definitions.py:156
+    participant Judge as analyst_agent<br/>agents/definitions.py:166
+    participant Sale as sale_advisor_agent<br/>agents/definitions.py:180
 
     Note over Sess: seeded: ticker, company_name, sec_data,<br/>metrics_data, quarterly_data,<br/>verified_figures, screen_context
     Bear->>Bear: fmp_stock_news + web_search_tool (bear framing)
@@ -96,13 +100,13 @@ sequenceDiagram
     Sale->>Sess: output_key="sale_data"
 ```
 
-### `bear_agent` — `main.py:245-268`
+### `bear_agent` — `agents/definitions.py:146-153`
 
-- Instruction = `research-instructions.md` (see structure below) + an
+- Instruction = `prompts/bear.md` (see structure below) + an
   appended "How to run this research" block + `RECENCY_MANDATE` +
   `VERIFIED_FIGURES_MANDATE` + `REFERENCE_DATA_BLOCKS` + `RESEARCH_SOURCE_BLOCKS`.
 - `tools=[fmp_stock_news, web_search_tool]`, `output_key="bear_data"`.
-- `research-instructions.md` sections (used as the skeleton the bear case must
+- `prompts/bear.md` sections (used as the skeleton the bear case must
   answer): `# Goal`, `# Must follow instructions`, `# Key metrics for Business
   Types`, `# Assumptions`, then `# Research Instructions` with `## Basic
   Company Info Questions`, `## Business Model Questions`, `## Key numbers`,
@@ -110,20 +114,20 @@ sequenceDiagram
   `main.py:257` refers to the "Key numbers" section as "3." by its position
   in that list (Basic Info=1, Business Model=2, Key numbers=3).
 
-### `bull_agent` — `main.py:271-304`
+### `bull_agent` — `agents/definitions.py:156-163`
 
-- Instruction = `bullish-research-instructions.md` + a "How to run this
+- Instruction = `prompts/bull.md` + a "How to run this
   research" block + `RECENCY_MANDATE` + `VERIFIED_FIGURES_MANDATE` + a
   CONFIRMED/SPECULATIVE catalyst-labeling instruction + `REFERENCE_DATA_BLOCKS`
   + `RESEARCH_SOURCE_BLOCKS` + `<BEAR_CASE>{bear_data}</BEAR_CASE>`.
 - `tools=[fmp_stock_news, web_search_tool]`, `output_key="bull_data"`.
-- `bullish-research-instructions.md` sections: `## 1. Capital Allocation &
+- `prompts/bull.md` sections: `## 1. Capital Allocation &
   Compounding Efficiency`, `## 2. Unlocking Growth Catalysts & Optionality`,
   `## 3. Expectations Check & Upside Scenario`, `## 4. Direct Refutation of
   the Bear Case` — §4 is why `bull_agent` must run **after** `bear_agent`
   (it needs `bear_data` in context to refute).
 
-### `analyst_agent` — `main.py:307-412`
+### `analyst_agent` — `agents/definitions.py:166-173`
 
 - No skeptical or promotional instruction file — the entire prompt is
   written inline in `main.py`. No `tools` (`tools=[]`) — it reasons over
@@ -133,13 +137,13 @@ sequenceDiagram
   `## Recent Quarter Check`, `## Bull Case (summary)`, `## Bear Case
   (summary)`, `## Final Verdict`, `## What Would Make This Wrong`.
 - `output_key="final_report"`. This string is what `_extract_verdict`
-  (`main.py:1078`) parses and what gets persisted via `db_store_final_report`.
+  (`pipeline/verdict.py:34`) parses and what gets persisted via `db_store_final_report`.
 - Verdict vocabulary: `Buy` / `Watch` / `Avoid`, always for a reader who does
   **not** currently own the stock.
 
-### `sale_advisor_agent` — `main.py:419-452`
+### `sale_advisor_agent` — `agents/definitions.py:180-187`
 
-- Instruction = `sale-advisor-instructions.md` (plain prose, no `##`
+- Instruction = `prompts/sale-advisor.md` (plain prose, no `##`
   sub-headers) + a "How to run this analysis" block +
   `VERIFIED_FIGURES_MANDATE` + an anchoring requirement (every numeric
   threshold must cite the current actual value alongside it) +
@@ -147,21 +151,21 @@ sequenceDiagram
 - `tools=[fmp_stock_news, web_search_tool]`, `output_key="sale_data"`.
 - Ignores the verdict; assumes the stock is already owned. Names **three**
   measurable, non-price-based sell triggers.
-- Dropped by `--skip-sale-advisor` (`main.py:927-928` filters it out of the
+- Dropped by `--skip-sale-advisor` (`pipeline/execution.py:84-85` filters it out of the
   agent list before the loop runs) — see `_run_pipeline_async`.
 
 ## The standalone follow-up roles
 
-### `sell_check_agent` — `main.py:471-507`
+### `sell_check_agent` — `agents/definitions.py:206-212`
 
 - Not in `PIPELINE_AGENTS`; run only by `_run_sell_check_async`
-  (`main.py:995-1031`), invoked from `run_sell_check` (`main.py:2200`).
+  (`pipeline/execution.py:159-195`), invoked from `run_sell_check` (`main.py:465`).
 - Reads `{sale_conditions}` (loaded from a stored `SALE_CASE` via
   `db_get_sale_case`), `{quarterly_data}`, `{metrics_data}` — all freshly
   fetched at check time, not from the original analysis run.
 - Marks each condition MET / NOT MET / UNCLEAR and writes a single
   `Recommendation: SELL` (any condition clearly met) or `Recommendation:
-  HOLD` line, parsed by `_extract_recommendation` (`main.py:2194`).
+  HOLD` line, parsed by `_extract_recommendation` (`main.py:459`).
 
 ### `buy_case_agent` and `buy_check_agent` — `buy_case_agent.py`
 
@@ -174,18 +178,18 @@ the shared cost/logging plumbing exactly as `critic_agent` does.
   and `{price_data}`, and writes the seven-section buy case (why this is a Watch, the
   forward valuation, what analysts expect, the ecosystem, the buy triggers, what would
   take it off the watchlist, how to use it). Instruction file:
-  `buy-case-instructions.md`.
+  `prompts/buy-case.md`.
 - `buy_check_agent` reads `{buy_conditions}` (a stored `BUY_CASE`), plus freshly
   fetched `{price_data}`, `{metrics_data}` and `{quarterly_data}`, marks each trigger
   MET / NOT MET / UNCLEAR, and writes a single `Recommendation: BUY` or
   `Recommendation: WAIT` line, parsed by `buy_case_agent.extract_buy_recommendation`.
-  Instruction file: `buy-check-instructions.md`.
+  Instruction file: `prompts/buy-check.md`.
 - Both are run through `critic_agent.run_agent` (one throwaway ADK session per turn,
   with the same 429 backoff), not through `_run_pipeline_async`.
 
 ## Rate-limit handling shared by every agent call
 
-`_is_rate_limit_error` (`main.py:562`) detects Gemini's HTTP 429
+`_is_rate_limit_error` (`agents/runtime.py:90`) detects Gemini's HTTP 429
 (`RESOURCE_EXHAUSTED`). Retry policy constants (`main.py:514-517`):
 
 - `MAX_AGENT_RETRIES = 5`

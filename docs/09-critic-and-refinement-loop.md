@@ -2,11 +2,88 @@
 
 Primary files: [`src/critic_agent.py`](../src/critic_agent.py) (the two agents and
 the parsers), [`src/refine.py`](../src/refine.py) (the loop, the spend control, and
-the CLI), [`src/critic-instructions.md`](../src/critic-instructions.md) (the
-critic's own prompt).
+the CLI), [`src/prompts/critic.md`](../src/prompts/critic.md) (the critic's own
+prompt).
 
 This is **Phase D** — an opt-in second opinion on a report the pipeline has already
 produced. Nothing in Phases A–C calls it, and `main.py` does not import it.
+
+## The critic can run on a different model from the analyst
+
+`agents.critic_model` in [`config.yaml`](../src/specs/config.yaml) points the critic
+somewhere other than `agents.model`. Empty means "the same model as everything
+else", which is the default.
+
+The reason is not cost, it is **correlated blind spots**. A reviewer sharing its
+target's weights shares its failure modes: if the analyst's model misreads a
+disclosure a certain way, the same model reviewing it tends to misread it the same
+way, and the review adds less than it appears to. A different lineage decorrelates
+the errors.
+
+**Only `critic_agent` moves.** `reviser_agent` stays on `agents.model` deliberately
+— it is built from `analyst_agent.instruction` verbatim, so it IS the analyst
+revising its own work and should be held to those rules by the model that wrote
+them. A model swap therefore changes who CHALLENGES the report, never who writes it.
+
+Any replacement needs two things, both load-bearing:
+
+- **Tool calling.** The critic researches; `refinement.seed_critique_usd` is set
+  above the reviser's precisely because of those calls. A model that quietly drops
+  them returns a clean review that verified nothing, which is worse than no review.
+- **A long context.** It is sent the report under review plus the verified figures,
+  the quarterly data, and the accumulated critic memory.
+
+A bare model name is treated by ADK as a **Gemini** model, so anything else must
+carry a LiteLLM-style `provider/model` prefix — `agents.resolve_model()` routes on
+the `/` and wraps it in ADK's `LiteLlm`. Credentials come from the environment
+(`OLLAMA_API_BASE`, `OLLAMA_API_KEY`, ...), never from the committed config.
+
+### Watch the meter after a swap
+
+`_check_metered` (in [`usage.py`](../src/usage.py)) reports **ZERO model calls** for
+any agent that ran but reported no tokens. That is the failure mode a swap invites:
+`usage_metadata` is the Gemini event shape, and a model reached through another
+provider may not populate it — every event is skipped, the accumulator stays at
+zero, and the run reports itself as free while the budget guard goes blind.
+
+Price the new model in `llm_pricing.models` keyed by the name ADK reports on the
+event (`model_version`), which for a LiteLLM-routed model is the full
+`provider/model` string, not the bare model id. A subscription-billed model belongs
+there at explicit zero rather than being left out: "priced at zero deliberately" and
+"we have no price for this" are different claims, and an absent model makes the cost
+guard cry wolf on every run.
+
+**What is not free is the knock-on.** A noisy critic raises `BLOCKING` findings that
+trigger revision rounds, and the reviser runs on the analyst's model at full rate.
+Judge a critic by its revision count, not by its own token bill.
+
+### Measured: glm-5.2:cloud over Ollama, five reports (2026-08-15)
+
+| Ticker | Outcome | Findings | Critic $ | Run $ |
+| :--- | :--- | :--- | ---: | ---: |
+| NLST | NOT_AGREED | MATERIAL, MINOR | 0.0000 | 0.0334 |
+| FN | COMPLETED | none — clean pass | 0.0000 | 0.0172 |
+| CNC | COMPLETED | MINOR | 0.0000 | 0.0813 |
+| SNDK | NOT_AGREED | BLOCKING, MATERIAL | 0.0000 | 0.0494 |
+| VNT | NOT_AGREED | MATERIAL | 0.0000 | 0.0493 |
+
+438k input and 55k output tokens across the five; the same work on
+`gemini-3.6-flash` would have been about **$1.07**. The run costs above are Tavily
+searches and embeddings, not the critic.
+
+The distribution is the part worth reading: **one clean pass and one BLOCKING** out
+of five. A critic that finds problems everywhere is a noise generator and a critic
+that finds nothing is a rubber stamp; this is neither. All five made tool calls,
+all five parsed into the severity taxonomy, none tripped `_check_metered`.
+
+Caveats: n=5, no false-positive audit yet, and the single BLOCKING finding — the one
+that would actually spend Gemini tokens on a revision — has not been adjudicated.
+
+On cost: at ~$0.21 a round on Gemini, a $20/month subscription needs roughly **94
+critic rounds a month** to pay for itself on this workload alone. It does not pay
+for itself as a critic budget. It is worth it as a MARGINAL use of a subscription
+kept for other things, where the critic's cost is genuinely zero — and the
+independence is the real argument regardless.
 
 It is the **Producer–Critic pattern** (also called **reflection**, or
 generator–evaluator): one agent produces, a second and independent agent evaluates,
@@ -43,7 +120,7 @@ and money in the other.
 
 | Symbol | Line | What it does |
 | :--- | ---: | :--- |
-| `critic_agent` | `:86` | The `LlmAgent`. `critic-instructions.md` + a per-review block; tools = news/search/profile/metrics/quarterly; `output_key="critic_review"`. |
+| `critic_agent` | `:86` | The `LlmAgent`. `prompts/critic.md` + a per-review block; tools = news/search/profile/metrics/quarterly; `output_key="critic_review"`. |
 | `RESPONSE_MARKER` | `:118` | `<<<RESPONSE TO CRITIC>>>` — separates the revised report from the analyst's reply inside one turn. |
 | `reviser_agent` | `:120` | The `LlmAgent` built from `main.analyst_agent.instruction` **verbatim** + a revision block; `output_key="revised_report"`. |
 | `BLOCKING_SEVERITIES` | `:184` | `("BLOCKING", "MATERIAL")` — the two that prevent agreement. Everything keys off this tuple. |
@@ -65,7 +142,7 @@ and money in the other.
 | `_load_source_case` | `:163` | Loads `BEAR_CASE`/`BULL_CASE` from the reviewed run; missing is survivable, not fatal. |
 | `_Estimator` | `:186` | Per-role cost projection for the next round. `observe` `:199`, `full_round` `:205`. |
 | `_affordable` | `:217` | Returns a reason string when the next round cannot be paid for, else `""`. |
-| `_agreed_banner` / `_not_agreed_banner` | `:233` / `:283` | The reader-facing standing block, including unfixed MINOR findings. |
+| `_agreed_banner` / `_not_agreed_banner` | `:233` / `:283` | The reader-facing standing block. Agreed lists unfixed MINOR findings (no revision ran for them); not-agreed lists only the blocking/material objections still standing, and points at the stored full review. |
 | `_demote_headings` | `:430` | Pushes an inlined review's headings down so they nest under their container. |
 | `_ADVISORY_NOTE` / `_refresh_sale_advisory` | `:310` / `:330` | Gives the refinement its own `SALE_CASE` — carried forward or re-derived. See below. |
 | `_BUY_CASE_NOTE` / `_refresh_buy_case` | after `_refresh_sale_advisory` | The same for `BUY_CASE`, with a verdict condition on top: four outcomes, not two. See below. |
@@ -98,7 +175,7 @@ boundaries:
 
 | Agent | Instruction | Tools | `output_key` | Reads (all templated from state) |
 | :--- | :--- | :--- | :--- | :--- |
-| `critic_agent` | `critic-instructions.md` + a per-review block | `fmp_stock_news`, `web_search_tool`, `fmp_company_profile`, `fmp_metrics_extractor`, `fmp_quarterly_trends` | `critic_review` | `report_under_review`, `bear_data`, `bull_data`, `verified_figures`, `quarterly_data`, `screen_context`, `past_corrections`, `analyst_response` |
+| `critic_agent` | `prompts/critic.md` + a per-review block | `fmp_stock_news`, `web_search_tool`, `fmp_company_profile`, `fmp_metrics_extractor`, `fmp_quarterly_trends` | `critic_review` | `report_under_review`, `bear_data`, `bull_data`, `verified_figures`, `quarterly_data`, `screen_context`, `past_corrections`, `analyst_response` |
 | `reviser_agent` | **`main.analyst_agent.instruction` verbatim** + a revision block | *(none)* | `revised_report` | the same, plus `critic_review`, minus `analyst_response` |
 
 `reviser_agent` reusing the analyst's instruction verbatim is the point, not
@@ -170,7 +247,7 @@ declared verdict and the severities it assigned itself:
 
 `MINOR` findings never block. A critic that cannot agree over a wording nit spends
 the budget and leaves the reader with a report stamped un-agreed for nothing —
-`critic-instructions.md` says so in as many words, and this code enforces it.
+`prompts/critic.md` says so in as many words, and this code enforces it.
 
 ## The report is older than the figures beside it
 
@@ -241,7 +318,7 @@ the guard that exists to stop exactly this kind of spending.
   every session reserves it and a session ending on `Buy` or `Avoid` simply does not
   spend it. `max_budget_usd` went 2.25 → 2.45 to absorb the reservation rather than
   letting it quietly buy fewer review rounds.
-- `_Estimator` (`refine.py:186`) keeps **per-role** estimates (the critic makes tool calls, the
+- `_Estimator` (`refine.py:239`) keeps **per-role** estimates (the critic makes tool calls, the
   reviser does not), seeded from config and then replaced by what each role
   actually cost × `estimate_headroom`. A zero measurement is ignored — a turn that
   failed before billing is not a cheap round.
@@ -259,7 +336,7 @@ or an analyst reintroducing something it already conceded, spends a paid round
 relitigating a lap already run. `critic_memory` (see
 [03-mcp-tools-and-persistence.md](03-mcp-tools-and-persistence.md)) is the fix —
 one row per finding, replayed into **both** agents' prompts every round via
-`format_past_corrections()` (`critic_agent.py:315`), assembled at `refine.py:542`.
+`format_past_corrections()` (`critic_agent.py:315`), assembled at `critic_agent.py:102`.
 
 - **Retrieved by exact ticker + recency, not by vector similarity.** The retrieval
   key is known exactly (this company's own review history); semantic search would
@@ -292,7 +369,7 @@ must be anchored to `VERIFIED_FIGURES` with the current value quoted beside it, 
 figure the critic corrected can leave a threshold calibrated against a number the
 pipeline itself now says was wrong.
 
-`_refresh_sale_advisory` (`refine.py:330`) handles it by outcome, so the cost is only
+`_refresh_sale_advisory` (`refine.py:477`) handles it by outcome, so the cost is only
 paid when it buys something:
 
 | Outcome | What happens | Cost |
@@ -387,13 +464,63 @@ The refined report is assembled the same way `analyze_ticker` assembles a fresh
 one — deterministic `## Magic Formula Metrics`, the analyst's prose, reconciliation
 warnings — plus one section the pipeline never writes:
 
-- **Agreed** (`_agreed_banner`, `refine.py:233`)**:** a short `## Independent Critic Review` note giving the round count
+- **Agreed** (`_agreed_banner`, `refine.py:317`)**:** a short `## Independent Critic Review` note giving the round count
   and review cost, and stating plainly that agreement means neither agent could
   find a fault in the argument, **not** that the call is right.
-- **Not agreed** (`_not_agreed_banner`, `refine.py:283`)**:** the same heading carrying a blunt "**The independent critic has
+- **Not agreed** (`_not_agreed_banner`, `refine.py:367`)**:** the same heading carrying a blunt "**The independent critic has
   NOT agreed this report**", the count of blocking and material objections still
-  standing, the stopping reason, and **the critic's full final review reproduced
-  underneath**.
+  standing, the stopping reason, and **a list of those standing objections** — title
+  and one-line summary each. The full review is not reproduced; it is stored as the
+  run's `CRITIC_REVIEW` output and the banner names the run to find it under.
+
+  > **This changed on 2026-08-15.** The banner used to paste the critic's ENTIRE
+  > final review underneath, including its "Independent Verification" section — the
+  > list of everything the critic checked and found CORRECT. On a real NLST run
+  > carrying one material objection, that was six paragraphs of successful
+  > verification sitting under a warning banner and about a third of the document
+  > (15.8KB → 24.1KB). It inverted the signal: a reader skimming saw a wall of critic
+  > prose and inferred the report was heavily disputed, when most of that prose said
+  > the opposite. MINOR findings are excluded here for the same reason — they never
+  > blocked, so they are not "standing"; they appear in the AGREED banner instead,
+  > where the point is that no revision ran for them.
+
+### What a refinement writes to the database
+
+Three things beyond the refined report itself, and the reasoning behind each is
+worth knowing before changing any of them:
+
+- **The artefacts it inherited but never regenerated** — `BEAR_CASE`, `BULL_CASE`,
+  `SEC_DATA`, `QUANT_METRICS`, copied from the run under review by
+  `db_copy_inherited_outputs`. A refinement does not re-run the research agents, so
+  without this the run listed in the web UI with Bear Case and Bull Case tabs that
+  loaded nothing — the same failure `db_copy_ticker_outputs` guards against on the
+  reuse path. Embeddings are NOT copied: the text is identical and already indexed
+  under the source run, and a second vector makes semantic search return one
+  document twice. The copy follows `refines_run_id` back through any chain, because
+  a refined report can itself be refined and the immediate parent has no bear case
+  either.
+
+- **A `POST_CRITIC` verdict row, but only when the review moved something.** The
+  pipeline's `INDEPENDENT` row is left exactly as written; this ADDS a second row
+  carrying the refined verdict and its own factors. That pairing is what makes
+  *"does the critic change outcomes, or only cost money"* answerable — grading the
+  refined call requires the pre-critic call still standing beside it, against the
+  same subsequent prices. Overwriting would delete the control group. A refinement
+  where the critic agreed and nothing was revised writes nothing, because a
+  duplicate row saying "same verdict, same reasoning" only dilutes every rate
+  computed over the table.
+
+  Both rows describe one holding, which is why `sync_external_picks` deliberately
+  does not filter `POST_CRITIC` out when settling a sold position: each carries its
+  own baseline and grades to its own return, and excluding one would leave it being
+  re-priced forever after the position closed.
+
+  Measured base rate, so you know what to expect: **1 refinement in 9 has changed a
+  verdict.** These rows will accumulate slowly. Treat them as a case file — "was the
+  critic right to move this one?" — not as a dataset that will reach significance
+  soon. If what you want is a faster read on whether the critic earns its cost,
+  `critic_memory` findings accumulate far quicker than verdict flips, and most of
+  the critic's value lands as corrected reasoning that never changes the label.
 
 Files: `reports/{TICKER}_Refined_Report_{Verdict}.md` and
 `reports/{TICKER}_Critic_Review.md`. The original run's report and rows are left
