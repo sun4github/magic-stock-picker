@@ -383,6 +383,30 @@ gained an `exit_date` at all: the snapshot job never stopped marking it, Q10
 kept it under *still held*, and the settled side of that split — the side that
 cannot turn any more — never learned about it.
 
+**A third case: the lot is deleted rather than sold.** The tracker keeps those
+apart on purpose — `CLOSED` means "I sold this", delete means "this purchase
+never happened" — and the ledger honours the distinction, because a mirrored row
+exists *only* because a lot existed. An orphan is not inert: the snapshot job
+prices anything with `exit_date IS NULL` and never joins lots, so it would keep
+being marked at market for years and keep counting in Q7 and Q10 as a purchase
+that was never made. The sync therefore **removes** the mirror, and
+`verdict_outcome` cascades with it.
+
+Removed, not settled — deliberately. Writing an `exit_date` and a closing price
+would record a sale that did not happen, and downstream nothing can tell that
+fabricated round trip from a real one. If a position genuinely was sold, restore
+the lot and record the sale on it; it then settles with its real exit price.
+Pipeline verdicts are never unmirrored: they record an analysis that happened
+whether or not the name was bought, and with no lot they simply carry no cost
+basis and drop out of Q10 on their own.
+
+Unmirroring is the only destructive operation in the script, and it infers
+"deleted" from *absence* — which an empty or wrong database also looks like. It
+therefore refuses when the tracker has no external lots at all, or when more
+than `MASS_UNMIRROR_SHARE` (25%) of the ledger has lost its lots.
+`--allow-mass-unmirror` lifts the share ceiling; nothing lifts the empty-tracker
+check.
+
 **The streams overlap.** An outside recommendation is sometimes also run through
 this pipeline before being bought, leaving two rows for one company: a
 `PIPELINE` verdict grading the analysis and an external row grading the

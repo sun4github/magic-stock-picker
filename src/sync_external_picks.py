@@ -19,12 +19,14 @@ the same schedule. Put both on one crontab line, in this order:
 Order matters. The sync is what tells the snapshot job which subjects exist and
 which have finished, so running the snapshot first means a week's delay on both.
 
-TWO THINGS IT DOES, AND WHY BOTH ARE NEEDED
--------------------------------------------
+THREE THINGS IT DOES, AND WHY EACH IS NEEDED
+--------------------------------------------
 1. Mirrors purchases that have no ledger row yet — externally-sourced only,
    since the pipeline writes its own verdicts as it reaches them.
 2. SETTLES rows whose position has since been sold — BOTH streams, pipeline
    picks included.
+3. UNMIRRORS rows whose lot has been deleted from the tracker — mirrored rows
+   only, and see "the third case" below.
 
 The second is not a variation of the first. A purchase is mirrored when it is
 made; the sale happens later, by which point a verdict_log row already exists
@@ -39,6 +41,36 @@ is the point: a closed position is closed whoever picked it. Only the join key
 differs — external picks match on (ticker, purchase date), pipeline picks on
 run_id. Closing a lot in the tracker is therefore the ONLY action required to
 settle it, regardless of which stream chose it.
+
+THE THIRD CASE: A DELETED LOT
+-----------------------------
+Deleting a lot in the tracker is not selling it. The tracker keeps the two
+apart deliberately — CLOSED means "I sold this", delete means "this purchase
+never happened" — and the ledger has to honour the distinction, because a
+mirrored row exists ONLY because a lot existed.
+
+Left alone an orphan is not inert. run_outcome_snapshot re-prices anything with
+exit_date IS NULL and never joins lots, so it keeps being marked at market for
+the whole external tracking window — years — and counts in Q7 and Q10 as a
+purchase the tracker says was never made.
+
+Settling it instead would be worse. Writing an exit_date and a closing price
+records a SALE THAT DID NOT HAPPEN, and downstream nothing can tell that
+fabricated round trip from a real one.
+
+So the mirror is removed, and verdict_outcome cascades with it. If a position
+was genuinely sold, restore the lot and record the sale on it: it then settles
+through step 2 with its real exit price, which is the number worth having.
+
+UNMIRRORING IS THE ONLY DESTRUCTIVE THING HERE
+----------------------------------------------
+It infers "deleted" from ABSENCE, and an empty or wrong database looks exactly
+like a mass deletion — point DATABASE_URL somewhere fresh and every mirrored row
+qualifies at once. So absence is believed only when the tracker is demonstrably
+populated and the loss is small: no lots at all, or more than MASS_UNMIRROR_SHARE
+of the ledger, and it refuses and says why. --allow-mass-unmirror lifts the share
+ceiling; nothing lifts the empty-tracker check. A ledger is years of accumulated
+marks that no re-run can rebuild.
 
 So: record purchases and sales in the tracker whenever you like, and let this
 run on its schedule. Nothing has to be run by hand at the moment of a trade.
@@ -105,6 +137,11 @@ FMP_EOD_URL = "https://financialmodelingprep.com/stable/historical-price-eod/lig
 FMP_PROFILE_URL = "https://financialmodelingprep.com/stable/profile"
 
 _DEFAULTS = {"benchmark_symbol": "SPY", "external_source": "MANUAL"}
+
+# Above this share of the mirrored ledger, unmirroring refuses to run without
+# --allow-mass-unmirror. See unmirror_guard: the operation infers "deleted" from
+# absence, and a wrong or empty database looks identical to a mass deletion.
+MASS_UNMIRROR_SHARE = 0.25
 
 # Statuses whose lots are still held as far as the tracker knows.
 HELD_STATUSES = ("OPEN", "TARGET_REACHED")
@@ -332,6 +369,86 @@ def newly_closed(cur, external_source: str) -> list:
     return cur.fetchall()
 
 
+def orphaned_mirrors(cur, external_source: str) -> list:
+    """Mirrored rows whose lot has been DELETED from the tracker.
+
+    The third lifecycle event, after mirroring a purchase and settling a sale.
+    A mirrored verdict exists only because a lot existed; deleting the lot in
+    the tracker means "this purchase never happened" (as distinct from selling
+    it, which is a status change and settles through newly_closed). The mirror
+    is then a record of nothing.
+
+    Left alone it does not merely sit there: run_outcome_snapshot re-prices any
+    verdict with exit_date IS NULL and never joins lots, so an orphan is marked
+    at market every week for the whole external tracking window — years — and
+    counts in Q7 and Q10 as a purchase the tracker says was never made.
+
+    Settling it instead would be worse: writing an exit_date and price records a
+    SALE that did not happen, and a fabricated round trip is indistinguishable
+    from a real one in every query downstream.
+
+    PIPELINE rows are never orphans. A pipeline verdict records an analysis that
+    genuinely happened whether or not the name was ever bought, and is graded as
+    an opinion in Q2/Q3 regardless; with no lot it simply carries no cost basis
+    and drops out of Q10 on its own.
+    """
+    cur.execute(
+        """
+        SELECT v.verdict_id, v.ticker, v.verdict_date, v.exit_date IS NOT NULL AS was_settled,
+               (SELECT COUNT(*) FROM verdict_outcome o WHERE o.verdict_id = v.verdict_id) AS marks
+          FROM verdict_log v
+         WHERE v.source = %s
+           AND NOT EXISTS (
+                 SELECT 1 FROM stock_tracker.lots l
+                  WHERE l.ticker = v.ticker
+                    AND l.purchase_date = v.verdict_date
+                    AND l.source <> 'PIPELINE')
+         ORDER BY v.verdict_date
+        """,
+        (external_source,),
+    )
+    return cur.fetchall()
+
+
+def mirrored_total(cur, external_source: str) -> int:
+    cur.execute("SELECT COUNT(*) FROM verdict_log WHERE source = %s", (external_source,))
+    return cur.fetchone()[0]
+
+
+def lots_total(cur) -> int:
+    cur.execute("SELECT COUNT(*) FROM stock_tracker.lots WHERE source <> 'PIPELINE'")
+    return cur.fetchone()[0]
+
+
+def unmirror_guard(orphans: int, mirrored: int, lots: int, allow_mass: bool):
+    """Whether unmirroring is safe to perform, and why not when it is not.
+
+    Unmirroring is the only destructive operation in this script, and it infers
+    "deleted" from ABSENCE — which is exactly what an empty or wrong database
+    also looks like. Point DATABASE_URL at a fresh installation, or run against
+    a tracker whose lots table has not been restored yet, and every mirrored row
+    in the ledger qualifies as an orphan at once.
+
+    So absence is only believed when the tracker is demonstrably populated and
+    the loss is small. Anything else stops and says so: a ledger is years of
+    accumulated marks that no re-run can rebuild, and a sync job silently
+    deleting all of it because a database was empty is not a risk worth
+    carrying for a convenience.
+    """
+    if orphans == 0:
+        return True, ""
+    if lots == 0:
+        return False, ("the tracker has no externally-sourced lots at all, which is "
+                       "indistinguishable from every lot having been deleted")
+    if allow_mass:
+        return True, ""
+    share = orphans / mirrored if mirrored else 1.0
+    if share > MASS_UNMIRROR_SHARE:
+        return False, (f"{orphans} of {mirrored} mirrored rows ({share:.0%}) have no lot, "
+                       f"over the {MASS_UNMIRROR_SHARE:.0%} ceiling")
+    return True, ""
+
+
 def unpriced_exits(cur) -> list:
     """Closed lots with no sale price — reported, never guessed at.
 
@@ -354,7 +471,7 @@ def has_position_tracker(cur) -> bool:
     return bool(cur.fetchone()[0])
 
 
-def run_sync(commit: bool) -> dict:
+def run_sync(commit: bool, allow_mass: bool = False) -> dict:
     cfg = _config()
     preflight(commit)
     benchmark = str(cfg.get("benchmark_symbol", "SPY")).strip().upper()
@@ -375,9 +492,19 @@ def run_sync(commit: bool) -> dict:
 
     rows = pending_purchases(cur, external_source)
     closures = newly_closed(cur, external_source)
-    if not rows and not closures:
-        logger.info("Every externally-sourced purchase already has a ledger row, and "
-                    "no open one has been sold since.")
+    orphans = orphaned_mirrors(cur, external_source)
+    unmirror_ok, unmirror_block = unmirror_guard(
+        len(orphans), mirrored_total(cur, external_source), lots_total(cur), allow_mass)
+    if not unmirror_ok:
+        logger.warning(
+            "%d mirrored row(s) have no lot behind them, but unmirroring is being SKIPPED: %s. "
+            "Nothing was deleted. Re-run with --allow-mass-unmirror if that is genuinely what "
+            "happened.", len(orphans), unmirror_block)
+        orphans = []
+
+    if not rows and not closures and not orphans:
+        logger.info("Every externally-sourced purchase already has a ledger row, "
+                    "no open one has been sold since, and none has lost its lot.")
         cur.close(); conn.close()
         return {"pending": 0, "written": 0, "closed": 0}
 
@@ -414,6 +541,19 @@ def run_sync(commit: bool) -> dict:
                       f"{float(exit_price):>9.2f}  ({pct:+.1f}%, {(exit_date - bought).days}d)")
             print("\n  Their weekly marks stop here, and any mark taken AFTER the sale "
                   "date is removed:\n  it prices a position that was no longer held.")
+        if orphans:
+            print(f"\n{len(orphans)} mirrored row(s) have NO LOT behind them any more and "
+                  f"would be DELETED from the ledger:\n")
+            for _vid, ticker, bought, was_settled, marks in orphans:
+                state = "settled" if was_settled else "still open"
+                print(f"    {ticker:<6} bought {bought}  ({state}, {marks} snapshot"
+                      f"{'' if marks == 1 else 's'} would go with it)")
+            print("\n  These were mirrored from tracker lots that have since been deleted.")
+            print("  Deleting a lot means the purchase never happened -- so the mirror is a")
+            print("  record of nothing. It is removed rather than settled: writing an exit")
+            print("  would put a sale that never occurred into Q7, Q8 and Q10.")
+            print("  If one of these was actually SOLD, stop: restore the lot and record the")
+            print("  sale on it instead, and it will settle normally on the next run.")
         print(f"\n  Benchmark baseline would be {benchmark} on each purchase date"
               + (" and each exit date." if exited or closures else "."))
         if unpriced:
@@ -422,7 +562,8 @@ def run_sync(commit: bool) -> dict:
             print("    Record what they sold for and they become gradeable.")
         print("\nDRY RUN - nothing written. Re-run with --commit.")
         cur.close(); conn.close()
-        return {"pending": len(rows), "written": 0, "closed": len(closures)}
+        return {"pending": len(rows), "written": 0, "closed": len(closures),
+                "would_unmirror": len(orphans)}
 
     # One call covers every purchase AND exit date, however far back they go.
     span = dates + [r[2] for r in closures]
@@ -523,10 +664,24 @@ def run_sync(commit: bool) -> dict:
         )
         settled += 1
 
+    # Remove mirrors whose lot has been deleted. verdict_outcome and
+    # verdict_basis both cascade off verdict_log, so the row's whole history
+    # goes with it — which is the point: it was measuring a purchase that,
+    # according to the tracker, never happened.
+    unmirrored = 0
+    for verdict_id, ticker, bought, was_settled, marks in orphans:
+        cur.execute("DELETE FROM verdict_log WHERE verdict_id = %s", (verdict_id,))
+        unmirrored += cur.rowcount
+        logger.info("Unmirrored %s bought %s (%s, %d snapshot(s) removed): its lot is gone "
+                    "from the tracker.", ticker, bought,
+                    "was settled" if was_settled else "was open", marks)
+
     conn.commit()
     cur.close()
     conn.close()
 
+    if unmirrored:
+        logger.info("%d mirrored row(s) removed because their lot was deleted.", unmirrored)
     if settled:
         logger.info("%d pick(s) settled at their exit and removed from weekly marking.",
                     settled)
@@ -542,8 +697,8 @@ def run_sync(commit: bool) -> dict:
                        "will stay NULL: %s", benchmark, len(no_baseline),
                        ", ".join(f"{t} {d}" for t, d in no_baseline[:5]))
     return {"pending": len(rows), "written": written, "graded_at_exit": finals,
-            "settled_since_sold": settled, "unpriced_exits": len(unpriced),
-            "benchmark": benchmark}
+            "settled_since_sold": settled, "unmirrored": unmirrored,
+            "unpriced_exits": len(unpriced), "benchmark": benchmark}
 
 
 def main() -> int:
@@ -551,9 +706,15 @@ def main() -> int:
         description="Mirror externally-sourced purchases into the verdict ledger.")
     parser.add_argument("--commit", action="store_true",
                         help="Actually write. Without it this is a dry run.")
+    parser.add_argument("--allow-mass-unmirror", action="store_true",
+                        help="Permit removing mirrored rows even when most of the ledger "
+                             "has lost its lots. Off by default: that pattern is what a "
+                             "wrong or empty database looks like, and the deletion cannot "
+                             "be undone. Only pass this if you know the lots really were "
+                             "deleted.")
     args = parser.parse_args()
 
-    result = run_sync(args.commit)
+    result = run_sync(args.commit, args.allow_mass_unmirror)
     if args.commit:
         logger.info("External pick sync complete. %s", result)
         if result.get("written"):
