@@ -23,7 +23,7 @@ earlier version of this pipeline got burned by the opposite: a silent
 months with no signal anywhere that semantic search was broken (see
 [agent_architecture.md §5B "Embeddings were silently broken"](../src/specs/agent_architecture.md)).
 
-## A. CLI input validation — `main.py:2494-2604`
+## A. CLI input validation — `main.py:765-825`
 
 Runs once at startup, before any work begins. All of these `parser.error(...)`
 (prints a usage message and exits non-zero) rather than proceeding with an
@@ -31,13 +31,13 @@ ambiguous combination of flags:
 
 | Check | Line | Rejects |
 | :--- | ---: | :--- |
-| `--top-n` bounds | `main.py:2562-2563` | `--top-n` below 1 |
-| `--run` requires a check mode | `main.py:2571-2572` | `--run RUN_ID` used without `--sell-check` or `--buy-check` |
+| `--top-n` bounds | `main.py:766-767` | `--top-n` below 1 |
+| `--run` requires a check mode | `main.py:775-776` | `--run RUN_ID` used without `--sell-check` or `--buy-check` |
 | The two checks are mutually exclusive | after the `--run` check | `--sell-check` together with `--buy-check` — they test different stored conditions for opposite readers and each writes its own report, so one invocation would be ambiguous about which answer it reported |
-| `--screen-only` exclusivity | `main.py:2577-2589` | Combined with `--from-csv`, `--sell-check`, `--buy-check`, `--skip-sale-advisor`, `--skip-buy-case`, `--force`, or a bare `TICKER` |
-| `--sell-check` requires a ticker | `main.py:2594-2595` | `--sell-check` with no `TICKER` argument |
+| `--screen-only` exclusivity | `main.py:789-800` | Combined with `--from-csv`, `--sell-check`, `--buy-check`, `--skip-sale-advisor`, `--skip-buy-case`, `--force`, or a bare `TICKER` |
+| `--sell-check` requires a ticker | `main.py:808-809` | `--sell-check` with no `TICKER` argument |
 | `--buy-check` requires a ticker | dispatch chain | `--buy-check` with no `TICKER` argument |
-| `--skip-sale-advisor` + `--sell-check` | `main.py:2596-2597` | Combining them (sell-check never runs Phase C anyway) |
+| `--skip-sale-advisor` + `--sell-check` | `main.py:810-811` | Combining them (sell-check never runs Phase C anyway) |
 | `--skip-buy-case` + `--buy-check` | dispatch chain | Combining them (buy-check never runs Phase E anyway) |
 
 ## B. Screener eligibility gates (Phase A) — `magic_formula_starter_screener.py`
@@ -109,7 +109,7 @@ misconfigured or the data provider may have changed behavior:
 | Gate | Line | Halts the run, or fails open? |
 | :--- | ---: | :--- |
 | Budget guard (`_check_budget`) | `:608-632` | **Halts** (on `on_exceed: halt`) — but only *between* tickers, never mid-ticker, and marks the run `BUDGET_EXCEEDED` rather than `COMPLETED` so a short run is distinguishable from a finished one. `on_exceed: warn` fails open (logs loudly, continues). |
-| Per-agent 429 retry (`_is_rate_limit_error` + retry loop) | `:576, 952-976` | Retries up to `MAX_AGENT_RETRIES` (5) with exponential backoff; re-raises after exhausting retries, which aborts that ticker (returns zero usage — a known, accepted gap, see the comment at `main.py:970-974`) |
+| Per-agent 429 retry (`_is_rate_limit_error` + retry loop) | `:576, 952-976` | Retries up to `MAX_AGENT_RETRIES` (5) with exponential backoff; re-raises after exhausting retries, which aborts that ticker (returns zero usage — a known, accepted gap, see the comment at `pipeline/execution.py:114`) |
 | DB write failures (`_check_db`) | `:1069-1076` | **Fails open** — logs an ERROR but the run continues; a persistence failure does not stop analysis |
 | Embedding failures (`get_embedding`) | `persistence/embeddings.py:50-98` | **Fails open** — logs an ERROR (loud, not silent — see the rule at the top of this doc) and stores a zero vector rather than blocking the write |
 | Spend-lookup failure inside the budget guard | `agent_architecture.md`'s "Budget guard" §5B | Falls back to the per-run ceiling alone rather than failing open entirely — a guard that fails open silently would look protected when it isn't |
@@ -122,14 +122,14 @@ Only active under `python refine.py TICKER`. Full walkthrough:
 | Gate | Line | Checks | On failure |
 | :--- | ---: | :--- | :--- |
 | Agreement cross-check (`extract_critic_verdict`) | `critic_agent.py:269-297` | The critic's *declared* `CRITIC VERDICT:` line against the severities it assigned itself. Takes the **stricter** of the two. | A declared `AGREE` with a BLOCKING/MATERIAL finding standing is forced to `REVISE`, and the override is returned as a `note` and logged — resolving the contradiction the other way would stamp "the critic agreed" on a report the critic's own text says is unsupportable. |
-| Missing verdict line | `critic_agent.py:87-133` | Whether any `CRITIC VERDICT:` line parsed at all | **Falls back to the severities**, never to agreement — a formatting failure is not evidence of a clean report. |
+| Missing verdict line | `critic_agent.py:96-142` | Whether any `CRITIC VERDICT:` line parsed at all | **Falls back to the severities**, never to agreement — a formatting failure is not evidence of a clean report. |
 | Findings-parse fallback (`parse_findings`) | `critic_agent.py:222-238` | Whether the review's findings could be parsed at the expected heading/bold structure | If nothing parses *and* the text doesn't say "No findings.", any severity keyword in the body promotes it to a single `unparsed` finding. Silently returning `[]` would read as "the critic found nothing". |
-| Spend ceiling (`_affordable`) | `refine.py:259-271` | `spent + next-round estimate` against **both** `refinement.max_budget_usd` and the rolling `budget.per_day_usd` window | Returns a reason string; the loop stops **between** rounds and the report ships stamped un-agreed with that reason. Never aborts mid-round (an abandoned round is billed and produces nothing). |
+| Spend ceiling (`_affordable`) | `refine.py:285-297` | `spent + next-round estimate` against **both** `refinement.max_budget_usd` and the rolling `budget.per_day_usd` window | Returns a reason string; the loop stops **between** rounds and the report ships stamped un-agreed with that reason. Never aborts mid-round (an abandoned round is billed and produces nothing). |
 | Revision-affordability rule (`_Estimator.full_round`) | `refine.py:205, 661` | Whether a revision, **the critique that must follow it**, and **the sale advisory it invalidates** all fit | Stops before the revision. Guarantees two things: the shipped report has always been critiqued *as it stands*, and a revision never strands the advisory it made stale. Reserved rather than given a separate budget, so `--max-budget` remains the one number that governs. |
 | Zero-cost measurement guard (`_Estimator.observe`) | `refine.py:199-202` | Ignores a measured cost of `0` | A turn that failed before billing must not be recorded as a cheap round, or the next projection lets the loop start something it cannot finish. |
 | Reconciliation gate on the refined report | `refine.py:739-751` | Same `_reconcile_agent_figures` as §E, re-run over the revised text, the critic's own review, **and** the sale advisory | Same behavior as §E — warnings appended, never blocks persistence. |
-| Sale-advisory freshness (`_refresh_sale_advisory`) | `refine.py:399-491` | Whether the report was actually revised, and whether re-deriving the advisory fits the ceiling | No revision → carried forward unchanged (valid, since the prose did not move). Revision → re-derived against the refined report. Revision but unaffordable → **should be unreachable** (the cost is reserved before the revision is committed to); if reached, carried with a visible staleness warning and a loud log, never silently, because its sell triggers may be anchored to a figure the critic corrected. |
-| Source-case availability (`_load_source_case`) | `refine.py:174-193` | Whether the reviewed run still has `BEAR_CASE`/`BULL_CASE` stored | **Fails open with an explicit prompt note** telling the critic the case is unavailable and not to read its absence as evidence the summary is wrong. |
+| Sale-advisory freshness (`_refresh_sale_advisory`) | `refine.py:425-517` | Whether the report was actually revised, and whether re-deriving the advisory fits the ceiling | No revision → carried forward unchanged (valid, since the prose did not move). Revision → re-derived against the refined report. Revision but unaffordable → **should be unreachable** (the cost is reserved before the revision is committed to); if reached, carried with a visible staleness warning and a loud log, never silently, because its sell triggers may be anchored to a figure the critic corrected. |
+| Source-case availability (`_load_source_case`) | `refine.py:200-219` | Whether the reviewed run still has `BEAR_CASE`/`BULL_CASE` stored | **Fails open with an explicit prompt note** telling the critic the case is unavailable and not to read its absence as evidence the summary is wrong. |
 
 ## G1b. Stale-figure guards in the critic loop — `critic_agent.py` / `refine.py`
 

@@ -18,7 +18,7 @@ but each now has its own home: the reconciliation gate and the verified figures 
 > copies the value, so assigning to the copy would disable nothing while appearing
 > to. See the hazard note in [00-module-map.md](00-module-map.md).
 
-## 1. Candidate normalization, `main.py:1725-1779`
+## 1. Candidate normalization, `report/figures.py:41-77`
 
 A "candidate" dict (one company's Magic Formula figures) reaches
 `analyze_ticker` from two different code paths that disagree on shape:
@@ -39,7 +39,7 @@ A "candidate" dict (one company's Magic Formula figures) reaches
   goodwill-inclusive ROIC companion silently disappeared from every batch
   run — see the docstring for the incident this fixed.
 
-## 2. Verified figures, `main.py:1284-1419`
+## 2. Verified figures, `report/sections.py:85-276`
 
 The deterministic ground truth injected into every agent's prompt, so no
 agent can assert a debt/cash/market-cap/EV figure the pipeline's own
@@ -51,7 +51,7 @@ calculation disagrees with.
   `LiveMarketCap`, `EBIT`, `CapitalEmployed`) as a plain `{field: float}` dict.
   This same dict is what the reconciliation gate (below) checks agent prose
   against.
-- `_format_verified_figures(candidate, price=None)` (`main.py:1365`) renders it as
+- `_format_verified_figures(candidate, price=None)` (`report/sections.py:85`) renders it as
   prose for the `VERIFIED_FIGURES` prompt block, including Lynch's P/E,
   growth rate and PEG (spec §10) and the ROC vs.
   goodwill-inclusive-ROIC pairing (§2.F in the spec) and the ROA fallback
@@ -86,9 +86,9 @@ Both renderings fail open: a missing quote produces a section that says the pric
 could not be retrieved and why it does not affect the ratios, never a blank or a
 fabricated figure.
 
-## 3. Reconciliation gate, `main.py:1422-1698`
+## 3. Reconciliation gate, `report/reconciliation.py:1-394`
 
-Runs **after** the agents finish (`analyze_ticker`, `pipeline/analysis.py:68-328`),
+Runs **after** the agents finish (`analyze_ticker`, `pipeline/analysis.py:68-329`),
 scanning bear/bull/final/sale prose for dollar amounts presented as current
 total debt, market cap, or enterprise value, and flagging any that deviate
 from the verified figure beyond a per-field tolerance
@@ -102,7 +102,7 @@ flowchart TD
     Money --> Label{"_amount_for_label()\nreport/reconciliation.py:188\nis this amount attached to a\nreconciled label (debt/cap/EV)?"}
     Label -->|no nearby label| Skip1[ignored]
     Label -->|yes| Scope{"In scope?\n(not a delta, not another\nperiod, not a threshold,\nnot a 3+ amount comparison row,\nnot a named peer)"}
-    Scope -->|out of scope| Skip2[ignored — see main.py:1463-1501]
+    Scope -->|out of scope| Skip2[ignored — see report/reconciliation.py:90-118]
     Scope -->|in scope| Tolerance{"abs(stated - verified) / verified\n> _FIELD_TOLERANCE?"}
     Tolerance -->|within tolerance| Pass[no finding]
     Tolerance -->|exceeds| Finding["finding: source, field, stated,\nverified, deviation%, context"]
@@ -110,7 +110,7 @@ flowchart TD
 ```
 
 Key design decisions (each exists because a naive version produced false
-positives on **correct** reports — see the long comments at `main.py:1506-1570`):
+positives on **correct** reports — see the long comments at `report/reconciliation.py:148-172`):
 
 - **Label association is directional, not nearest-match.** An amount
   *immediately before* a label wins first ("$36.9 billion debt burden");
@@ -158,10 +158,10 @@ billed, so stopping halfway would waste rather than save). Reads
 `budget:` from `config.yaml` (`per_run_usd`, `per_day_usd` +
 `day_window_hours` as a rolling window via `db_spend_since`,
 `on_exceed: halt|warn`). On `halt`, raises `BudgetExceeded`
-(`settings.py:98`), caught in `_run_phase_b` (`main.py:265-322`), which marks
+(`settings.py:98`), caught in `_run_phase_b` (`main.py:253-310`), which marks
 the run `BUDGET_EXCEEDED` (not `COMPLETED`) but keeps everything already
 analyzed. `--no-budget` disables the guard for one invocation
-(`main.py:2325-2327`, flips the module-level `BUDGET_ENABLED`).
+(`main.py:762`, flips the module-level `BUDGET_ENABLED`).
 
 ## 5. Duplicate-run reuse, `main.py:627-661`
 
@@ -193,7 +193,7 @@ flowchart LR
   lands on `Watch`, which is a property of the analysis rather than of the flag, so
   the variants differ only in what was **asked for**. Returns
   `""` (disabling reuse) when the balance-sheet date is unknown.
-- Reuse is checked at the top of `analyze_ticker` (`pipeline/analysis.py:68-328`),
+- Reuse is checked at the top of `analyze_ticker` (`pipeline/analysis.py:68-329`),
   before any billed work — a hit costs one DB read plus a row copy, a miss
   costs nothing extra. `reuse.enabled`/`reuse.max_age_hours` in `config.yaml`;
   `--force` bypasses the check entirely regardless of config.
@@ -210,8 +210,8 @@ flowchart TD
     Usage --> Merge["_merge_usage()\nusage.py:176\nfold agent usage into ticker usage,\nticker usage into run usage"]
     Embed["get_embedding() calls\n(mcp_server.py EMBEDDING_USAGE)"] --> Collect["_collect_embedding_usage()\nusage.py:169"]
     Collect --> Usage
-    Merge --> Cost["_total_cost()\nmain.py:827\n= _llm_cost + _embedding_cost + _search_cost"]
-    Cost --> Log["_log_usage()\nmain.py:832 — per-ticker, per-agent, per-run log lines"]
+    Merge --> Cost["_total_cost()\nusage.py:257\n= _llm_cost + _embedding_cost + _search_cost"]
+    Cost --> Log["_log_usage()\nusage.py:262 — per-ticker, per-agent, per-run log lines"]
     Cost --> Finalize["_finalize_run()\nusage.py:293\nwrites pipeline_runs usage/cost columns"]
 ```
 
@@ -237,7 +237,7 @@ flowchart TD
   counts into dollars using `config.yaml`'s `llm_pricing`/`search_pricing`
   tables. An unpriced model is logged loudly and excluded from the total
   (a known lower bound), never silently priced at zero.
-- `_finalize_run(run_id, usage, run_label, status)` (`main.py:863`) writes
+- `_finalize_run(run_id, usage, run_label, status)` (`usage.py:293`) writes
   the aggregated usage/cost onto the `pipeline_runs` row via
   `db_finalize_pipeline_run`.
 

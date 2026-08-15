@@ -23,7 +23,7 @@ Every function below is decorated `@mcp.tool()` against a `FastMCP` server
 instance (`mcp = FastMCP("MagicFormulaSkepticalDecomposer")`,
 `mcp_server.py:21`). That decoration registers each function so
 `mcp_server.py` **could** be run standalone as a real MCP server
-(`mcp_server.py:1153-1154`: `if __name__ == "__main__": mcp.run()`), speaking
+(`mcp_server.py:71-72`: `if __name__ == "__main__": mcp.run()`), speaking
 the Model Context Protocol over stdio/SSE to any MCP-compatible client.
 
 **In this codebase, that server is never actually started.** `main.py` does
@@ -167,7 +167,7 @@ flowchart LR
     A2 --> FMPNews[("FMP /stable/news/stock")]
 ```
 
-## Embeddings, `mcp_server.py:713-781`
+## Embeddings, `persistence/embeddings.py:1-98`
 
 Not a `@mcp.tool()` itself — `get_embedding` is a plain helper called from
 inside `db_store_agent_output` and `db_store_final_report`. Its external
@@ -185,7 +185,7 @@ returns a **zero vector**, so a row that failed to embed is still stored but
 silently unsearchable by `db_search_historical_reports`. This replaced an
 earlier bug where every embedding call failed silently
 (`google.generativeai`, an uninstalled legacy SDK, wrapped in a bare
-`except: pass`) — see the docstring at `mcp_server.py:736-746` and
+`except: pass`) — see the docstring at `persistence/embeddings.py:50-62` and
 [agent_architecture.md §5B "Embeddings were silently broken"](../src/specs/agent_architecture.md).
 
 `EMBEDDING_USAGE` (`persistence/embeddings.py:30`) is a module-level counter of

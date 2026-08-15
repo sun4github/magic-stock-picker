@@ -25,7 +25,7 @@ session-state keys (`output_key` on write, `{key_name}` templating on read).
 There is **no** SEC/metrics/search "agent" — that data is fetched by direct
 Python function calls (`fetch_sec_10k_data`, `fmp_metrics_extractor`,
 `fmp_quarterly_trends` in `mcp_server.py`) with zero LLM tokens spent, called
-directly from `analyze_ticker` (`pipeline/analysis.py:68-328`) before any agent runs.
+directly from `analyze_ticker` (`pipeline/analysis.py:68-329`) before any agent runs.
 
 ## Which tools each agent can call, and where those tools reach
 
@@ -151,7 +151,7 @@ sequenceDiagram
 - `tools=[fmp_stock_news, web_search_tool]`, `output_key="sale_data"`.
 - Ignores the verdict; assumes the stock is already owned. Names **three**
   measurable, non-price-based sell triggers.
-- Dropped by `--skip-sale-advisor` (`main.py:927-928` filters it out of the
+- Dropped by `--skip-sale-advisor` (`pipeline/execution.py:84-85` filters it out of the
   agent list before the loop runs) — see `_run_pipeline_async`.
 
 ## The standalone follow-up roles
@@ -159,13 +159,13 @@ sequenceDiagram
 ### `sell_check_agent` — `agents/definitions.py:206-212`
 
 - Not in `PIPELINE_AGENTS`; run only by `_run_sell_check_async`
-  (`pipeline/execution.py:152-188`), invoked from `run_sell_check` (`main.py:477`).
+  (`pipeline/execution.py:152-188`), invoked from `run_sell_check` (`main.py:465`).
 - Reads `{sale_conditions}` (loaded from a stored `SALE_CASE` via
   `db_get_sale_case`), `{quarterly_data}`, `{metrics_data}` — all freshly
   fetched at check time, not from the original analysis run.
 - Marks each condition MET / NOT MET / UNCLEAR and writes a single
   `Recommendation: SELL` (any condition clearly met) or `Recommendation:
-  HOLD` line, parsed by `_extract_recommendation` (`main.py:2194`).
+  HOLD` line, parsed by `_extract_recommendation` (`main.py:459`).
 
 ### `buy_case_agent` and `buy_check_agent` — `buy_case_agent.py`
 
