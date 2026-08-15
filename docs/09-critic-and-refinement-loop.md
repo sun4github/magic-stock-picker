@@ -2,11 +2,88 @@
 
 Primary files: [`src/critic_agent.py`](../src/critic_agent.py) (the two agents and
 the parsers), [`src/refine.py`](../src/refine.py) (the loop, the spend control, and
-the CLI), [`src/critic-instructions.md`](../src/critic-instructions.md) (the
-critic's own prompt).
+the CLI), [`src/prompts/critic.md`](../src/prompts/critic.md) (the critic's own
+prompt).
 
 This is **Phase D** — an opt-in second opinion on a report the pipeline has already
 produced. Nothing in Phases A–C calls it, and `main.py` does not import it.
+
+## The critic can run on a different model from the analyst
+
+`agents.critic_model` in [`config.yaml`](../src/specs/config.yaml) points the critic
+somewhere other than `agents.model`. Empty means "the same model as everything
+else", which is the default.
+
+The reason is not cost, it is **correlated blind spots**. A reviewer sharing its
+target's weights shares its failure modes: if the analyst's model misreads a
+disclosure a certain way, the same model reviewing it tends to misread it the same
+way, and the review adds less than it appears to. A different lineage decorrelates
+the errors.
+
+**Only `critic_agent` moves.** `reviser_agent` stays on `agents.model` deliberately
+— it is built from `analyst_agent.instruction` verbatim, so it IS the analyst
+revising its own work and should be held to those rules by the model that wrote
+them. A model swap therefore changes who CHALLENGES the report, never who writes it.
+
+Any replacement needs two things, both load-bearing:
+
+- **Tool calling.** The critic researches; `refinement.seed_critique_usd` is set
+  above the reviser's precisely because of those calls. A model that quietly drops
+  them returns a clean review that verified nothing, which is worse than no review.
+- **A long context.** It is sent the report under review plus the verified figures,
+  the quarterly data, and the accumulated critic memory.
+
+A bare model name is treated by ADK as a **Gemini** model, so anything else must
+carry a LiteLLM-style `provider/model` prefix — `agents.resolve_model()` routes on
+the `/` and wraps it in ADK's `LiteLlm`. Credentials come from the environment
+(`OLLAMA_API_BASE`, `OLLAMA_API_KEY`, ...), never from the committed config.
+
+### Watch the meter after a swap
+
+`_check_metered` (in [`usage.py`](../src/usage.py)) reports **ZERO model calls** for
+any agent that ran but reported no tokens. That is the failure mode a swap invites:
+`usage_metadata` is the Gemini event shape, and a model reached through another
+provider may not populate it — every event is skipped, the accumulator stays at
+zero, and the run reports itself as free while the budget guard goes blind.
+
+Price the new model in `llm_pricing.models` keyed by the name ADK reports on the
+event (`model_version`), which for a LiteLLM-routed model is the full
+`provider/model` string, not the bare model id. A subscription-billed model belongs
+there at explicit zero rather than being left out: "priced at zero deliberately" and
+"we have no price for this" are different claims, and an absent model makes the cost
+guard cry wolf on every run.
+
+**What is not free is the knock-on.** A noisy critic raises `BLOCKING` findings that
+trigger revision rounds, and the reviser runs on the analyst's model at full rate.
+Judge a critic by its revision count, not by its own token bill.
+
+### Measured: glm-5.2:cloud over Ollama, five reports (2026-08-15)
+
+| Ticker | Outcome | Findings | Critic $ | Run $ |
+| :--- | :--- | :--- | ---: | ---: |
+| NLST | NOT_AGREED | MATERIAL, MINOR | 0.0000 | 0.0334 |
+| FN | COMPLETED | none — clean pass | 0.0000 | 0.0172 |
+| CNC | COMPLETED | MINOR | 0.0000 | 0.0813 |
+| SNDK | NOT_AGREED | BLOCKING, MATERIAL | 0.0000 | 0.0494 |
+| VNT | NOT_AGREED | MATERIAL | 0.0000 | 0.0493 |
+
+438k input and 55k output tokens across the five; the same work on
+`gemini-3.6-flash` would have been about **$1.07**. The run costs above are Tavily
+searches and embeddings, not the critic.
+
+The distribution is the part worth reading: **one clean pass and one BLOCKING** out
+of five. A critic that finds problems everywhere is a noise generator and a critic
+that finds nothing is a rubber stamp; this is neither. All five made tool calls,
+all five parsed into the severity taxonomy, none tripped `_check_metered`.
+
+Caveats: n=5, no false-positive audit yet, and the single BLOCKING finding — the one
+that would actually spend Gemini tokens on a revision — has not been adjudicated.
+
+On cost: at ~$0.21 a round on Gemini, a $20/month subscription needs roughly **94
+critic rounds a month** to pay for itself on this workload alone. It does not pay
+for itself as a critic budget. It is worth it as a MARGINAL use of a subscription
+kept for other things, where the critic's cost is genuinely zero — and the
+independence is the real argument regardless.
 
 It is the **Producer–Critic pattern** (also called **reflection**, or
 generator–evaluator): one agent produces, a second and independent agent evaluates,
@@ -43,7 +120,7 @@ and money in the other.
 
 | Symbol | Line | What it does |
 | :--- | ---: | :--- |
-| `critic_agent` | `:86` | The `LlmAgent`. `critic-instructions.md` + a per-review block; tools = news/search/profile/metrics/quarterly; `output_key="critic_review"`. |
+| `critic_agent` | `:86` | The `LlmAgent`. `prompts/critic.md` + a per-review block; tools = news/search/profile/metrics/quarterly; `output_key="critic_review"`. |
 | `RESPONSE_MARKER` | `:118` | `<<<RESPONSE TO CRITIC>>>` — separates the revised report from the analyst's reply inside one turn. |
 | `reviser_agent` | `:120` | The `LlmAgent` built from `main.analyst_agent.instruction` **verbatim** + a revision block; `output_key="revised_report"`. |
 | `BLOCKING_SEVERITIES` | `:184` | `("BLOCKING", "MATERIAL")` — the two that prevent agreement. Everything keys off this tuple. |
@@ -98,7 +175,7 @@ boundaries:
 
 | Agent | Instruction | Tools | `output_key` | Reads (all templated from state) |
 | :--- | :--- | :--- | :--- | :--- |
-| `critic_agent` | `critic-instructions.md` + a per-review block | `fmp_stock_news`, `web_search_tool`, `fmp_company_profile`, `fmp_metrics_extractor`, `fmp_quarterly_trends` | `critic_review` | `report_under_review`, `bear_data`, `bull_data`, `verified_figures`, `quarterly_data`, `screen_context`, `past_corrections`, `analyst_response` |
+| `critic_agent` | `prompts/critic.md` + a per-review block | `fmp_stock_news`, `web_search_tool`, `fmp_company_profile`, `fmp_metrics_extractor`, `fmp_quarterly_trends` | `critic_review` | `report_under_review`, `bear_data`, `bull_data`, `verified_figures`, `quarterly_data`, `screen_context`, `past_corrections`, `analyst_response` |
 | `reviser_agent` | **`main.analyst_agent.instruction` verbatim** + a revision block | *(none)* | `revised_report` | the same, plus `critic_review`, minus `analyst_response` |
 
 `reviser_agent` reusing the analyst's instruction verbatim is the point, not
@@ -170,7 +247,7 @@ declared verdict and the severities it assigned itself:
 
 `MINOR` findings never block. A critic that cannot agree over a wording nit spends
 the budget and leaves the reader with a report stamped un-agreed for nothing —
-`critic-instructions.md` says so in as many words, and this code enforces it.
+`prompts/critic.md` says so in as many words, and this code enforces it.
 
 ## The report is older than the figures beside it
 
@@ -259,7 +336,7 @@ or an analyst reintroducing something it already conceded, spends a paid round
 relitigating a lap already run. `critic_memory` (see
 [03-mcp-tools-and-persistence.md](03-mcp-tools-and-persistence.md)) is the fix —
 one row per finding, replayed into **both** agents' prompts every round via
-`format_past_corrections()` (`critic_agent.py:315`), assembled at `critic_agent.py:96`.
+`format_past_corrections()` (`critic_agent.py:315`), assembled at `critic_agent.py:102`.
 
 - **Retrieved by exact ticker + recency, not by vector similarity.** The retrieval
   key is known exactly (this company's own review history); semantic search would

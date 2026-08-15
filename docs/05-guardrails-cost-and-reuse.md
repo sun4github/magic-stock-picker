@@ -88,7 +88,7 @@ fabricated figure.
 
 ## 3. Reconciliation gate, `report/reconciliation.py:1-394`
 
-Runs **after** the agents finish (`analyze_ticker`, `pipeline/analysis.py:68-334`),
+Runs **after** the agents finish (`analyze_ticker`, `pipeline/analysis.py:68-340`),
 scanning bear/bull/final/sale prose for dollar amounts presented as current
 total debt, market cap, or enterprise value, and flagging any that deviate
 from the verified figure beyond a per-field tolerance
@@ -158,7 +158,7 @@ billed, so stopping halfway would waste rather than save). Reads
 `budget:` from `config.yaml` (`per_run_usd`, `per_day_usd` +
 `day_window_hours` as a rolling window via `db_spend_since`,
 `on_exceed: halt|warn`). On `halt`, raises `BudgetExceeded`
-(`settings.py:98`), caught in `_run_phase_b` (`main.py:253-310`), which marks
+(`settings.py:105`), caught in `_run_phase_b` (`main.py:253-310`), which marks
 the run `BUDGET_EXCEEDED` (not `COMPLETED`) but keeps everything already
 analyzed. `--no-budget` disables the guard for one invocation
 (`main.py:762`, flips the module-level `BUDGET_ENABLED`).
@@ -167,7 +167,7 @@ analyzed. `--no-budget` disables the guard for one invocation
 
 ```mermaid
 flowchart LR
-    T["_prompt_version()\npipeline/reuse.py:60\nsha256 of every agent instruction\n+ shared prompt fragments\n+ buy-case-instructions.md"] --> K
+    T["_prompt_version()\npipeline/reuse.py:60\nsha256 of every agent instruction\n+ shared prompt fragments\n+ prompts/buy-case.md"] --> K
     B["candidate.BalanceSheetDate"] --> K["_analysis_key()\npipeline/reuse.py:77\nsha256(ticker | bs_date | prompt_version\n[+ '|no-phase-c'] [+ '|no-buy-case'])"]
     K --> Lookup["db_find_reusable_report(ticker, key, max_age_hours)"]
     Lookup -->|found & fresh| Copy["db_copy_ticker_outputs()\nzero LLM calls, ~$0"]
@@ -178,11 +178,11 @@ flowchart LR
   `instruction` plus the shared fragments — editing any prompt invalidates
   reuse for everyone, rather than silently serving reports written under old
   rules. It also folds in `_DOWNSTREAM_PROMPTS`, which is
-  `buy-case-instructions.md` read **from disk at import**: the Phase E agent lives in
+  `prompts/buy-case.md` read **from disk at import**: the Phase E agent lives in
   `buy_case_agent.py`, which imports `main`, so `main` cannot reach the agent object
   at load time — but the file is what actually changes when the prompt is tuned, and
   a reused report carries the buy case copied alongside it.
-  `buy-check-instructions.md` is deliberately excluded: nothing that command produces
+  `prompts/buy-check.md` is deliberately excluded: nothing that command produces
   is stored under a reuse key.
 - `_analysis_key(ticker, candidate, skip_sale_advisor, skip_buy_case)` (`main.py:638`)
   fingerprints on the **balance-sheet date**, not today's date — two runs a
@@ -193,7 +193,7 @@ flowchart LR
   lands on `Watch`, which is a property of the analysis rather than of the flag, so
   the variants differ only in what was **asked for**. Returns
   `""` (disabling reuse) when the balance-sheet date is unknown.
-- Reuse is checked at the top of `analyze_ticker` (`pipeline/analysis.py:68-334`),
+- Reuse is checked at the top of `analyze_ticker` (`pipeline/analysis.py:68-340`),
   before any billed work — a hit costs one DB read plus a row copy, a miss
   costs nothing extra. `reuse.enabled`/`reuse.max_age_hours` in `config.yaml`;
   `--force` bypasses the check entirely regardless of config.
@@ -212,7 +212,7 @@ flowchart TD
     Collect --> Usage
     Merge --> Cost["_total_cost()\nusage.py:257\n= _llm_cost + _embedding_cost + _search_cost"]
     Cost --> Log["_log_usage()\nusage.py:262 — per-ticker, per-agent, per-run log lines"]
-    Cost --> Finalize["_finalize_run()\nusage.py:293\nwrites pipeline_runs usage/cost columns"]
+    Cost --> Finalize["_finalize_run()\nusage.py:320\nwrites pipeline_runs usage/cost columns"]
 ```
 
 - `_new_usage()` (`usage.py:94`) is the accumulator shape: flat

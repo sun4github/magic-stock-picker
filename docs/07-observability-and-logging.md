@@ -5,7 +5,9 @@ log shipping). Observability in this codebase is three separate mechanisms,
 each covering a different slice of the system, and they do not share a
 common backend:
 
-1. **Python `logging`, per-process** — `main.py`'s own logger and the
+1. **Python `logging`, per-process** — the pipeline logger (configured in
+   `run_log.py`, not `main.py` — every entry point imports it, which is what
+   let `refine`/`buy_case`/`sale_advisory` stop importing the CLI) and the
    `"mcp_server"` logger (created in `mcp_app.py`), described below. This is the "what happened
    during this run" record.
 2. **A persisted usage/cost ledger in Postgres** (`pipeline_runs` columns) —
@@ -25,7 +27,7 @@ not structured fields — see below) are the only correlation mechanism.
 
 | Logger | Set up in | Handlers | Where it writes |
 | :--- | :--- | :--- | :--- |
-| `"InvestmentAgentPipeline"` | `main.py:54-67` | Its own `StreamHandler` (console) + `FileHandler` (`logs/run_<timestamp>.log`) | Console **and** the per-run file |
+| `"InvestmentAgentPipeline"` | `run_log.py:44-62` | Its own `StreamHandler` (console) + `FileHandler` (`logs/run_<timestamp>.log`) | Console **and** the per-run file |
 | `"mcp_server"` | `mcp_app.py` | None of its own — relies on `logging.basicConfig(level=logging.INFO)`, which installs a `StreamHandler` on the **root** logger | Console only |
 | Flask (`webapp/app.py`) | Not configured at all | Whatever Flask/Werkzeug's dev server does by default | Console only, request lines — no application-level `logger.*` calls exist in `app.py` |
 
@@ -86,7 +88,7 @@ logging context:
   the report from run..."`).
 - `[{ticker} {agent.name}]` — per-agent-per-ticker lines, e.g.
   `pipeline/execution.py:107` (`"[{ticker}] {agent.name} rate limited (429)..."`) and the
-  per-agent cost breakdown at `usage.py:262` (`_log_usage(f"{ticker}
+  per-agent cost breakdown at `usage.py:289` (`_log_usage(f"{ticker}
   {agent.name}", agent_usage)`).
 - `RUN {run_id} TOTAL` — the run-level cost rollup, `usage.py:297`.
 - `BUDGET:` — budget-guard breaches, `usage.py:60` / `_check_budget`.
@@ -100,7 +102,7 @@ itself (the `run_id` UUID *is* embedded in these strings, though, so a
 
 | Concern | Logged via | Level | Also visible in |
 | :--- | :--- | :--- | :--- |
-| Per-agent token usage & cost | `_log_usage` (`usage.py:262`) | INFO | `pipeline_runs` columns (`_finalize_run`) |
+| Per-agent token usage & cost | `_log_usage` (`usage.py:289`) | INFO | `pipeline_runs` columns (`_finalize_run`) |
 | Per-run total usage & cost | `_log_usage` + `_finalize_run` (`usage.py:293`) | INFO | `pipeline_runs` row |
 | Rate-limit (429) retries | `pipeline/execution.py:107` | WARNING | — (not persisted; only in the log) |
 | Reconciliation findings (a figure contradicts the filings) | `pipeline/analysis.py:224` | WARNING | The report itself, `## Data Reconciliation Warnings` |

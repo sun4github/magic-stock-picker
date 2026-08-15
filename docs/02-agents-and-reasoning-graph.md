@@ -25,7 +25,7 @@ session-state keys (`output_key` on write, `{key_name}` templating on read).
 There is **no** SEC/metrics/search "agent" — that data is fetched by direct
 Python function calls (`fetch_sec_10k_data`, `fmp_metrics_extractor`,
 `fmp_quarterly_trends` in `mcp_server.py`) with zero LLM tokens spent, called
-directly from `analyze_ticker` (`pipeline/analysis.py:68-334`) before any agent runs.
+directly from `analyze_ticker` (`pipeline/analysis.py:68-340`) before any agent runs.
 
 ## Which tools each agent can call, and where those tools reach
 
@@ -102,11 +102,11 @@ sequenceDiagram
 
 ### `bear_agent` — `agents/definitions.py:146-153`
 
-- Instruction = `research-instructions.md` (see structure below) + an
+- Instruction = `prompts/bear.md` (see structure below) + an
   appended "How to run this research" block + `RECENCY_MANDATE` +
   `VERIFIED_FIGURES_MANDATE` + `REFERENCE_DATA_BLOCKS` + `RESEARCH_SOURCE_BLOCKS`.
 - `tools=[fmp_stock_news, web_search_tool]`, `output_key="bear_data"`.
-- `research-instructions.md` sections (used as the skeleton the bear case must
+- `prompts/bear.md` sections (used as the skeleton the bear case must
   answer): `# Goal`, `# Must follow instructions`, `# Key metrics for Business
   Types`, `# Assumptions`, then `# Research Instructions` with `## Basic
   Company Info Questions`, `## Business Model Questions`, `## Key numbers`,
@@ -116,12 +116,12 @@ sequenceDiagram
 
 ### `bull_agent` — `agents/definitions.py:156-163`
 
-- Instruction = `bullish-research-instructions.md` + a "How to run this
+- Instruction = `prompts/bull.md` + a "How to run this
   research" block + `RECENCY_MANDATE` + `VERIFIED_FIGURES_MANDATE` + a
   CONFIRMED/SPECULATIVE catalyst-labeling instruction + `REFERENCE_DATA_BLOCKS`
   + `RESEARCH_SOURCE_BLOCKS` + `<BEAR_CASE>{bear_data}</BEAR_CASE>`.
 - `tools=[fmp_stock_news, web_search_tool]`, `output_key="bull_data"`.
-- `bullish-research-instructions.md` sections: `## 1. Capital Allocation &
+- `prompts/bull.md` sections: `## 1. Capital Allocation &
   Compounding Efficiency`, `## 2. Unlocking Growth Catalysts & Optionality`,
   `## 3. Expectations Check & Upside Scenario`, `## 4. Direct Refutation of
   the Bear Case` — §4 is why `bull_agent` must run **after** `bear_agent`
@@ -143,7 +143,7 @@ sequenceDiagram
 
 ### `sale_advisor_agent` — `agents/definitions.py:180-187`
 
-- Instruction = `sale-advisor-instructions.md` (plain prose, no `##`
+- Instruction = `prompts/sale-advisor.md` (plain prose, no `##`
   sub-headers) + a "How to run this analysis" block +
   `VERIFIED_FIGURES_MANDATE` + an anchoring requirement (every numeric
   threshold must cite the current actual value alongside it) +
@@ -159,7 +159,7 @@ sequenceDiagram
 ### `sell_check_agent` — `agents/definitions.py:206-212`
 
 - Not in `PIPELINE_AGENTS`; run only by `_run_sell_check_async`
-  (`pipeline/execution.py:152-188`), invoked from `run_sell_check` (`main.py:465`).
+  (`pipeline/execution.py:159-195`), invoked from `run_sell_check` (`main.py:465`).
 - Reads `{sale_conditions}` (loaded from a stored `SALE_CASE` via
   `db_get_sale_case`), `{quarterly_data}`, `{metrics_data}` — all freshly
   fetched at check time, not from the original analysis run.
@@ -178,18 +178,18 @@ the shared cost/logging plumbing exactly as `critic_agent` does.
   and `{price_data}`, and writes the seven-section buy case (why this is a Watch, the
   forward valuation, what analysts expect, the ecosystem, the buy triggers, what would
   take it off the watchlist, how to use it). Instruction file:
-  `buy-case-instructions.md`.
+  `prompts/buy-case.md`.
 - `buy_check_agent` reads `{buy_conditions}` (a stored `BUY_CASE`), plus freshly
   fetched `{price_data}`, `{metrics_data}` and `{quarterly_data}`, marks each trigger
   MET / NOT MET / UNCLEAR, and writes a single `Recommendation: BUY` or
   `Recommendation: WAIT` line, parsed by `buy_case_agent.extract_buy_recommendation`.
-  Instruction file: `buy-check-instructions.md`.
+  Instruction file: `prompts/buy-check.md`.
 - Both are run through `critic_agent.run_agent` (one throwaway ADK session per turn,
   with the same 429 backoff), not through `_run_pipeline_async`.
 
 ## Rate-limit handling shared by every agent call
 
-`_is_rate_limit_error` (`agents/runtime.py:61`) detects Gemini's HTTP 429
+`_is_rate_limit_error` (`agents/runtime.py:90`) detects Gemini's HTTP 429
 (`RESOURCE_EXHAUSTED`). Retry policy constants (`main.py:514-517`):
 
 - `MAX_AGENT_RETRIES = 5`

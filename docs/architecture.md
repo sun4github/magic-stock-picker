@@ -171,6 +171,11 @@ version, priced, and checked against per-run and rolling-window ceilings between
 tickers — never mid-ticker, since stopping half way leaves a partial analysis you
 have already paid for.
 
+A guard can only stop what it can see, so `_check_metered` reports any agent that
+ran and reported ZERO model calls. That is not a hypothetical: `usage_metadata` is
+the Gemini event shape, and a model reached through another provider may not
+populate it — leaving the run to report itself as free.
+
 ## Why the agents are wired the way they are
 
 ```mermaid
@@ -206,6 +211,11 @@ templated into the next agent's instruction. No agent calls another directly.
   analyst; re-running the graph would re-pay for the bear and bull that already
   succeeded. This is why the graph is a plain Python list rather than ADK's
   `SequentialAgent`.
+- **The critic may run on a different model family.** `agents.critic_model` points
+  Phase D's critic elsewhere (currently `ollama_chat/glm-5.2:cloud`); the reviser
+  stays on the analyst's model, because it *is* the analyst revising. The argument
+  is decorrelation, not cost: a reviewer sharing its target's weights shares its
+  blind spots. See [09](09-critic-and-refinement-loop.md).
 - **Only the buy-side agents see forward-looking data.** Analyst estimates and the
   earnings calendar are withheld from the bear/bull/analyst chain, which weighs
   realised results; Phase E runs after the verdict, so it can use projections

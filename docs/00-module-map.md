@@ -32,6 +32,7 @@ run it after moving anything.
 | `settings.py` | 106 | Everything read from `specs/config.yaml`, and the constants tuned beside it |
 | `usage.py` | 307 | What a run costs, and the ceiling on what it may cost |
 | `runstamp.py` | 16 | One per-process timestamp, shared by the log filename and session ids |
+| `run_log.py` | 62 | The pipeline logger, configured once per process (guarded against double-attach) |
 | `prompt_loader.py` | 154 | Composing agent instructions from `prompts/*.md` |
 | `agents/` | 325 | The five `LlmAgent`s, the fragments they share, and the Runner |
 | `pipeline/` | 879 | The reuse fingerprint, the agent loop, verdict parsing, `analyze_ticker` |
@@ -80,12 +81,25 @@ connection that needs it, not at import.
 
 ## Two invariants any change has to preserve
 
-1. **`main._prompt_version()` must stay `68b74f9c3e9a`** unless you meant to change
-   a prompt. It hashes the assembled agent instructions into every stored report's
-   reuse fingerprint, so drifting it invalidates the cache and makes the next
-   `--from-csv` re-analyze all 30 tickers — about $11. Anything that reads a prompt
-   file by path feeds this, which is why `pipeline/reuse.py` names `src/`
-   explicitly instead of using `os.path.dirname(__file__)`.
+1. **`main._prompt_version()` must not move unless you edited a prompt.** It is
+   `6f1006680b2c` as of the 2026-08-15 analyst-prompt change (it was
+   `68b74f9c3e9a` before that). It hashes the assembled agent instructions into
+   every stored report's reuse fingerprint, so drifting it invalidates the cache.
+   That is the CORRECT behaviour after a real prompt edit and a bug after anything
+   else, which is the whole point of pinning it.
+
+   What invalidation actually costs, precisely: `--from-csv` does NOT always
+   re-analyze. `analyze_ticker` checks the fingerprint first and, on a hit within
+   `reuse.max_age_hours` (24h), copies the prior run's rows for ~$0. So a changed
+   hash costs a full ~$11 re-analysis only if you would otherwise have hit that
+   cache — re-running against the same filings inside a day. On a weekly cadence
+   the run re-analyzes anyway and the edit costs nothing extra. Anything reading a prompt file by path
+   feeds it, which is why `pipeline/reuse.py` names `src/` explicitly rather than
+   using `os.path.dirname(__file__)`.
+
+   When you do edit a prompt deliberately, the check still has teeth: diff the
+   report snapshot and confirm the hash line is the ONLY thing that changed. That
+   is how the analyst-prompt edit was verified.
 2. **All 7 test files must exit 0**: `python tools/run_tests.py <out>`.
 
 ## Verifying a move

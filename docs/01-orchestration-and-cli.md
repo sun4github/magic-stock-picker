@@ -91,7 +91,7 @@ prompt content; this doc only covers control flow.
 (`main.py:462`) is the ordered list `_run_pipeline_async` walks. It is a plain
 Python list, not ADK's `SequentialAgent` class — see §3 below for why.
 
-## 3. Running the reasoning graph, `pipeline/execution.py:37-128` (`_run_pipeline_async`)
+## 3. Running the reasoning graph, `pipeline/execution.py:43-135` (`_run_pipeline_async`)
 
 This is the function every Phase B/C run eventually calls. Per ticker:
 
@@ -101,7 +101,7 @@ This is the function every Phase B/C run eventually calls. Per ticker:
 2. Builds the agent list, dropping `sale_advisor_agent` if
    `skip_sale_advisor` (`pipeline/execution.py:84-85`).
 3. For each agent in order (`pipeline/execution.py:86-128`):
-   - Builds a fresh `Runner` via `_build_runner` (`agents/runtime.py:49-58`, attaches
+   - Builds a fresh `Runner` via `_build_runner` (`agents/runtime.py:78-87`, attaches
      context-cache config from `App` if `CONTEXT_CACHE_ENABLED`).
    - Runs it against the shared session; the agent's `output_key` (e.g.
      `"bear_data"`) writes its answer into session state.
@@ -114,10 +114,10 @@ This is the function every Phase B/C run eventually calls. Per ticker:
      [agent_architecture.md §5B](../src/specs/agent_architecture.md).
 4. Returns `(final_session_state, usage)`.
 
-`run_pipeline` (`pipeline/execution.py:131-149`) is the synchronous wrapper (`asyncio.run`)
+`run_pipeline` (`pipeline/execution.py:138-156`) is the synchronous wrapper (`asyncio.run`)
 that `analyze_ticker` calls; it adds one gentle inter-ticker sleep afterward.
 
-## 4. Per-ticker orchestration, `pipeline/analysis.py:68-334` (`analyze_ticker`)
+## 4. Per-ticker orchestration, `pipeline/analysis.py:68-340` (`analyze_ticker`)
 
 The single function every execution mode funnels through for Phase B/C. In order:
 
@@ -135,7 +135,7 @@ The single function every execution mode funnels through for Phase B/C. In order
    missing the debt/cash/EV columns the reconciliation gate needs. The price snapshot
    is fetched **once** here and reused by the report's `## Price` section, the agents'
    `VERIFIED_FIGURES`, and the buy case — so all three quote one number.
-4. **Run the reasoning graph** (`pipeline/execution.py:131-149`, calls `run_pipeline` from §3).
+4. **Run the reasoning graph** (`pipeline/execution.py:138-156`, calls `run_pipeline` from §3).
 5. **Persist everything** (`pipeline/analysis.py:181-296`):
    - `db_store_agent_output` for `SEC_DATA`/`QUANT_METRICS` (unembedded) and
      `BEAR_CASE`/`BULL_CASE`/`SALE_CASE` (embedded).

@@ -72,9 +72,9 @@ on-demand ticker):
      metrics, analyst consensus.
    - Magic Formula ROC / Earnings Yield and the PEG growth test (from the screen,
      or computed on the fly for on-demand tickers).
-2. **Bear Agent** — builds the skeptical case (`src/research-instructions.md`),
+2. **Bear Agent** — builds the skeptical case (`src/prompts/bear.md`),
    using FMP news + Tavily web search for bear-case research.
-3. **Bull Agent** — builds the bull case (`src/bullish-research-instructions.md`),
+3. **Bull Agent** — builds the bull case (`src/prompts/bull.md`),
    runs *after* the bear agent so it can directly refute its points, also using
    FMP news + Tavily.
 4. **Analyst Agent (neutral judge)** — carries no skeptical or promotional bias.
@@ -96,7 +96,7 @@ between two different prices, and to the buy case, so its price triggers are mea
 against exactly the number printed at the top.
 
 **Phase C — Sale Advisory.** After the analyst report is produced, a **Sale
-Advisor Agent** (`src/sale-advisor-instructions.md`) runs per ticker. It *ignores*
+Advisor Agent** (`src/prompts/sale-advisor.md`) runs per ticker. It *ignores*
 the verdict and *assumes the stock is already owned*, then — using the analyst's
 bull/bear thesis plus fresh FMP news + Tavily research — names the **three specific,
 measurable business events** (not price movements) that would signal the original
@@ -105,7 +105,7 @@ investment case is broken and justify selling.
 **Phase E — Buy Case (Watch verdicts only).** A `Watch` is the most common verdict
 and the least actionable one: it tells you to wait without saying what for. So when —
 and only when — the verdict is `Watch`, a **Buy Case Agent**
-(`src/buy-case-instructions.md`) finishes the sentence. It is the mirror of Phase C:
+(`src/prompts/buy-case.md`) finishes the sentence. It is the mirror of Phase C:
 where the sale advisory assumes you own the stock and names what would break the
 thesis, the buy case assumes you **don't** and names what would make it worth owning.
 

@@ -2,8 +2,8 @@
 
 Primary files: [`src/buy_case_agent.py`](../src/buy_case_agent.py) (both agents and
 the shared write path), [`src/buy_case.py`](../src/buy_case.py) (the standalone
-command), [`src/buy-case-instructions.md`](../src/buy-case-instructions.md) and
-[`src/buy-check-instructions.md`](../src/buy-check-instructions.md). Wired into the
+command), [`src/prompts/buy-case.md`](../src/prompts/buy-case.md) and
+[`src/prompts/buy-check.md`](../src/prompts/buy-check.md). Wired into the
 pipeline at [`src/main.py`](../src/main.py) (`analyze_ticker`, `run_buy_check`) and
 into the critic loop at [`src/refine.py`](../src/refine.py) (`_refresh_buy_case`).
 
