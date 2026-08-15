@@ -142,7 +142,7 @@ and money in the other.
 | `_load_source_case` | `:163` | Loads `BEAR_CASE`/`BULL_CASE` from the reviewed run; missing is survivable, not fatal. |
 | `_Estimator` | `:186` | Per-role cost projection for the next round. `observe` `:199`, `full_round` `:205`. |
 | `_affordable` | `:217` | Returns a reason string when the next round cannot be paid for, else `""`. |
-| `_agreed_banner` / `_not_agreed_banner` | `:233` / `:283` | The reader-facing standing block, including unfixed MINOR findings. |
+| `_agreed_banner` / `_not_agreed_banner` | `:233` / `:283` | The reader-facing standing block. Agreed lists unfixed MINOR findings (no revision ran for them); not-agreed lists only the blocking/material objections still standing, and points at the stored full review. |
 | `_demote_headings` | `:430` | Pushes an inlined review's headings down so they nest under their container. |
 | `_ADVISORY_NOTE` / `_refresh_sale_advisory` | `:310` / `:330` | Gives the refinement its own `SALE_CASE` — carried forward or re-derived. See below. |
 | `_BUY_CASE_NOTE` / `_refresh_buy_case` | after `_refresh_sale_advisory` | The same for `BUY_CASE`, with a verdict condition on top: four outcomes, not two. See below. |
@@ -369,7 +369,7 @@ must be anchored to `VERIFIED_FIGURES` with the current value quoted beside it, 
 figure the critic corrected can leave a threshold calibrated against a number the
 pipeline itself now says was wrong.
 
-`_refresh_sale_advisory` (`refine.py:426`) handles it by outcome, so the cost is only
+`_refresh_sale_advisory` (`refine.py:462`) handles it by outcome, so the cost is only
 paid when it buys something:
 
 | Outcome | What happens | Cost |
@@ -469,8 +469,20 @@ warnings — plus one section the pipeline never writes:
   find a fault in the argument, **not** that the call is right.
 - **Not agreed** (`_not_agreed_banner`, `refine.py:352`)**:** the same heading carrying a blunt "**The independent critic has
   NOT agreed this report**", the count of blocking and material objections still
-  standing, the stopping reason, and **the critic's full final review reproduced
-  underneath**.
+  standing, the stopping reason, and **a list of those standing objections** — title
+  and one-line summary each. The full review is not reproduced; it is stored as the
+  run's `CRITIC_REVIEW` output and the banner names the run to find it under.
+
+  > **This changed on 2026-08-15.** The banner used to paste the critic's ENTIRE
+  > final review underneath, including its "Independent Verification" section — the
+  > list of everything the critic checked and found CORRECT. On a real NLST run
+  > carrying one material objection, that was six paragraphs of successful
+  > verification sitting under a warning banner and about a third of the document
+  > (15.8KB → 24.1KB). It inverted the signal: a reader skimming saw a wall of critic
+  > prose and inferred the report was heavily disputed, when most of that prose said
+  > the opposite. MINOR findings are excluded here for the same reason — they never
+  > blocked, so they are not "standing"; they appear in the AGREED banner instead,
+  > where the point is that no revision ran for them.
 
 Files: `reports/{TICKER}_Refined_Report_{Verdict}.md` and
 `reports/{TICKER}_Critic_Review.md`. The original run's report and rows are left

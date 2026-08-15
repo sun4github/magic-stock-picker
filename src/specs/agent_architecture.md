@@ -2039,6 +2039,23 @@ because a MINOR reaches the reader only when it was NOT corrected, so what the r
 needs is the fix that never happened, not a critique of prose they are about to
 read). A clean agreement with zero findings still says nothing extra.
 
+**The UN-agreed banner is the mirror of that, and is deliberately narrow.** It lists
+only the blocking and material objections still STANDING — title and one-line summary
+— then names the run whose `CRITIC_REVIEW` output holds the full review. It does not
+reproduce the review itself, and it does not repeat MINOR findings, which by
+definition did not block and therefore are not standing.
+
+That is a correction made 2026-08-15. The banner previously pasted the critic's
+entire final review underneath, including its "Independent Verification" section —
+the list of everything the critic checked and found CORRECT. On a live NLST run with
+a single material objection that meant six paragraphs of successful verification
+sitting beneath a warning header, and grew the document from 15.8KB to 24.1KB. It
+inverted the signal the banner exists to send: a reader skimming saw a wall of critic
+prose and inferred a heavily disputed report, when most of that prose said the
+opposite. The full review is stored either way, so nothing was lost by pointing at it
+instead of pasting it — the same reasoning as the MINOR listing above, applied in the
+other direction. Say what is unresolved, and no more.
+
 The original run's rows and report file are left untouched. The refinement gets its
 own `run_id`, its own `pipeline_runs` cost row, and its own `final_reports` row with
 an **empty `analysis_key`** — a refined report must never be served by the

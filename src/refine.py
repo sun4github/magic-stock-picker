@@ -349,20 +349,56 @@ def _agreed_banner(rounds: int, cost: float, findings: list) -> str:
     return "\n".join(lines)
 
 
-def _not_agreed_banner(rounds: int, cost: float, findings: list, stop_reason: str) -> str:
-    blocking = sum(1 for f in findings if f["severity"] == "BLOCKING")
-    material = sum(1 for f in findings if f["severity"] == "MATERIAL")
-    return (
-        f"{CRITIC_SECTION_HEADING}\n\n"
+def _not_agreed_banner(rounds: int, cost: float, findings: list, stop_reason: str,
+                       run_id: str = "") -> str:
+    """The un-agreed case: what is still standing, and nothing else.
+
+    This used to staple the critic's ENTIRE final review onto the report, including
+    its "Independent Verification" section — a list of everything the critic checked
+    and found CORRECT. On a run with a single material objection that meant six
+    paragraphs of successful verification sitting under a warning banner, about a
+    third of the document. It inverts the signal: a reader skimming sees a wall of
+    critic prose and infers the report is heavily disputed, when most of that prose
+    says the opposite.
+
+    So only the objections actually STANDING are reproduced. The full review is
+    stored as this run's CRITIC_REVIEW agent output and is pointed at rather than
+    pasted — nothing here is the only copy of it.
+    """
+    unresolved = [f for f in findings if f["severity"] in BLOCKING_SEVERITIES]
+    blocking = sum(1 for f in unresolved if f["severity"] == "BLOCKING")
+    material = sum(1 for f in unresolved if f["severity"] == "MATERIAL")
+
+    lines = [
+        CRITIC_SECTION_HEADING,
+        "",
         f"**The independent critic has NOT agreed this report.** After {rounds} "
         f"round(s) of review (${cost:.2f}), {blocking} blocking and {material} "
         f"material objection(s) were still standing when the review stopped: "
-        f"{stop_reason}.\n\n"
-        f"Treat the verdict above as unconfirmed. The critic's final review is "
-        f"reproduced below in full — read it before acting, because the objections "
-        f"in it are about the reasoning that produced that verdict, not about "
-        f"presentation.\n\n"
-    )
+        f"{stop_reason}.",
+        "",
+        "Treat the verdict above as unconfirmed. These objections are about the "
+        "reasoning that produced that verdict, not about presentation:",
+        "",
+    ]
+    for item in unresolved:
+        summary = finding_summary(item)
+        lines.append(f"- **[{item['severity']}] {item['title']}**"
+                     + (f" — {summary}" if summary else ""))
+    if not unresolved:
+        # The severity cross-check can withhold agreement with nothing blocking or
+        # material left standing. Say that, rather than printing an empty list.
+        lines.append("- The critic did not record its agreement, but left no "
+                     "blocking or material objection standing.")
+    lines += [
+        "",
+        "The critic's full review — including the checks it ran that came back "
+        "clean — is stored as this run's `CRITIC_REVIEW` output"
+        + (f" (run `{run_id}`)." if run_id else "."),
+        "",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 _HEADING_RE = re.compile(r"^(#{1,4})(?=\s)", re.MULTILINE)
@@ -707,9 +743,9 @@ def _assemble(candidate: dict, report_body: str, recon_findings: list,
         "",
         critic_section,
     ]
-    if not agreed and final_review:
-        parts += ["### The critic's final review, in full", "",
-                  _demote_headings(final_review), ""]
+    # The full review is deliberately NOT appended here any more; the banner lists
+    # the standing objections and points at the stored CRITIC_REVIEW output. See
+    # `_not_agreed_banner` for why pasting all of it made the report read worse.
     return "\n".join(p for p in parts if p is not None)
 
 
@@ -1041,7 +1077,8 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
 
     critic_section = (
         _agreed_banner(rounds_done, review_cost, final_findings) if agreed
-        else _not_agreed_banner(rounds_done, review_cost, final_findings, stop_reason)
+        else _not_agreed_banner(rounds_done, review_cost, final_findings, stop_reason,
+                                refine_run_id)
     )
     report_stored = _with_run_header(
         _assemble(candidate, report_body, recon_findings, critic_section, final_review,
