@@ -1,9 +1,21 @@
 # MCP Tools & Persistence Walkthrough
 
-Primary file: [`src/mcp_server.py`](../src/mcp_server.py) (1,154 lines).
-Module load (`mcp_server.py:711`, `initialize_database()`) also ensures the
-Postgres schema exists the moment `main.py` imports this module — see
-[sql-schema.sql](../src/sql-schema.sql) for the authoritative DDL this mirrors.
+Primary files: [`src/data/`](../src/data/) and
+[`src/persistence/`](../src/persistence/), behind the
+[`src/mcp_server.py`](../src/mcp_server.py) facade (72 lines).
+
+> **Two corrections to what this document used to say.** The tools no longer live in
+> one 2,458-line `mcp_server.py`: they are split by what they talk to — `data/` for
+> the outside world (the screen, SEC, FMP, web search) and `persistence/` for
+> Postgres — with `mcp_server` importing both, which is what registers all 33 tools
+> and what `python mcp_server.py` still serves. And the schema bootstrap is **no
+> longer at module load**: `initialize_database()` fires lazily, on the first
+> connection that actually needs it. It used to run at import, charging every
+> importer a remote round trip plus ~350 lines of DDL — two minutes on a cold
+> import, paid by every test file, cron script and `--help`.
+
+See [sql-schema.sql](../src/sql-schema.sql) for the authoritative DDL this mirrors,
+and [00-module-map.md](00-module-map.md) for the full layout.
 
 ## Are these actually MCP tools?
 

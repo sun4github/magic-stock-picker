@@ -1,9 +1,22 @@
 # Guardrails, Cost Accounting & Reuse Walkthrough
 
-All in [`src/main.py`](../src/main.py). These are the deterministic (no-LLM)
-mechanisms wrapped around the agent calls — they run in plain Python, reading
-and post-processing what the agents produce rather than being part of the
-prompt-driven reasoning itself.
+These are the deterministic (no-LLM) mechanisms wrapped around the agent calls —
+they run in plain Python, reading and post-processing what the agents produce
+rather than being part of the prompt-driven reasoning itself.
+
+All four used to sit in `src/main.py` and are all still reachable as `main.NAME`,
+but each now has its own home: the reconciliation gate and the verified figures in
+[`src/report/`](../src/report/), cost accounting and the budget ceiling in
+[`src/usage.py`](../src/usage.py), the reuse fingerprint in
+[`src/pipeline/reuse.py`](../src/pipeline/reuse.py), and the ceilings themselves in
+[`src/settings.py`](../src/settings.py).
+
+> **One thing to know before you change a ceiling or a prompt path.**
+> `_check_budget` reads its ceilings off the `settings` module on every call rather
+> than binding them at import, and `main` does not re-export
+> `_DOWNSTREAM_PROMPTS`. Both are deliberate: `from settings import BUDGET_ENABLED`
+> copies the value, so assigning to the copy would disable nothing while appearing
+> to. See the hazard note in [00-module-map.md](00-module-map.md).
 
 ## 1. Candidate normalization, `main.py:1725-1779`
 

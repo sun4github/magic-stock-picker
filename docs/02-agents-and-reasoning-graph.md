@@ -1,7 +1,11 @@
 # Agents & Reasoning Graph Walkthrough
 
 All five agents in this doc are `google.adk.agents.LlmAgent` instances defined in
-[`src/main.py`](../src/main.py). None of them call each other directly —
+[`src/agents/definitions.py`](../src/agents/definitions.py), with their
+instructions in [`src/prompts/`](../src/prompts/) — both moved out of `main.py`,
+which re-exports them, so `main.analyst_agent` still resolves. A local package
+named `agents` does not shadow `google.adk.agents`; absolute imports resolve on the
+full dotted path. None of them call each other directly —
 `_run_pipeline_async` (see
 [01-orchestration-and-cli.md](01-orchestration-and-cli.md)) runs them in
 order over one shared ADK session, and they communicate only through

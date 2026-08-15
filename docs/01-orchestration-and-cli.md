@@ -1,9 +1,22 @@
 # Orchestration & CLI Walkthrough
 
-Primary file: [`src/main.py`](../src/main.py) (2,372 lines). There is no separate
-"orchestrator agent" object; `main.py`'s module-level code builds five `LlmAgent`s
-once at import time, and its `if __name__ == "__main__"` block dispatches to one of
-five run functions based on CLI flags.
+Primary files: [`src/main.py`](../src/main.py) (838 lines) and
+[`src/pipeline/`](../src/pipeline/). There is no separate "orchestrator agent"
+object; five `LlmAgent`s are built once at import time, and `main.py`'s
+`if __name__ == "__main__"` block dispatches to one of five run functions based on
+CLI flags.
+
+> **The code moved; the call paths did not.** `main.py` used to hold all of this in
+> one 3,000-line file. The agents are now in [`src/agents/`](../src/agents/), the
+> report sections in [`src/report/`](../src/report/), the cost accounting in
+> `src/usage.py`, config in `src/settings.py`, and the run machinery —
+> `analyze_ticker`, the agent loop, the reuse fingerprint, verdict parsing — in
+> [`src/pipeline/`](../src/pipeline/). `main.py` re-exports all of it, so
+> `main._analysis_key` and friends still resolve exactly as written below, and what
+> is left in `main.py` itself is the CLI and the workflows that choose which tickers
+> to run. See [00-module-map.md](00-module-map.md). Line numbers in this document
+> predate the split — search for the symbol name, per the convention note in
+> [README.md](README.md).
 
 > **There are three more entry points.** [`src/sale_advisory.py`](../src/sale_advisory.py)
 > regenerates a Phase C sale advisory for any stored report

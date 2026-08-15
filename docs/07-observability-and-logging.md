@@ -5,8 +5,8 @@ log shipping). Observability in this codebase is three separate mechanisms,
 each covering a different slice of the system, and they do not share a
 common backend:
 
-1. **Python `logging`, per-process** — `main.py`'s own logger and
-   `mcp_server.py`'s own logger, described below. This is the "what happened
+1. **Python `logging`, per-process** — `main.py`'s own logger and the
+   `"mcp_server"` logger (created in `mcp_app.py`), described below. This is the "what happened
    during this run" record.
 2. **A persisted usage/cost ledger in Postgres** (`pipeline_runs` columns) —
    the "what did this run cost" record. See
@@ -26,26 +26,32 @@ not structured fields — see below) are the only correlation mechanism.
 | Logger | Set up in | Handlers | Where it writes |
 | :--- | :--- | :--- | :--- |
 | `"InvestmentAgentPipeline"` | `main.py:54-67` | Its own `StreamHandler` (console) + `FileHandler` (`logs/run_<timestamp>.log`) | Console **and** the per-run file |
-| `"mcp_server"` | `mcp_server.py:24-25` | None of its own — relies on `logging.basicConfig(level=logging.INFO)`, which installs a `StreamHandler` on the **root** logger | Console only |
+| `"mcp_server"` | `mcp_app.py` | None of its own — relies on `logging.basicConfig(level=logging.INFO)`, which installs a `StreamHandler` on the **root** logger | Console only |
 | Flask (`webapp/app.py`) | Not configured at all | Whatever Flask/Werkzeug's dev server does by default | Console only, request lines — no application-level `logger.*` calls exist in `app.py` |
 
 Two consequences worth knowing before you go looking for a log line:
 
-- **`mcp_server.py`'s own log lines (SEC/DB errors, embedding failures) never
-  reach the per-run file.** `mcp_server.py` is imported by `main.py` (`main.py:22`)
-  *before* `main.py` sets up its own logger (`main.py:54`), so
-  `mcp_server.py`'s `logging.basicConfig()` call runs first and configures the
-  **root** logger with a console-only handler. `mcp_server.py`'s own
-  `logger.error(...)` calls (e.g. `mcp_server.py:775-780` on an embedding
-  failure) go out through that root handler — console only, never the
-  timestamped file `main.py` creates for the run. If you're debugging an
-  embedding or DB-write failure after the fact from a saved log file, it
-  won't be there; you need to have been watching the console, or capture
-  stdout/stderr yourself when running the process.
+- **The `"mcp_server"` logger's own lines (SEC errors, embedding failures) never
+  reach the per-run file.** `mcp_server` is imported by `main.py` *before*
+  `main.py` sets up its own logger, so the `logging.basicConfig()` call in
+  `mcp_app.py` runs first and configures the **root** logger with a console-only
+  handler. Those `logger.error(...)` calls — e.g. in
+  [`persistence/embeddings.py`](../src/persistence/embeddings.py) on an embedding
+  failure — go out through that root handler: console only, never the timestamped
+  file `main.py` creates for the run. If you're debugging an embedding failure
+  after the fact from a saved log file, it won't be there; you need to have been
+  watching the console, or capture stdout/stderr yourself.
+
+  **One deliberate exception:** the `DB ok` / `DB persistence failed` lines from
+  `_check_db` ([`persistence/results.py`](../src/persistence/results.py)) go to the
+  **pipeline** logger, so they *do* land in the run file. That is the point of it —
+  the db_* tools return a status string rather than raising, so a failed insert is
+  otherwise completely silent, and a record of it that only ever existed on a
+  console nobody was watching would not be a record.
 - **`main.py`'s own log lines print to the console twice.** Its
   `"InvestmentAgentPipeline"` logger never sets `propagate = False`, and by
   the time it's created the root logger already has the `StreamHandler` from
-  `mcp_server.py`'s `basicConfig()` call. So every `logger.info(...)` in
+  `mcp_app.py`'s `basicConfig()` call. So every `logger.info(...)` in
   `main.py` fires three times: once via its own `c_handler` (console), once
   via its own `f_handler` (the run's file — exactly once, correctly), and
   once more via propagation up to root's `StreamHandler` (console again).
