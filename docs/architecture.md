@@ -42,7 +42,7 @@ flowchart TD
 
     CLI --> SCR --> REUSE
     CLI -->|"single ticker"| REUSE
-    REUSE -->|"hit: copy prior rows, £0"| PERSIST
+    REUSE -->|"hit: copy prior rows, $0"| PERSIST
     REUSE -->|"miss"| DATA --> GRAPH --> PERSIST --> BUY
 
     PERSIST --> DB[("PostgreSQL<br/>persistence/")]
@@ -66,13 +66,62 @@ The package boundaries are not arbitrary; each one answers a different question.
 | `persistence/` | What did we say, and when? | PostgreSQL |
 | `agents/` | What is each role told, and how is a turn run? | Google ADK / Gemini |
 | `pipeline/` | What does one ticker cost, and what gets written down? | the three above |
-| `report/` | How does this read to a human, and does it contradict itself? | nothing |
+| `report/` | How does this read to a human, and does it contradict itself? | one live price quote, nothing else |
 | `main.py` | Which tickers, and which mode? | `pipeline` |
 
-Three of these are worth dwelling on.
+**The arrows only point one way**, which is a recent property and worth protecting:
+
+```mermaid
+flowchart TD
+    MAIN["main.py<br/>the CLI"]
+    CMDS["refine.py · sale_advisory.py · buy_case.py<br/>standalone commands"]
+    PIPE["pipeline/<br/>one ticker, end to end"]
+    BCA["buy_case_agent.py<br/>Phase E"]
+    AGENTS["agents/"]
+    USAGE["usage.py"]
+    REPORT["report/"]
+    MCP["mcp_server.py<br/>facade over both"]
+    DATA["data/"]
+    PERS["persistence/"]
+    BASE["settings.py · run_log.py · mcp_app.py<br/>no local dependencies of their own"]
+
+    MAIN --> PIPE
+    CMDS --> PIPE
+    PIPE --> AGENTS
+    PIPE --> USAGE
+    PIPE --> REPORT
+    BCA --> PIPE
+    PIPE -. "deferred, inside the function" .-> BCA
+    AGENTS --> MCP
+    REPORT --> MCP
+    USAGE --> PERS
+    MCP --> DATA
+    MCP --> PERS
+    AGENTS --> BASE
+    USAGE --> BASE
+    DATA --> BASE
+    PERS --> BASE
+```
+
+Read the diagram for what is *absent*: **nothing points back up at `main.py`.** Until
+recently everything did — `refine`, `buy_case_agent`, `critic_agent` and the rest all
+did `import main` to reach the agents, the cost accounting and a configured logger.
+Since `main.py` is run as a script it loads under the name `__main__`, so those
+imports re-executed the whole file and attached a second set of log handlers; a
+`sys.modules` alias papered over it. Everything shared now lives in the lower boxes,
+so the alias is gone.
+
+The one dotted arrow is the honest exception: `pipeline` imports `buy_case_agent`
+*inside the function*, because `buy_case_agent` imports back from `pipeline`. That
+cycle is real; deferring it to call time is what keeps it from biting at import.
+
+Three layers are worth dwelling on.
 
 **`report/` imports nothing from the pipeline.** It turns a candidate dict and a
-price dict into text, and that is all. This is what makes report output testable
+price dict into text. (It reaches out exactly once, for the live quote in
+`report/price.py` — fetching sits beside formatting there on purpose, so the price
+on the report and the price the buy triggers are measured against cannot be two
+numbers taken seconds apart.) This is what makes report output testable
 without standing up a run — `tools/snapshot_report_surface.py` renders every section
 over a fixture corpus offline. It matters because report text is not cosmetic: it is
 stored in the database, injected into agent prompts, and hashed into the reuse
@@ -92,12 +141,24 @@ This system's failure modes are expensive rather than loud, so two mechanisms ex
 purely to bound cost. Both are documented fully in
 [05-guardrails-cost-and-reuse.md](05-guardrails-cost-and-reuse.md).
 
-**The reuse fingerprint** (`pipeline/reuse.py`). A 30-ticker run costs about $11.
-Before any billed work, `_analysis_key` hashes the ticker, the balance-sheet date,
-and `_prompt_version()` — a hash of every agent instruction. Same filing, same
-prompts, recent enough: copy the previous run's rows and spend nothing. Editing a
-prompt changes the hash and correctly invalidates the cache, which is why an
-*accidental* change to it is a real cost.
+**The reuse fingerprint** (`pipeline/reuse.py`). A 30-ticker run costs about $11, and
+the same filing analysed twice is the same analysis. So before any billed work:
+
+```mermaid
+flowchart LR
+    T["ticker"] --> KEY
+    B["balance-sheet date<br/>not today's date"] --> KEY
+    P["_prompt_version()<br/>hash of every agent<br/>instruction + buy-case.md"] --> KEY
+    KEY["_analysis_key<br/>sha256, first 24 chars"] --> Q{"seen this key<br/>in the last 24h?"}
+    Q -->|"yes"| HIT["copy the prior run's rows<br/>and report file · $0"]
+    Q -->|"no"| MISS["run the agents<br/>and pay for it"]
+```
+
+The **balance-sheet date** rather than today's is the crux: two runs a day apart
+against the same filing should be one analysis, while a new filing must force a
+fresh one. Including `_prompt_version()` means editing a prompt correctly
+invalidates the cache — and is also why an *accidental* change to it costs real
+money.
 
 **The budget guard** (`usage.py`). Token usage is counted per resolved model
 version, priced, and checked against per-run and rolling-window ceilings between
@@ -105,6 +166,27 @@ tickers — never mid-ticker, since stopping half way leaves a partial analysis 
 have already paid for.
 
 ## Why the agents are wired the way they are
+
+```mermaid
+sequenceDiagram
+    participant S as Shared session state
+    participant Bear as bear_agent
+    participant Bull as bull_agent
+    participant Judge as analyst_agent
+    participant Sale as sale_advisor_agent
+
+    Note over S: seeded first, with no LLM involved:<br/>SEC 10-K, FMP metrics, quarterly trends,<br/>live price, VERIFIED_FIGURES
+    Bear->>S: writes bear_data
+    S-->>Bull: reads bear_data
+    Bull->>S: writes bull_data
+    S-->>Judge: reads bear_data + bull_data
+    Judge->>S: writes final_report
+    S-->>Sale: reads final_report
+    Sale->>S: writes sale_data
+```
+
+Each arrow into the session is an `output_key`; each arrow out is a `{key}`
+templated into the next agent's instruction. No agent calls another directly.
 
 - **Bear runs before bull** so the bull case can refute a specific argument rather
   than assert a generic one. The analyst is a *third* role with no research tools,
@@ -125,14 +207,24 @@ have already paid for.
 
 ## Trust boundaries
 
-Nothing an LLM writes is trusted as fact. Two deterministic gates sit around them:
+Nothing an LLM writes is trusted as fact. Two deterministic gates sandwich them —
+one on the way in, one on the way out:
 
-1. **VERIFIED_FIGURES** — debt, cash, market cap, EV and the returns are computed
-   from filings by the pipeline and injected into every prompt as figures the agent
-   may not contradict.
-2. **The reconciliation gate** (`report/reconciliation.py`) — scans what the agents
-   actually wrote for those figures and flags contradictions into the report itself,
-   so a reader can see that a number in the bull case disagrees with the filings.
+```mermaid
+flowchart TD
+    FIL["SEC filings + FMP<br/>fetched deterministically"] --> VF["VERIFIED_FIGURES<br/>debt · cash · market cap · EV · returns<br/>computed by the pipeline, not the model"]
+    VF -->|"injected into every prompt as<br/>figures the agent may not contradict"| LLM(["the agents<br/>everything here is untrusted"])
+    LLM --> PROSE["agent prose"]
+    PROSE --> GATE{"reconciliation gate<br/>report/reconciliation.py<br/>does the prose contradict<br/>VERIFIED_FIGURES?"}
+    VF -.->|"checked against"| GATE
+    GATE -->|"no"| OUT["report as written"]
+    GATE -->|"yes"| WARN["report + a Data Reconciliation<br/>Warnings table naming the figure,<br/>what was claimed, and what is true"]
+```
+
+The same numbers do both jobs: they go in as an instruction the agent must not
+contradict, and they come back out as the yardstick its prose is measured against.
+A disagreement is surfaced *in the report* rather than only logged, because a reader
+has no other way to know a figure in the bull case is wrong.
 
 The gate is deliberately narrow: three figures, prose assertions only, with
 documented exceptions for changes ("debt rose BY $11B"), other periods ("$24.4B in
