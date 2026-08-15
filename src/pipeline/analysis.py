@@ -305,9 +305,15 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     # `report.provenance` and the cycle went with it. A module-level import here
     # works now, and was checked.
     #
-    # It stays deferred because `buy_case_agent` pulls in `critic_agent` behind it,
-    # and most runs never reach Phase E — a `Buy` or an `Avoid` verdict skips this
-    # entirely. No reason to make every importer of `pipeline` pay for it.
+    # It stays deferred so that importing `pipeline` does not drag in
+    # `buy_case_agent` (and `critic_agent` behind it) for code that never analyses a
+    # ticker: `import pipeline` is 4.6s, with buy_case_agent 5.9s. `python main.py
+    # --screen-only`, the test files and the snapshot tools all take the cheaper path.
+    #
+    # Note this import is NOT conditional on the verdict — it runs on every ticker
+    # that gets this far. Only the work below is gated on `is_watch`. Reaching Phase E
+    # with a Buy or an Avoid is the ordinary case and imports fine; the verdict
+    # decides whether a buy case is WRITTEN, not whether the module is loaded.
     import buy_case_agent
     if buy_case_agent.is_watch(verdict) and not skip_buy_case:
         buy_case_agent.write_buy_case(
