@@ -6,6 +6,7 @@
     reports.py     final reports, verdicts, and the getters phases read them with
     critic.py      the refinement loop's findings, responses, and memory
     ledger.py      what each verdict claimed, recorded for grading later
+    results.py     reading the status string every db_* tool hands back
 
 The schema bootstrap is lazy — it fires on the first connection that needs it, not
 at import — so importing this package costs nothing until something actually reads
@@ -36,6 +37,7 @@ from .reports import (
     db_store_final_report,
     db_store_ticker_run,
 )
+from .results import _check_db
 from .runs import (
     db_copy_ticker_outputs,
     db_create_pipeline_run,
@@ -50,6 +52,7 @@ __all__ = [
     "EMBEDDING_USAGE",
     "EMBED_DIMS",
     "EMBED_MODEL",
+    "_check_db",
     "_num",
     "db_copy_ticker_outputs",
     "db_create_pipeline_run",

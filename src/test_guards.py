@@ -13,6 +13,7 @@ regenerate a near-identical report.
 import math
 
 import main
+import settings
 
 
 def _usage_costing(usd):
@@ -68,19 +69,24 @@ def run():
 
     # Mode switches must be honoured: a guard that ignores its own config is worse
     # than no guard, because the run looks protected when it is not.
+    #
+    # Patched on `settings`, which is where these now live and where `_check_budget`
+    # reads them from on every call. Patching `main.BUDGET_ENABLED` would set a
+    # re-exported copy and disable nothing — and a guard that can be told to stand
+    # down without standing down is exactly what this pair of cases exists to catch.
     for label, attr, value, should_halt in (
         ("on_exceed=warn never halts", "BUDGET_ON_EXCEED", "warn", False),
         ("disabled guard never halts", "BUDGET_ENABLED", False, False),
     ):
-        saved = getattr(main, attr)
-        setattr(main, attr, value)
+        saved = getattr(settings, attr)
+        setattr(settings, attr, value)
         try:
             main._check_budget(_usage_costing(9999.0), 9999.0, "NEXT")
             halted = False
         except main.BudgetExceeded:
             halted = True
         finally:
-            setattr(main, attr, saved)
+            setattr(settings, attr, saved)
         ok = halted == should_halt
         failures += [] if ok else [label]
         print(f"{'PASS' if ok else 'FAIL'}  {label:<48} "
