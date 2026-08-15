@@ -35,7 +35,7 @@ CLI flags.
 > imported back would have loaded a **second copy** of every agent and re-run the
 > module-level setup — a second config read, a second set of log handlers, every line
 > logged twice across two files. Phase E made that unavoidable (`buy_case_agent`
-> imports `main`, and `analyze_ticker` has to call it), so `main.py:14` now aliases
+> imports `main`, and `analyze_ticker` has to call it), so `pipeline/analysis.py:68` now aliases
 > `sys.modules["main"]` to itself before anything can import it. The imports inside
 > `analyze_ticker` and `run_buy_check` are deferred purely to break the definition-time
 > cycle. Everything below concerns the six modes of `main.py` itself.
@@ -46,11 +46,11 @@ Runs once, before any CLI parsing:
 
 - `main.py:22-41` imports every MCP tool wrapper from `mcp_server.py` (this
   also triggers `mcp_server.py`'s own module-level `initialize_database()`
-  call at `mcp_server.py:711`, so the DB schema is ensured before anything else runs).
+  call at `persistence/db.py:47`, so the DB schema is ensured before anything else runs).
 - `main.py:48-67` sets up dual logging (console + `logs/run_<timestamp>.log`).
 - `main.py:70-72` loads `src/specs/config.yaml` into the module-level `config` dict.
 - `main.py:74` reads `top_n_candidates` (overridable later by `--top-n`).
-- `main.py:85` pins `AGENT_MODEL` from `config.yaml`'s `agents.model` —
+- `settings.py:58` pins `AGENT_MODEL` from `config.yaml`'s `agents.model` —
   deliberately not the moving `gemini-flash-latest` alias (see
   [05-guardrails-cost-and-reuse.md](05-guardrails-cost-and-reuse.md)).
 - `main.py:91-103` loads LLM/embedding/Tavily pricing tables used for cost estimates.
@@ -77,7 +77,7 @@ prompt content; this doc only covers control flow.
 (`main.py:462`) is the ordered list `_run_pipeline_async` walks. It is a plain
 Python list, not ADK's `SequentialAgent` class — see §3 below for why.
 
-## 3. Running the reasoning graph, `main.py:880-971` (`_run_pipeline_async`)
+## 3. Running the reasoning graph, `pipeline/execution.py:37-128` (`_run_pipeline_async`)
 
 This is the function every Phase B/C run eventually calls. Per ticker:
 
@@ -87,7 +87,7 @@ This is the function every Phase B/C run eventually calls. Per ticker:
 2. Builds the agent list, dropping `sale_advisor_agent` if
    `skip_sale_advisor` (`main.py:927-928`).
 3. For each agent in order (`main.py:929-966`):
-   - Builds a fresh `Runner` via `_build_runner` (`main.py:550-559`, attaches
+   - Builds a fresh `Runner` via `_build_runner` (`agents/runtime.py:49-58`, attaches
      context-cache config from `App` if `CONTEXT_CACHE_ENABLED`).
    - Runs it against the shared session; the agent's `output_key` (e.g.
      `"bear_data"`) writes its answer into session state.
@@ -100,14 +100,14 @@ This is the function every Phase B/C run eventually calls. Per ticker:
      [agent_architecture.md §5B](../src/specs/agent_architecture.md).
 4. Returns `(final_session_state, usage)`.
 
-`run_pipeline` (`main.py:974-992`) is the synchronous wrapper (`asyncio.run`)
+`run_pipeline` (`pipeline/execution.py:131-149`) is the synchronous wrapper (`asyncio.run`)
 that `analyze_ticker` calls; it adds one gentle inter-ticker sleep afterward.
 
-## 4. Per-ticker orchestration, `main.py:1094-1281` (`analyze_ticker`)
+## 4. Per-ticker orchestration, `pipeline/analysis.py:68-328` (`analyze_ticker`)
 
 The single function every execution mode funnels through for Phase B/C. In order:
 
-1. **Normalize the candidate shape** (`main.py:1117`, `_normalize_candidate`) —
+1. **Normalize the candidate shape** (`report/figures.py:53`, `_normalize_candidate`) —
    screener-CSV rows and on-demand single-ticker rows use different field
    names/types; see [05-guardrails-cost-and-reuse.md](05-guardrails-cost-and-reuse.md).
 2. **Reuse check** (`main.py:1119-1151`) — before any billed work, look up
@@ -121,13 +121,13 @@ The single function every execution mode funnels through for Phase B/C. In order
    missing the debt/cash/EV columns the reconciliation gate needs. The price snapshot
    is fetched **once** here and reused by the report's `## Price` section, the agents'
    `VERIFIED_FIGURES`, and the buy case — so all three quote one number.
-4. **Run the reasoning graph** (`main.py:1179-1182`, calls `run_pipeline` from §3).
+4. **Run the reasoning graph** (`pipeline/execution.py:131-149`, calls `run_pipeline` from §3).
 5. **Persist everything** (`main.py:1188-1280`):
    - `db_store_agent_output` for `SEC_DATA`/`QUANT_METRICS` (unembedded) and
      `BEAR_CASE`/`BULL_CASE`/`SALE_CASE` (embedded).
-   - Run the **reconciliation gate** (`_reconcile_agent_figures`, `main.py:1229-1236`)
+   - Run the **reconciliation gate** (`_reconcile_agent_figures`, `report/reconciliation.py:225-306`)
      over bear/bull/final/sale text against the verified figures.
-   - Extract the verdict (`_extract_verdict`, `main.py:1078-1091`) and prepend
+   - Extract the verdict (`_extract_verdict`, `pipeline/verdict.py:46-59`) and prepend
      the deterministic `## Magic Formula Metrics` section
      (`_format_magic_formula_section`) plus any reconciliation warnings.
    - `db_store_final_report`, `db_store_ticker_run`, and write
@@ -146,19 +146,19 @@ The single function every execution mode funnels through for Phase B/C. In order
 
 ```mermaid
 flowchart TD
-    A["run_orchestrator()\nmain.py:2057"] -->|"Phase A: run_magic_formula_screener()"| B["_run_phase_b()\nmain.py:2009"]
-    C["run_from_csv(path)\nmain.py:2120"] -->|"read CSV, sort by Final_Rank"| B
-    D["run_single_ticker(ticker)\nmain.py:2143"] -->|"compute_ticker_magic_metrics()"| E["analyze_ticker()\nmain.py:1094"]
+    A["run_orchestrator()\nmain.py:325"] -->|"Phase A: run_magic_formula_screener()"| B["_run_phase_b()\nmain.py:2009"]
+    C["run_from_csv(path)\nmain.py:396"] -->|"read CSV, sort by Final_Rank"| B
+    D["run_single_ticker(ticker)\nmain.py:420"] -->|"compute_ticker_magic_metrics()"| E["analyze_ticker()\npipeline/analysis.py:68"]
     B -->|"for each candidate"| E
-    F["run_screen_only()\nmain.py:2073"] -->|"screener only, no DB writes"| G[("CSV file")]
+    F["run_screen_only()\nmain.py:342"] -->|"screener only, no DB writes"| G[("CSV file")]
     H["run_sell_check(ticker)\nmain.py:2200"] -->|"db_get_sale_case + _run_sell_check"| I["sell_check_agent\nreports/TICKER_Sell_Check.md"]
     J["run_buy_check(ticker)"] -->|"db_get_buy_case + fresh price"| K["buy_check_agent\nreports/TICKER_Buy_Check.md"]
     E -->|"verdict == WATCH"| L["buy_case_agent.write_buy_case\nBUY_CASE + reports/TICKER_Buy_Case.md"]
 ```
 
-- **`run_orchestrator(force, skip_sale_advisor)`** (`main.py:2057`) — Phase A
+- **`run_orchestrator(force, skip_sale_advisor)`** (`main.py:325`) — Phase A
   then `_run_phase_b`. Bare `python main.py`.
-- **`run_screen_only()`** (`main.py:2073`) — Phase A alone; writes the CSV,
+- **`run_screen_only()`** (`main.py:342`) — Phase A alone; writes the CSV,
   logs the top N, and returns. No `pipeline_runs` row, no agent calls.
 - **`run_from_csv(csv_path, force, skip_sale_advisor)`** (`main.py:2120`) —
   reads the rankings CSV (sorted by `Final_Rank` if present), takes the top
@@ -183,7 +183,7 @@ flowchart TD
 creates the parent `pipeline_runs` row (`db_create_pipeline_run`, must happen
 **before** any `agent_outputs`/`final_reports` insert — those tables carry an
 FK onto it), then loops candidates through `analyze_ticker`, checking the
-budget guard (`_check_budget`, `main.py:594`) before each one.
+budget guard (`_check_budget`, `usage.py:60`) before each one.
 
 ## 6. CLI argument parsing, `main.py:2262-2372`
 

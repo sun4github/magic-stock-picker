@@ -54,13 +54,13 @@ influences later gates or the final ranking (see
 | EPS growth > `min_eps_growth`, base margin ≥ `min_base_net_margin`, PEG ≤ `max_peg` (`growth_gate_reason`) | `:895-935` | Flat or shrinking earnings per share (measured as multi-year TOTALS, so loss years count), a base window below 3% net margin, or a PEG above 1.5. Lynch's test, not Greenblatt's; every threshold set from a 189-company study — [spec §10](../src/specs/agent_architecture.md) | **Dropped, and this is the one exception to the rule in the row above.** `1/PEG` is a ranking input, so a survivor without one cannot be ranked, and the gate asks a company to *demonstrate* growth. Each cause keeps a distinct reason (`growth_unavailable`, `peg_unavailable`, narrowed further by `EPSGrowth_Unavailable_Reason` inside `fetch_eps_growth`) and `main()` prints the split, so a provider outage is a visible count rather than a quietly shorter list |
 | No earnings in last N days (`fetch_recent_earnings_symbols`) | `:253-349` | Anything that reported within the window | **Fails loud**: if neither the bulk calendar nor the per-symbol fallback works, returns `ok=False` and `main()` prints a warning that the filter was **not applied**, rather than silently passing everyone through |
 
-## C. Per-company data-quality gates (inside `compute_company_metrics_detailed`) — `magic_formula_starter_screener.py:395-683`
+## C. Per-company data-quality gates (inside `compute_company_metrics_detailed`) — `magic_formula_starter_screener.py:438-725`
 
 These decide whether a single company's ratios can be computed **at all**;
 each returns a structured `{"ok": False, "reason": ..., "message": ...}`
 via `_skip()` (`:388-394`) rather than raising, so the screener's hot loop
 can count and move on, and the single-ticker path (`compute_ticker_magic_metrics`,
-`mcp_server.py:61`) can explain *why* to a report reader instead of showing
+`data/screener.py:56`) can explain *why* to a report reader instead of showing
 a bare "Not available":
 
 | `reason` | Line | Trigger |
@@ -111,7 +111,7 @@ misconfigured or the data provider may have changed behavior:
 | Budget guard (`_check_budget`) | `:608-632` | **Halts** (on `on_exceed: halt`) — but only *between* tickers, never mid-ticker, and marks the run `BUDGET_EXCEEDED` rather than `COMPLETED` so a short run is distinguishable from a finished one. `on_exceed: warn` fails open (logs loudly, continues). |
 | Per-agent 429 retry (`_is_rate_limit_error` + retry loop) | `:576, 952-976` | Retries up to `MAX_AGENT_RETRIES` (5) with exponential backoff; re-raises after exhausting retries, which aborts that ticker (returns zero usage — a known, accepted gap, see the comment at `main.py:970-974`) |
 | DB write failures (`_check_db`) | `:1069-1076` | **Fails open** — logs an ERROR but the run continues; a persistence failure does not stop analysis |
-| Embedding failures (`get_embedding`) | `mcp_server.py:764-812` | **Fails open** — logs an ERROR (loud, not silent — see the rule at the top of this doc) and stores a zero vector rather than blocking the write |
+| Embedding failures (`get_embedding`) | `persistence/embeddings.py:50-98` | **Fails open** — logs an ERROR (loud, not silent — see the rule at the top of this doc) and stores a zero vector rather than blocking the write |
 | Spend-lookup failure inside the budget guard | `agent_architecture.md`'s "Budget guard" §5B | Falls back to the per-run ceiling alone rather than failing open entirely — a guard that fails open silently would look protected when it isn't |
 
 ## G. Critic-loop gates (Phase D, opt-in) — `critic_agent.py` / `refine.py`
@@ -122,14 +122,14 @@ Only active under `python refine.py TICKER`. Full walkthrough:
 | Gate | Line | Checks | On failure |
 | :--- | ---: | :--- | :--- |
 | Agreement cross-check (`extract_critic_verdict`) | `critic_agent.py:269-297` | The critic's *declared* `CRITIC VERDICT:` line against the severities it assigned itself. Takes the **stricter** of the two. | A declared `AGREE` with a BLOCKING/MATERIAL finding standing is forced to `REVISE`, and the override is returned as a `note` and logged — resolving the contradiction the other way would stamp "the critic agreed" on a report the critic's own text says is unsupportable. |
-| Missing verdict line | `critic_agent.py:283-287` | Whether any `CRITIC VERDICT:` line parsed at all | **Falls back to the severities**, never to agreement — a formatting failure is not evidence of a clean report. |
+| Missing verdict line | `critic_agent.py:87-133` | Whether any `CRITIC VERDICT:` line parsed at all | **Falls back to the severities**, never to agreement — a formatting failure is not evidence of a clean report. |
 | Findings-parse fallback (`parse_findings`) | `critic_agent.py:222-238` | Whether the review's findings could be parsed at the expected heading/bold structure | If nothing parses *and* the text doesn't say "No findings.", any severity keyword in the body promotes it to a single `unparsed` finding. Silently returning `[]` would read as "the critic found nothing". |
-| Spend ceiling (`_affordable`) | `refine.py:217-230` | `spent + next-round estimate` against **both** `refinement.max_budget_usd` and the rolling `budget.per_day_usd` window | Returns a reason string; the loop stops **between** rounds and the report ships stamped un-agreed with that reason. Never aborts mid-round (an abandoned round is billed and produces nothing). |
+| Spend ceiling (`_affordable`) | `refine.py:259-271` | `spent + next-round estimate` against **both** `refinement.max_budget_usd` and the rolling `budget.per_day_usd` window | Returns a reason string; the loop stops **between** rounds and the report ships stamped un-agreed with that reason. Never aborts mid-round (an abandoned round is billed and produces nothing). |
 | Revision-affordability rule (`_Estimator.full_round`) | `refine.py:205, 661` | Whether a revision, **the critique that must follow it**, and **the sale advisory it invalidates** all fit | Stops before the revision. Guarantees two things: the shipped report has always been critiqued *as it stands*, and a revision never strands the advisory it made stale. Reserved rather than given a separate budget, so `--max-budget` remains the one number that governs. |
 | Zero-cost measurement guard (`_Estimator.observe`) | `refine.py:199-202` | Ignores a measured cost of `0` | A turn that failed before billing must not be recorded as a cheap round, or the next projection lets the loop start something it cannot finish. |
 | Reconciliation gate on the refined report | `refine.py:739-751` | Same `_reconcile_agent_figures` as §E, re-run over the revised text, the critic's own review, **and** the sale advisory | Same behavior as §E — warnings appended, never blocks persistence. |
-| Sale-advisory freshness (`_refresh_sale_advisory`) | `refine.py:330-427` | Whether the report was actually revised, and whether re-deriving the advisory fits the ceiling | No revision → carried forward unchanged (valid, since the prose did not move). Revision → re-derived against the refined report. Revision but unaffordable → **should be unreachable** (the cost is reserved before the revision is committed to); if reached, carried with a visible staleness warning and a loud log, never silently, because its sell triggers may be anchored to a figure the critic corrected. |
-| Source-case availability (`_load_source_case`) | `refine.py:163-184` | Whether the reviewed run still has `BEAR_CASE`/`BULL_CASE` stored | **Fails open with an explicit prompt note** telling the critic the case is unavailable and not to read its absence as evidence the summary is wrong. |
+| Sale-advisory freshness (`_refresh_sale_advisory`) | `refine.py:399-491` | Whether the report was actually revised, and whether re-deriving the advisory fits the ceiling | No revision → carried forward unchanged (valid, since the prose did not move). Revision → re-derived against the refined report. Revision but unaffordable → **should be unreachable** (the cost is reserved before the revision is committed to); if reached, carried with a visible staleness warning and a loud log, never silently, because its sell triggers may be anchored to a figure the critic corrected. |
+| Source-case availability (`_load_source_case`) | `refine.py:174-193` | Whether the reviewed run still has `BEAR_CASE`/`BULL_CASE` stored | **Fails open with an explicit prompt note** telling the critic the case is unavailable and not to read its absence as evidence the summary is wrong. |
 
 ## G1b. Stale-figure guards in the critic loop — `critic_agent.py` / `refine.py`
 
@@ -178,10 +178,10 @@ Walkthrough: [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md).
 
 | Gate | Where | Behavior |
 | :--- | :--- | :--- |
-| Verdict vocabulary `CHECK` constraint | `sql-schema.sql:47`, mirrored in `initialize_database()` (`mcp_server.py:673, 682-686`) | DB-level: `verdict IN ('BUY','WATCH','AVOID','HOLD','SELL')`. Legacy values kept valid so historical rows never violate the constraint after the vocabulary changed. |
-| Verdict normalization before insert (`db_store_final_report`) | `mcp_server.py:1038-1040` | An unrecognized verdict string is coerced to `WATCH` (the neutral default) **before** the `INSERT`, so the constraint is never what catches a bad value — the app layer already guarantees it. |
-| Duplicate-run reuse fingerprint (`_analysis_key`) | `main.py:652-675` | Not exactly a rejection gate, but gates whether billed work happens at all — see [05-guardrails-cost-and-reuse.md §5](05-guardrails-cost-and-reuse.md). Returns `""` (disabling reuse) rather than guessing when the balance-sheet date is unknown. |
-| `magic_rank` type coercion (`db_store_ticker_run`) | `mcp_server.py:1071-1074` | A rank arriving as a numpy int/float/NaN (from pandas, in `--from-csv` mode) is guarded with a `try/except` and coerced to a plain `int` or `None` — psycopg2 can't bind a numpy type to an `INTEGER` column directly. |
+| Verdict vocabulary `CHECK` constraint | `sql-schema.sql:47`, mirrored in `initialize_database()` (`persistence/db.py:47, 682-686`) | DB-level: `verdict IN ('BUY','WATCH','AVOID','HOLD','SELL')`. Legacy values kept valid so historical rows never violate the constraint after the vocabulary changed. |
+| Verdict normalization before insert (`db_store_final_report`) | `persistence/reports.py:22-50` | An unrecognized verdict string is coerced to `WATCH` (the neutral default) **before** the `INSERT`, so the constraint is never what catches a bad value — the app layer already guarantees it. |
+| Duplicate-run reuse fingerprint (`_analysis_key`) | `pipeline/reuse.py:77-109` | Not exactly a rejection gate, but gates whether billed work happens at all — see [05-guardrails-cost-and-reuse.md §5](05-guardrails-cost-and-reuse.md). Returns `""` (disabling reuse) rather than guessing when the balance-sheet date is unknown. |
+| `magic_rank` type coercion (`db_store_ticker_run`) | `persistence/reports.py:53-106` | A rank arriving as a numpy int/float/NaN (from pandas, in `--from-csv` mode) is guarded with a `try/except` and coerced to a plain `int` or `None` — psycopg2 can't bind a numpy type to an `INTEGER` column directly. |
 
 ## Where to look next
 
