@@ -7,7 +7,7 @@ Primary files: [`src/data/`](../src/data/) and
 > **Two corrections to what this document used to say.** The tools no longer live in
 > one 2,458-line `mcp_server.py`: they are split by what they talk to — `data/` for
 > the outside world (the screen, SEC, FMP, web search) and `persistence/` for
-> Postgres — with `mcp_server` importing both, which is what registers all 33 tools
+> Postgres — with `mcp_server` importing both, which is what registers all 34 tools
 > and what `python mcp_server.py` still serves. And the schema bootstrap is **no
 > longer at module load**: `initialize_database()` fires lazily, on the first
 > connection that actually needs it. It used to run at import, charging every
@@ -126,8 +126,8 @@ this codebase that is not a third-party API.
 | `db_finalize_pipeline_run` | `persistence/runs.py:71` | `pipeline_runs` (write) | Relational row, aggregated usage/cost | Terminal update: status + aggregated token/search usage + cost. |
 | `db_store_agent_output` | `persistence/runs.py:115` | `agent_outputs` (write) | Raw text + optional 768-dim vector | Insert into `agent_outputs`; embeds via `get_embedding` when `embed=True`. |
 | `db_find_reusable_report` | `persistence/runs.py:141` | `final_reports` (read) | Relational row + markdown text | Look up a row by `(ticker, analysis_key)` younger than `max_age_hours`. Backs the duplicate-run skip. |
-| `db_copy_ticker_outputs` | `persistence/runs.py:197` | `final_reports`, `agent_outputs` (read+write) | Relational rows + vectors, copied as-is | Copy a report + all agent outputs from one `run_id` to another (embeddings copied, not regenerated). |
-| `db_spend_since` | `persistence/runs.py:243` | `pipeline_runs` (read) | Aggregate (`SUM`) | Total estimated spend in the last N hours. Backs the rolling daily budget ceiling. |
+| `db_copy_ticker_outputs` | `persistence/runs.py:268` | `final_reports`, `agent_outputs` (read+write) | Relational rows + vectors, copied as-is | Copy a report + all agent outputs from one `run_id` to another (embeddings copied, not regenerated). |
+| `db_spend_since` | `persistence/runs.py:314` | `pipeline_runs` (read) | Aggregate (`SUM`) | Total estimated spend in the last N hours. Backs the rolling daily budget ceiling. |
 | `db_store_final_report` | `persistence/reports.py:22` | `final_reports` (write) | Markdown text + 768-dim vector | Insert; normalizes verdict to `BUY`/`WATCH`/`AVOID` (default `WATCH` if unrecognized). |
 | `db_store_ticker_run` | `persistence/reports.py:53` | `ticker_runs` (write) | Relational row | Upsert the per-ticker index row (`ON CONFLICT (ticker, run_id) DO UPDATE`) — drives the web UI. |
 | `db_search_historical_reports` | `persistence/reports.py:109` | `final_reports` (read) | Vector cosine similarity (`<=>`) | Semantic search over stored reports. Not called anywhere in `main.py` today — available for ad hoc / future use. |

@@ -195,6 +195,77 @@ def db_find_reusable_report(ticker: str, analysis_key: str, max_age_hours: int =
 
 
 @mcp.tool()
+@mcp.tool()
+def db_copy_inherited_outputs(src_run_id: str, dst_run_id: str, ticker: str) -> str:
+    """Copy the analysis artefacts a REFINEMENT inherits but does not regenerate.
+
+    A refinement reviews a finished report; it never re-runs the bear and bull
+    agents, and it does not re-fetch the SEC text or the metrics. Those four rows
+    therefore exist only under the run being reviewed, so a refinement run listed in
+    the web UI showed empty Bear Case and Bull Case tabs — the run is real, the
+    ticker is there, and the tabs load nothing. Exactly the failure
+    `db_copy_ticker_outputs` was written for on the reuse path, one run type along.
+
+    Narrower than that function on purpose:
+      - SALE_CASE and BUY_CASE are excluded because the refinement decides those
+        itself — the advisory is re-derived or carried, and the buy case is dropped
+        outright when a review moves the verdict off 'Watch'. Copying them here
+        would fight those decisions.
+      - CRITIC_REVIEW is the refinement's own output, not something inherited.
+      - BUY_CHECK is excluded for the same reason as in `db_copy_ticker_outputs`: it
+        is a dated observation, not an artefact of the analysis.
+
+    **Embeddings are deliberately NOT copied.** The text is identical to the source
+    run's and is already indexed under it; a second vector for the same passage
+    makes semantic search return one document twice. The row is here so the UI can
+    display it, and display does not need an embedding.
+    """
+    inherited = ("BEAR_CASE", "BULL_CASE", "SEC_DATA", "QUANT_METRICS")
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Follow `refines_run_id` back to the run that actually HOLDS these rows.
+        # A refined report can itself be refined, and the second refinement's
+        # immediate source is the first refinement — which never had a bear case
+        # either. Copying from one hop back would silently carry nothing. Bounded
+        # rather than recursive-until-null so a cycle in the data cannot hang a run.
+        origin = src_run_id
+        for _ in range(10):
+            cur.execute("""SELECT 1 FROM agent_outputs
+                            WHERE run_id = %s AND ticker = %s AND agent_type = ANY(%s)
+                            LIMIT 1""", (origin, ticker, list(inherited)))
+            if cur.fetchone():
+                break
+            cur.execute("SELECT refines_run_id FROM pipeline_runs WHERE run_id = %s",
+                        (origin,))
+            row = cur.fetchone()
+            if not row or not row[0]:
+                break
+            origin = str(row[0])
+
+        cur.execute('''
+            INSERT INTO agent_outputs (run_id, ticker, agent_type, raw_content, metadata)
+            SELECT %s, ticker, agent_type, raw_content, metadata
+              FROM agent_outputs
+             WHERE run_id = %s AND ticker = %s AND agent_type = ANY(%s)
+               AND NOT EXISTS (
+                   SELECT 1 FROM agent_outputs d
+                    WHERE d.run_id = %s AND d.ticker = agent_outputs.ticker
+                      AND d.agent_type = agent_outputs.agent_type)
+        ''', (dst_run_id, origin, ticker, list(inherited), dst_run_id))
+        n = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        return (f"Carried {n} inherited output(s) for {ticker} from "
+                f"{str(origin)[:8]}")
+    except Exception as e:
+        logger.error(f"Error carrying inherited outputs for {ticker}: {e}")
+        return f"Error: {e}"
+
+
+@mcp.tool()
 def db_copy_ticker_outputs(src_run_id: str, dst_run_id: str, ticker: str) -> str:
     """
     Copies a ticker's stored report and agent outputs from one run to another.

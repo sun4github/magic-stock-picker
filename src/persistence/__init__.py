@@ -39,6 +39,7 @@ from .reports import (
 )
 from .results import _check_db
 from .runs import (
+    db_copy_inherited_outputs,
     db_copy_ticker_outputs,
     db_create_pipeline_run,
     db_finalize_pipeline_run,
@@ -54,6 +55,7 @@ __all__ = [
     "EMBED_MODEL",
     "_check_db",
     "_num",
+    "db_copy_inherited_outputs",
     "db_copy_ticker_outputs",
     "db_create_pipeline_run",
     "db_finalize_pipeline_run",

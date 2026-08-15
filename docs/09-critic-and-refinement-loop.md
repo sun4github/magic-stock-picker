@@ -318,7 +318,7 @@ the guard that exists to stop exactly this kind of spending.
   every session reserves it and a session ending on `Buy` or `Avoid` simply does not
   spend it. `max_budget_usd` went 2.25 → 2.45 to absorb the reservation rather than
   letting it quietly buy fewer review rounds.
-- `_Estimator` (`refine.py:224`) keeps **per-role** estimates (the critic makes tool calls, the
+- `_Estimator` (`refine.py:239`) keeps **per-role** estimates (the critic makes tool calls, the
   reviser does not), seeded from config and then replaced by what each role
   actually cost × `estimate_headroom`. A zero measurement is ignored — a turn that
   failed before billing is not a cheap round.
@@ -369,7 +369,7 @@ must be anchored to `VERIFIED_FIGURES` with the current value quoted beside it, 
 figure the critic corrected can leave a threshold calibrated against a number the
 pipeline itself now says was wrong.
 
-`_refresh_sale_advisory` (`refine.py:462`) handles it by outcome, so the cost is only
+`_refresh_sale_advisory` (`refine.py:477`) handles it by outcome, so the cost is only
 paid when it buys something:
 
 | Outcome | What happens | Cost |
@@ -464,10 +464,10 @@ The refined report is assembled the same way `analyze_ticker` assembles a fresh
 one — deterministic `## Magic Formula Metrics`, the analyst's prose, reconciliation
 warnings — plus one section the pipeline never writes:
 
-- **Agreed** (`_agreed_banner`, `refine.py:302`)**:** a short `## Independent Critic Review` note giving the round count
+- **Agreed** (`_agreed_banner`, `refine.py:317`)**:** a short `## Independent Critic Review` note giving the round count
   and review cost, and stating plainly that agreement means neither agent could
   find a fault in the argument, **not** that the call is right.
-- **Not agreed** (`_not_agreed_banner`, `refine.py:352`)**:** the same heading carrying a blunt "**The independent critic has
+- **Not agreed** (`_not_agreed_banner`, `refine.py:367`)**:** the same heading carrying a blunt "**The independent critic has
   NOT agreed this report**", the count of blocking and material objections still
   standing, the stopping reason, and **a list of those standing objections** — title
   and one-line summary each. The full review is not reproduced; it is stored as the
@@ -483,6 +483,44 @@ warnings — plus one section the pipeline never writes:
   > the opposite. MINOR findings are excluded here for the same reason — they never
   > blocked, so they are not "standing"; they appear in the AGREED banner instead,
   > where the point is that no revision ran for them.
+
+### What a refinement writes to the database
+
+Three things beyond the refined report itself, and the reasoning behind each is
+worth knowing before changing any of them:
+
+- **The artefacts it inherited but never regenerated** — `BEAR_CASE`, `BULL_CASE`,
+  `SEC_DATA`, `QUANT_METRICS`, copied from the run under review by
+  `db_copy_inherited_outputs`. A refinement does not re-run the research agents, so
+  without this the run listed in the web UI with Bear Case and Bull Case tabs that
+  loaded nothing — the same failure `db_copy_ticker_outputs` guards against on the
+  reuse path. Embeddings are NOT copied: the text is identical and already indexed
+  under the source run, and a second vector makes semantic search return one
+  document twice. The copy follows `refines_run_id` back through any chain, because
+  a refined report can itself be refined and the immediate parent has no bear case
+  either.
+
+- **A `POST_CRITIC` verdict row, but only when the review moved something.** The
+  pipeline's `INDEPENDENT` row is left exactly as written; this ADDS a second row
+  carrying the refined verdict and its own factors. That pairing is what makes
+  *"does the critic change outcomes, or only cost money"* answerable — grading the
+  refined call requires the pre-critic call still standing beside it, against the
+  same subsequent prices. Overwriting would delete the control group. A refinement
+  where the critic agreed and nothing was revised writes nothing, because a
+  duplicate row saying "same verdict, same reasoning" only dilutes every rate
+  computed over the table.
+
+  Both rows describe one holding, which is why `sync_external_picks` deliberately
+  does not filter `POST_CRITIC` out when settling a sold position: each carries its
+  own baseline and grades to its own return, and excluding one would leave it being
+  re-priced forever after the position closed.
+
+  Measured base rate, so you know what to expect: **1 refinement in 9 has changed a
+  verdict.** These rows will accumulate slowly. Treat them as a case file — "was the
+  critic right to move this one?" — not as a dataset that will reach significance
+  soon. If what you want is a faster read on whether the critic earns its cost,
+  `critic_memory` findings accumulate far quicker than verdict flips, and most of
+  the critic's value lands as corrected reasoning that never changes the label.
 
 Files: `reports/{TICKER}_Refined_Report_{Verdict}.md` and
 `reports/{TICKER}_Critic_Review.md`. The original run's report and rows are left

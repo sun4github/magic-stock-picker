@@ -32,6 +32,19 @@ every month not logged is a month that cannot be recovered later.
    generalise across sectors.
 3. **Does the critic change outcomes, or only cost money?** `verdict_stage`
    records the independent verdict and the post-refinement one separately.
+   `refine.py` writes the `POST_CRITIC` row, and only when the review actually
+   moved the verdict or revised the report — a refinement that agreed and changed
+   nothing would otherwise add a duplicate saying so and dilute every rate computed
+   over the table. The `INDEPENDENT` row is never amended: grading the refined call
+   needs the pre-critic call still standing beside it against the same prices, so
+   overwriting it would delete the control group.
+
+   Expect this to fill slowly. On the history to date **1 refinement in 9 has
+   changed a verdict**, and refinement is an opt-in command run on a handful of
+   names. These rows are a case file — "was the critic right to move this one?" —
+   long before they are a dataset. The faster read on whether the critic earns its
+   cost is `critic_memory`: findings accumulate every review, and most of the
+   critic's value arrives as corrected reasoning that never changes the label.
 
 A fourth use — a second verdict informed by 1 and 2 — is deliberately unbuilt.
 It needs a few hundred verdicts with real elapsed time behind them, and shipping

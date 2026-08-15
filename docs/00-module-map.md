@@ -18,7 +18,7 @@ packages that hold the actual code.
 That re-export layer is load-bearing, not transitional. `refine`, `buy_case`,
 `buy_case_agent`, `sale_advisory`, `critic_agent`, the cron scripts and the tests
 all reach into `main` by attribute — `main._price_snapshot`, `main._new_usage` —
-and `mcp_server` is what `python mcp_server.py` runs to serve all 33 MCP tools.
+and `mcp_server` is what `python mcp_server.py` runs to serve all 34 MCP tools.
 `tools/check_public_surface.py` resolves every one of those references statically;
 run it after moving anything.
 
@@ -110,7 +110,7 @@ before and after; an empty diff is the evidence.
 | Tool | Answers |
 | :--- | :--- |
 | `snapshot_report_surface.py` | Does every report function emit the same bytes? Includes `_prompt_version`. |
-| `snapshot_tool_surface.py` | Do all 33 MCP registrations and every exported signature still match? |
+| `snapshot_tool_surface.py` | Do all 34 MCP registrations and every exported signature still match? |
 | `check_public_surface.py` | Does every `main.X` / `mcp_server.X` reference still resolve? |
 | `run_tests.py` | Do the 7 test files still pass? |
 

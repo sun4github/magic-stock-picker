@@ -53,7 +53,13 @@ from datetime import datetime, timezone
 
 from agents import sale_advisor_agent
 from persistence import _check_db
-from pipeline import _extract_verdict
+from pipeline import (
+    _benchmark_price,
+    _extract_verdict,
+    _git_sha,
+    _prompt_version,
+    _split_verdict_basis,
+)
 from report import (
     _RECONCILIATION_HEADING,
     _format_magic_formula_section,
@@ -69,7 +75,14 @@ from report import (
     _with_run_header,
 )
 from run_log import logger
-from settings import BUDGET_DAY_WINDOW_HOURS, BUDGET_ENABLED, BUDGET_PER_DAY_USD, config
+from settings import (
+    BUDGET_DAY_WINDOW_HOURS,
+    BUDGET_ENABLED,
+    BUDGET_PER_DAY_USD,
+    LEDGER_BENCHMARK,
+    LEDGER_ENABLED,
+    config,
+)
 from usage import (
     _collect_embedding_usage,
     _finalize_run,
@@ -95,7 +108,9 @@ from critic_agent import (
 from mcp_server import (
     compute_ticker_magic_metrics,
     fmp_quarterly_trends,
+    db_copy_inherited_outputs,
     db_create_pipeline_run,
+    db_log_verdict,
     db_store_agent_output,
     db_store_final_report,
     db_store_ticker_run,
@@ -863,6 +878,14 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     _check_db(db_create_pipeline_run(refine_run_id, [ticker], src_run),
                    "create refinement run")
 
+    # Carry the artefacts this run inherits but never regenerates — the bear and bull
+    # cases, the SEC text, the metrics. Without them the refinement lists in the web
+    # UI as a run whose Bear Case and Bull Case tabs load nothing, because those rows
+    # only ever existed under the run being reviewed. Same failure the duplicate-run
+    # skip already guards against, one run type along.
+    _check_db(db_copy_inherited_outputs(src_run, refine_run_id, ticker),
+              f"{ticker} carry inherited outputs")
+
     usage = _new_usage()
     prior_day_usd = _prior_day_spend() if BUDGET_ENABLED else 0.0
     est = _Estimator()
@@ -1045,6 +1068,22 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     # 'Watch' and a review is entirely capable of moving the verdict onto or off it.
     verdict = _extract_verdict(report_body)
 
+    # Strip the machine-readable Verdict Basis tail, exactly as the pipeline does in
+    # `analyze_ticker`. The reviser inherits `analyst_agent.instruction` verbatim, so
+    # it is told to emit that JSON block and duly does — and without this the block
+    # shipped inside every refined report. A reader with no finance background opened
+    # a document that ended in a factor dump; the block exists for the ledger, not for
+    # them. It is taken AFTER `_extract_verdict` above, since the verdict line sits
+    # before it and stripping first would not change the answer but does change what
+    # a later reader of `report_body` sees.
+    # Splitting serves two purposes. It keeps the JSON tail out of the reader-facing
+    # report (the pipeline does the same in `analyze_ticker`; without it every refined
+    # report ended in a factor dump). And the factors it parses out are the basis for
+    # the POST_CRITIC ledger row written at the end of this function — a revision that
+    # changes the reasoning changes the factors behind it, so the refined verdict must
+    # be recorded with its OWN basis rather than inheriting the pipeline's.
+    report_body, _refined_factors = _split_verdict_basis(report_body, ticker)
+
     # 4a. Give this run its own sale advisory — re-derived if the report changed,
     # carried forward if it did not. See _refresh_sale_advisory for why both cases
     # matter and why leaving it absent broke `--sell-check --run`.
@@ -1131,6 +1170,56 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     # usually run one ticker at a time and read immediately: 'buy case regenerated' is
     # the difference between `--buy-check --run <this id>` working and not.
     derived = f"Sale advisory: {sale_origin}. Buy case: {buy_origin}."
+
+    # --- The ledger: a POST_CRITIC verdict, but only when the review moved something.
+    #
+    # The INDEPENDENT row written by `analyze_ticker` is left exactly as it was. This
+    # ADDS a second row rather than correcting the first, which is what makes "does
+    # the critic change outcomes, or only cost money" answerable at all: grading the
+    # refined call needs the pre-critic call still standing beside it, against the
+    # same subsequent prices. Overwrite it and you have deleted the control group.
+    # `verdict_log.verdict_stage` and the partial dedup index were built for exactly
+    # this pairing; until now nothing wrote the second row.
+    #
+    # Only when something actually moved. A refinement where the critic agreed and no
+    # revision ran reached the same verdict on the same reasoning, and a duplicate row
+    # saying so is noise that would dilute every rate computed over the table. On the
+    # measured history that is most of them: 1 refinement in 9 has changed a verdict.
+    #
+    # Not wrapped in _check_db, and swallowed on failure, for the same reason as the
+    # pipeline's call — this is bookkeeping, and it must never cost a refinement that
+    # has already been paid for.
+    if LEDGER_ENABLED and (verdict_moved or revised):
+        try:
+            db_log_verdict(
+                refine_run_id, ticker, verdict, json.dumps(_refined_factors or []),
+                company_name=company_name or ticker,
+                verdict_stage="POST_CRITIC",
+                price=_present((price or {}).get("price")) or 0.0,
+                market_cap=_present((candidate or {}).get("LiveMarketCap")) or 0.0,
+                shares_outstanding=_present((candidate or {}).get("SharesOutstanding")) or 0.0,
+                sector=(candidate or {}).get("Sector") or "",
+                industry=(candidate or {}).get("Industry") or "",
+                magic_rank=int(_present((candidate or {}).get("Final_Rank")) or 0),
+                benchmark_symbol=LEDGER_BENCHMARK,
+                benchmark_price=_benchmark_price(),
+                prompt_version=_prompt_version(),
+                git_sha=_git_sha(),
+                # Deliberately empty, exactly as the refined report's is. An
+                # analysis_key keys on filings and prompts; a refinement's provenance
+                # is a review session, and letting it match the duplicate-run skip
+                # would serve a reviewed report in place of a fresh analysis.
+                analysis_key="",
+            )
+            logger.info(
+                f"[{ticker}] Ledger: logged a POST_CRITIC verdict ({verdict}) beside "
+                f"the pipeline's {source.get('verdict')}. Both now grade to their own "
+                f"return, which is how the critic's worth gets measured."
+            )
+        except Exception as e:
+            logger.warning(f"[{ticker}] POST_CRITIC ledger write failed ({e}); the "
+                           f"refinement is unaffected.")
+
     logger.info(
         f"[{ticker}] Refinement finished after {rounds_done} round(s): "
         f"{'AGREED' if agreed else 'NOT AGREED'} ({stop_reason}). "

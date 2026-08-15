@@ -1,6 +1,6 @@
 """The MCP server: every tool the agents can call, in one namespace.
 
-Run it directly (`python mcp_server.py`) and it serves all 33 tools over MCP. Import
+Run it directly (`python mcp_server.py`) and it serves all 34 tools over MCP. Import
 it and you get the same functions as plain callables, which is how the rest of this
 codebase uses them — `main`, `refine`, `buy_case`, `sale_advisory` and the cron
 scripts all call them directly, with no MCP round trip.
@@ -41,6 +41,7 @@ from persistence import (  # noqa: F401  (same)
     EMBED_MODEL,
     EMBEDDING_USAGE,
     _num,
+    db_copy_inherited_outputs,
     db_copy_ticker_outputs,
     db_create_pipeline_run,
     db_finalize_pipeline_run,
