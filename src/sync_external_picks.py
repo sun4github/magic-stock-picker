@@ -19,13 +19,14 @@ the same schedule. Put both on one crontab line, in this order:
 Order matters. The sync is what tells the snapshot job which subjects exist and
 which have finished, so running the snapshot first means a week's delay on both.
 
-THREE THINGS IT DOES, AND WHY EACH IS NEEDED
---------------------------------------------
+FOUR THINGS IT DOES, AND WHY EACH IS NEEDED
+-------------------------------------------
 1. Mirrors purchases that have no ledger row yet — externally-sourced only,
    since the pipeline writes its own verdicts as it reaches them.
 2. SETTLES rows whose position has since been sold — BOTH streams, pipeline
    picks included.
-3. UNMIRRORS rows whose lot has been deleted from the tracker — mirrored rows
+3. REPRICES rows whose lot no longer says what it said — see "corrections".
+4. UNMIRRORS rows whose lot has been deleted from the tracker — mirrored rows
    only, and see "the third case" below.
 
 The second is not a variation of the first. A purchase is mirrored when it is
@@ -41,6 +42,32 @@ is the point: a closed position is closed whoever picked it. Only the join key
 differs — external picks match on (ticker, purchase date), pipeline picks on
 run_id. Closing a lot in the tracker is therefore the ONLY action required to
 settle it, regardless of which stream chose it.
+
+CORRECTIONS: A LOT THAT CHANGED
+-------------------------------
+The tracker can correct a lot in place — a mistyped ticker or a misplaced
+decimal is a typo, not a reason to delete a purchase and lose its history. What
+happens here depends on WHICH field changed, because the mirror is keyed on
+(ticker, purchase_date):
+
+  * ticker or purchase date — the key itself moved, so the old row is orphaned
+    and unmirrored, and a fresh one is written. Already handled by steps 1 and 4.
+  * shares or buy price — the key is unchanged, so the row is neither orphaned
+    nor re-created. `pending_purchases` only ever CREATES, and skips any lot that
+    already has a row. Without step 3 the ledger would go on grading the position
+    against the wrong cost forever, and silently: the one failure mode here with
+    no visible symptom at all.
+
+Step 3 also catches a case that is not an edit. Buy more of the same name on the
+same day, in another account, and the blended cost changes while the key does
+not — so the mirror keeps the price of whichever lots existed when it was first
+written. That drift was present before this step existed.
+
+Repricing RE-DERIVES the existing marks rather than deleting them. Each
+verdict_outcome row already stores the market price on its as_of date and the
+benchmark on the same day; only the baseline they were measured against has
+moved. Recomputing from those keeps the whole history and makes it correct,
+where deleting would throw away weeks of marks to fix a decimal point.
 
 THE THIRD CASE: A DELETED LOT
 -----------------------------
@@ -410,6 +437,43 @@ def orphaned_mirrors(cur, external_source: str) -> list:
     return cur.fetchall()
 
 
+def stale_mirrors(cur, external_source: str) -> list:
+    """Mirrored rows whose lot still exists but no longer says what it said.
+
+    The tracker can correct a lot's shares or buy price in place — a misplaced
+    decimal is a typo, not a reason to delete a purchase and lose its history.
+    Neither field is part of the mirror's natural key, so the row is not orphaned
+    and not re-mirrored: `pending_purchases` only ever CREATES, and skips any lot
+    that already has a row. Without this the ledger would go on grading the
+    position against the price that was typed wrong, forever, and silently —
+    the one failure mode with no visible symptom at all.
+
+    (Correcting the ticker or the purchase date is a different matter: those ARE
+    the key, so the old row orphans and a fresh one is written. That path is
+    already covered by orphaned_mirrors + pending_purchases.)
+    """
+    cur.execute(
+        """
+        SELECT v.verdict_id, v.ticker, v.verdict_date, v.price AS ledger_price,
+               SUM(l.shares * l.buy_price) / NULLIF(SUM(l.shares), 0) AS lot_price
+          FROM verdict_log v
+          JOIN stock_tracker.lots l
+            ON l.ticker = v.ticker
+           AND l.purchase_date = v.verdict_date
+           AND l.source <> 'PIPELINE'
+         WHERE v.source = %s
+         GROUP BY v.verdict_id, v.ticker, v.verdict_date, v.price
+        -- Rounded to the cent the ledger stores, so float noise in a weighted
+        -- average does not present itself as a correction every single run.
+        HAVING ROUND(SUM(l.shares * l.buy_price) / NULLIF(SUM(l.shares), 0), 2)
+               IS DISTINCT FROM ROUND(v.price, 2)
+         ORDER BY v.verdict_date
+        """,
+        (external_source,),
+    )
+    return cur.fetchall()
+
+
 def mirrored_total(cur, external_source: str) -> int:
     cur.execute("SELECT COUNT(*) FROM verdict_log WHERE source = %s", (external_source,))
     return cur.fetchone()[0]
@@ -493,6 +557,7 @@ def run_sync(commit: bool, allow_mass: bool = False) -> dict:
     rows = pending_purchases(cur, external_source)
     closures = newly_closed(cur, external_source)
     orphans = orphaned_mirrors(cur, external_source)
+    stale = stale_mirrors(cur, external_source)
     unmirror_ok, unmirror_block = unmirror_guard(
         len(orphans), mirrored_total(cur, external_source), lots_total(cur), allow_mass)
     if not unmirror_ok:
@@ -502,9 +567,10 @@ def run_sync(commit: bool, allow_mass: bool = False) -> dict:
             "happened.", len(orphans), unmirror_block)
         orphans = []
 
-    if not rows and not closures and not orphans:
+    if not rows and not closures and not orphans and not stale:
         logger.info("Every externally-sourced purchase already has a ledger row, "
-                    "no open one has been sold since, and none has lost its lot.")
+                    "no open one has been sold since, none has lost its lot, and "
+                    "none has been corrected.")
         cur.close(); conn.close()
         return {"pending": 0, "written": 0, "closed": 0}
 
@@ -554,6 +620,15 @@ def run_sync(commit: bool, allow_mass: bool = False) -> dict:
             print("  would put a sale that never occurred into Q7, Q8 and Q10.")
             print("  If one of these was actually SOLD, stop: restore the lot and record the")
             print("  sale on it instead, and it will settle normally on the next run.")
+        if stale:
+            print(f"\n{len(stale)} mirrored row(s) no longer match their lot and would be "
+                  f"REPRICED:\n")
+            for _vid, ticker, bought, ledger_price, lot_price in stale:
+                print(f"    {ticker:<6} bought {bought}  ledger {float(ledger_price):>9.2f} "
+                      f"->  lot {float(lot_price):>9.2f}")
+            print("\n  The lot was corrected in the tracker. Existing marks are re-derived")
+            print("  from the new cost: the market prices already recorded are kept, only")
+            print("  the returns measured against them change.")
         print(f"\n  Benchmark baseline would be {benchmark} on each purchase date"
               + (" and each exit date." if exited or closures else "."))
         if unpriced:
@@ -563,7 +638,7 @@ def run_sync(commit: bool, allow_mass: bool = False) -> dict:
         print("\nDRY RUN - nothing written. Re-run with --commit.")
         cur.close(); conn.close()
         return {"pending": len(rows), "written": 0, "closed": len(closures),
-                "would_unmirror": len(orphans)}
+                "would_unmirror": len(orphans), "would_reprice": len(stale)}
 
     # One call covers every purchase AND exit date, however far back they go.
     span = dates + [r[2] for r in closures]
@@ -664,6 +739,39 @@ def run_sync(commit: bool, allow_mass: bool = False) -> dict:
         )
         settled += 1
 
+    # Reprice mirrors whose lot was corrected in the tracker.
+    #
+    # The already-recorded marks are RE-DERIVED, not deleted. Each verdict_outcome
+    # row stores the market price on its as_of date and the benchmark on the same
+    # day; only the baseline they were measured against has changed. Recomputing
+    # from those preserves the whole history and simply makes it correct, where
+    # deleting would throw away weeks of marks to fix a decimal point.
+    repriced = 0
+    for verdict_id, ticker, bought, ledger_price, lot_price in stale:
+        cur.execute("UPDATE verdict_log SET price = %s WHERE verdict_id = %s",
+                    (lot_price, verdict_id))
+        cur.execute(
+            """
+            UPDATE verdict_outcome o
+               SET total_return_pct = ROUND(100.0 * (o.price - v.price)
+                                            / NULLIF(v.price, 0), 4),
+                   excess_return_pct = CASE
+                       WHEN v.benchmark_price > 0 AND o.benchmark_price IS NOT NULL
+                       THEN ROUND(100.0 * (o.price - v.price) / NULLIF(v.price, 0)
+                                  - 100.0 * (o.benchmark_price - v.benchmark_price)
+                                    / NULLIF(v.benchmark_price, 0), 4)
+                       ELSE NULL END
+              FROM verdict_log v
+             WHERE v.verdict_id = o.verdict_id
+               AND o.verdict_id = %s
+               AND o.price IS NOT NULL
+            """,
+            (verdict_id,),
+        )
+        logger.info("Repriced %s bought %s: %.2f -> %.2f, and re-derived %d mark(s).",
+                    ticker, bought, float(ledger_price), float(lot_price), cur.rowcount)
+        repriced += 1
+
     # Remove mirrors whose lot has been deleted. verdict_outcome and
     # verdict_basis both cascade off verdict_log, so the row's whole history
     # goes with it — which is the point: it was measuring a purchase that,
@@ -680,6 +788,8 @@ def run_sync(commit: bool, allow_mass: bool = False) -> dict:
     cur.close()
     conn.close()
 
+    if repriced:
+        logger.info("%d mirrored row(s) repriced after their lot was corrected.", repriced)
     if unmirrored:
         logger.info("%d mirrored row(s) removed because their lot was deleted.", unmirrored)
     if settled:
@@ -698,6 +808,7 @@ def run_sync(commit: bool, allow_mass: bool = False) -> dict:
                        ", ".join(f"{t} {d}" for t, d in no_baseline[:5]))
     return {"pending": len(rows), "written": written, "graded_at_exit": finals,
             "settled_since_sold": settled, "unmirrored": unmirrored,
+            "repriced": repriced,
             "unpriced_exits": len(unpriced), "benchmark": benchmark}
 
 
