@@ -21,8 +21,10 @@ which have finished, so running the snapshot first means a week's delay on both.
 
 TWO THINGS IT DOES, AND WHY BOTH ARE NEEDED
 -------------------------------------------
-1. Mirrors purchases that have no ledger row yet.
-2. SETTLES rows whose position has since been sold.
+1. Mirrors purchases that have no ledger row yet — externally-sourced only,
+   since the pipeline writes its own verdicts as it reaches them.
+2. SETTLES rows whose position has since been sold — BOTH streams, pipeline
+   picks included.
 
 The second is not a variation of the first. A purchase is mirrored when it is
 made; the sale happens later, by which point a verdict_log row already exists
@@ -31,6 +33,12 @@ every week as though still held, its return drifting with a market it had left,
 and the settled result silently replaced by a hypothetical one — because every
 query here reads the LATEST snapshot. Marks taken after the sale date are
 deleted for the same reason.
+
+Step 2 covers the pipeline stream even though step 1 does not, and the asymmetry
+is the point: a closed position is closed whoever picked it. Only the join key
+differs — external picks match on (ticker, purchase date), pipeline picks on
+run_id. Closing a lot in the tracker is therefore the ONLY action required to
+settle it, regardless of which stream chose it.
 
 So: record purchases and sales in the tracker whenever you like, and let this
 run on its schedule. Nothing has to be run by hand at the moment of a trade.
@@ -254,7 +262,8 @@ def pending_purchases(cur, external_source: str) -> list:
 
 
 def newly_closed(cur, external_source: str) -> list:
-    """Ledger rows still marked open whose position has since been SOLD.
+    """Ledger rows still marked open whose position has since been SOLD —
+    BOTH streams.
 
     This is the ongoing case, and it is not the same as the backfill. A purchase
     is mirrored once, when it is made; the sale happens later. By then a
@@ -262,13 +271,32 @@ def newly_closed(cur, external_source: str) -> list:
     which would leave a sold position being re-priced every week as though it
     were still held, and its return would drift with a market it had left.
 
-    Matched on (ticker, purchase date), the same natural key the mirror uses.
-    Requires EVERY lot of that purchase to be closed and priced: one lot sold
-    out of two is a trimmed position, not a finished pick.
+    THE PIPELINE HALF IS NOT OPTIONAL. A closed position is closed whoever
+    picked it, and until this covered both streams a sold pipeline pick kept
+    being marked at market forever: it never gained an exit_date, so the
+    snapshot job never stopped re-pricing it, Q10 kept counting it under "still
+    held", and the settled side of that split — the side that cannot turn any
+    more — never learned about it. That is the exact failure this function was
+    written to prevent, applied to only one of the two streams it grades.
+
+    The two halves differ only in how a lot is matched to its verdict:
+      * external — (ticker, purchase date), the natural key the mirror uses.
+      * pipeline — run_id, the only link from a trade back to the analysis that
+        justified it. A ticker alone will not do: the same name can be analysed
+        many times and reach different verdicts.
+
+    POST_CRITIC rows are deliberately NOT excluded here, unlike in the cost
+    queries. Both stages describe the same holding, so both must stop being
+    re-priced when it is sold; each carries its own baseline and so grades to
+    its own return. Excluding them would leave the refined verdict drifting.
+
+    Either half requires EVERY lot of that position to be closed and priced: one
+    lot sold out of two is a trimmed position, not a finished pick.
     """
     cur.execute(
         """
-        SELECT v.verdict_id, v.ticker, v.verdict_date, v.price, v.benchmark_price,
+        SELECT 'external' AS stream,
+               v.verdict_id, v.ticker, v.verdict_date, v.price, v.benchmark_price,
                MAX(l.closed_on)                                        AS exit_date,
                SUM(l.shares * l.sale_price) / NULLIF(SUM(l.shares), 0) AS exit_price
           FROM verdict_log v
@@ -280,7 +308,24 @@ def newly_closed(cur, external_source: str) -> list:
            AND v.exit_date IS NULL
          GROUP BY v.verdict_id, v.ticker, v.verdict_date, v.price, v.benchmark_price
         HAVING BOOL_AND(l.status::text = 'CLOSED' AND l.sale_price IS NOT NULL)
-         ORDER BY MAX(l.closed_on)
+
+         UNION ALL
+
+        SELECT 'pipeline',
+               v.verdict_id, v.ticker, v.verdict_date, v.price, v.benchmark_price,
+               MAX(l.closed_on),
+               SUM(l.shares * l.sale_price) / NULLIF(SUM(l.shares), 0)
+          FROM verdict_log v
+          JOIN stock_tracker.lots l
+            ON l.run_id = v.run_id::text
+           AND l.ticker = v.ticker
+           AND l.source = 'PIPELINE'
+         WHERE v.source = 'PIPELINE'
+           AND v.exit_date IS NULL
+         GROUP BY v.verdict_id, v.ticker, v.verdict_date, v.price, v.benchmark_price
+        HAVING BOOL_AND(l.status::text = 'CLOSED' AND l.sale_price IS NOT NULL)
+
+         ORDER BY 7
         """,
         (external_source,),
     )
@@ -288,13 +333,16 @@ def newly_closed(cur, external_source: str) -> list:
 
 
 def unpriced_exits(cur) -> list:
-    """Closed lots with no sale price — reported, never guessed at."""
+    """Closed lots with no sale price — reported, never guessed at.
+
+    Both streams, for the same reason newly_closed covers both: a pipeline lot
+    closed without a recorded sale price is just as ungradeable, and just as
+    worth telling the holder about, as an external one."""
     cur.execute(
         """
         SELECT l.ticker, l.purchase_date, l.closed_on
           FROM stock_tracker.lots l
-         WHERE l.source <> 'PIPELINE'
-           AND l.status::text = 'CLOSED'
+         WHERE l.status::text = 'CLOSED'
            AND l.sale_price IS NULL
          ORDER BY l.closed_on
         """)
@@ -360,9 +408,9 @@ def run_sync(commit: bool) -> dict:
         if closures:
             print(f"\n{len(closures)} pick(s) already in the ledger have since been sold "
                   f"and would be settled:\n")
-            for _vid, ticker, bought, buy_price, _bp, exit_date, exit_price in closures:
+            for stream, _vid, ticker, bought, buy_price, _bp, exit_date, exit_price in closures:
                 pct = (float(exit_price) - float(buy_price)) / float(buy_price) * 100
-                print(f"    {ticker:<6} bought {bought}  exited {exit_date} @ "
+                print(f"    [{stream:<8}] {ticker:<6} bought {bought}  exited {exit_date} @ "
                       f"{float(exit_price):>9.2f}  ({pct:+.1f}%, {(exit_date - bought).days}d)")
             print("\n  Their weekly marks stop here, and any mark taken AFTER the sale "
                   "date is removed:\n  it prices a position that was no longer held.")
@@ -443,9 +491,9 @@ def run_sync(commit: bool) -> dict:
         )
         finals += cur.rowcount
 
-    # Settle picks that were mirrored while open and have since been sold.
+    # Settle picks — mirrored or pipeline-native — whose position has been sold.
     settled = 0
-    for verdict_id, ticker, bought, buy_price, bench_then, exit_date, exit_price in closures:
+    for _stream, verdict_id, ticker, bought, buy_price, bench_then, exit_date, exit_price in closures:
         cur.execute("UPDATE verdict_log SET exit_date = %s, exit_price = %s "
                     "WHERE verdict_id = %s", (exit_date, exit_price, verdict_id))
 

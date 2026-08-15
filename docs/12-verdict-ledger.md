@@ -368,6 +368,21 @@ held — and since every query here reads the **latest** snapshot, the settled
 result would be silently overridden by a hypothetical one. Marks dated after the
 sale are deleted for that reason.
 
+**The two jobs cover different populations, deliberately.** Mirroring is
+external-only, because the pipeline already writes its own verdicts. Settling
+covers **both streams**: a closed position is closed whoever picked it. Only the
+join key differs — external picks match on `(ticker, purchase_date)`, pipeline
+picks on `run_id`, the sole link from a trade back to the analysis that
+justified it. `POST_CRITIC` rows are settled too, unlike in the cost queries
+that exclude them: both stages describe the same holding, so both must stop
+being re-priced, and each grades to its own return off its own baseline.
+
+Closing a lot in the tracker is therefore the only action needed to settle it,
+whichever stream chose it. Until this covered both, a sold pipeline pick never
+gained an `exit_date` at all: the snapshot job never stopped marking it, Q10
+kept it under *still held*, and the settled side of that split — the side that
+cannot turn any more — never learned about it.
+
 **The streams overlap.** An outside recommendation is sometimes also run through
 this pipeline before being bought, leaving two rows for one company: a
 `PIPELINE` verdict grading the analysis and an external row grading the
