@@ -13,19 +13,25 @@ import yaml
 import pandas as pd
 from dotenv import load_dotenv
 
-# This module is BOTH the CLI entry point and the module every other entry point
-# imports for its shared plumbing (`critic_agent`, `refine`, `sale_advisory`,
-# `buy_case_agent` all `import main`). Run as `python main.py`, it is loaded under the
-# name `__main__`, so a later `import main` — which happens the moment the pipeline
-# reaches the buy case — would EXECUTE THIS FILE A SECOND TIME under a second name:
-# a second read of the config, a second set of agent objects, and, worst of it, a
-# second StreamHandler and FileHandler attached to the same logger singleton, giving
-# every subsequent log line twice on the console and splitting the run across two log
-# files. Aliasing the two names in `sys.modules` before any of that can happen makes
-# `import main` resolve to this very module. It is a no-op on the ordinary path,
-# where `sys.modules["main"]` is already populated by the import that is running.
-sys.modules.setdefault("main", sys.modules[__name__])
-
+# This module is the CLI entry point, and now ONLY that. It used to be the shared
+# plumbing as well — `refine`, `buy_case`, `buy_case_agent`, `sale_advisory` and
+# `critic_agent` all did `import main` to reach the agents, the cost accounting and
+# the configured logger — and that made it a module which imports its own importers.
+#
+# Run as `python main.py`, this file is loaded under the name `__main__`, so a later
+# `import main` did not find it in `sys.modules` and EXECUTED THE WHOLE FILE A SECOND
+# TIME under a second name: a second read of the config, a second set of agent
+# objects, and a second StreamHandler and FileHandler bolted onto the same logger
+# singleton — every log line printed twice, the run split across two files. There was
+# a `sys.modules.setdefault("main", sys.modules[__name__])` here that aliased the two
+# names so `import main` resolved to this very module.
+#
+# It is gone because the cycle is gone: everything shared lives in `settings`,
+# `agents`, `usage`, `report`, `pipeline`, `persistence` and `run_log`, and those
+# modules import each other, never this one. Nothing on the import graph reaches back
+# here, so there is no second execution to defend against. `run_log` keeps its own
+# guard against double-configuring the logger, which is the one piece of that damage
+# that could still be caused another way.
 from google.adk.agents import LlmAgent
 from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.apps import App
@@ -68,28 +74,10 @@ from magic_formula_starter_screener import OUTPUT_FILENAME
 load_dotenv()
 
 # --- 1. LOGGER SETUP ---
-os.makedirs("logs", exist_ok=True)
-os.makedirs("reports", exist_ok=True)
-# The same stamp `pipeline.execution` builds ADK session ids from, so a session id
-# can be matched back to the log file it was written beside.
-from runstamp import RUN_STAMP
-
-log_filename = f"logs/run_{RUN_STAMP}.log"
-
-logger = logging.getLogger("InvestmentAgentPipeline")
-logger.setLevel(logging.INFO)
-
-c_handler = logging.StreamHandler()
-f_handler = logging.FileHandler(log_filename)
-
-formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] %(message)s')
-c_handler.setFormatter(formatter)
-f_handler.setFormatter(formatter)
-
-logger.addHandler(c_handler)
-logger.addHandler(f_handler)
-
-logger.info(f"Initialized run logging to console and '{log_filename}'")
+# Console + logs/run_<stamp>.log, configured in `run_log` so that every entry point
+# can have it without importing this one. That used to be the reason `refine`,
+# `buy_case` and `sale_advisory` did `import main` at all.
+from run_log import log_filename, logger  # noqa: F401  (log_filename re-exported)
 
 # Configuration — everything from specs/config.yaml, plus the constants tuned
 # alongside it — lives in `settings`. Imported here rather than read here, and
@@ -564,12 +552,11 @@ def run_buy_check(ticker: str, company_name: str = None, run_id: str = None,
     pin = f" (pinned to run {run_id})" if run_id else ""
     logger.info(f"Starting Buy-Condition Check for {ticker} ({company_name}){pin}")
 
-    # Deferred import: `buy_case_agent` imports this module for the shared
-    # cost/logging plumbing (as `critic_agent` does), so importing it at the top of
-    # this file would be a cycle. See the `sys.modules` alias at the top of the file
-    # for why `import main` inside it resolves back here instead of re-running this
-    # file. Done first, before the database round-trip, so a broken prompt file or a
-    # bad import fails immediately rather than after the lookup has succeeded.
+    # Deferred import, though no longer to break a cycle — `buy_case_agent` imports
+    # from `agents`, `usage` and `report` now, not from here. It stays deferred
+    # because it pulls in ADK and the Gemini SDK, and doing that first, before the
+    # database round-trip, means a broken prompt file or a bad import fails
+    # immediately rather than after the lookup has already succeeded.
     import buy_case_agent
 
     # 1. The stored buy case (a specific run's, or the most recent).

@@ -51,7 +51,23 @@ import os
 import json
 import uuid
 
-import main
+from persistence import _check_db
+from pipeline import _with_run_header
+from report import (
+    _format_verified_figures,
+    _price_snapshot,
+    _reconcile_agent_figures,
+    reconciliation_warning,
+)
+from run_log import logger
+from settings import BUDGET_DAY_WINDOW_HOURS, BUDGET_ENABLED, BUDGET_PER_DAY_USD
+from usage import (
+    _collect_embedding_usage,
+    _finalize_run,
+    _log_usage,
+    _new_usage,
+    _prior_day_spend,
+)
 import refine
 from mcp_server import (
     fmp_quarterly_trends,
@@ -61,7 +77,7 @@ from mcp_server import (
     db_get_agent_output,
 )
 
-logger = main.logger
+logger = logger
 
 
 def generate_sale_advisory(ticker: str, company_name: str = None,
@@ -115,13 +131,13 @@ def generate_sale_advisory(ticker: str, company_name: str = None,
     # this is one deliberate call for a known artefact, so a second number to tune
     # would be ceremony. The daily window is the guard that actually protects against
     # a bad afternoon.
-    if main.BUDGET_ENABLED and not ignore_budget:
-        prior = main._prior_day_spend()
+    if BUDGET_ENABLED and not ignore_budget:
+        prior = _prior_day_spend()
         projected = prior + refine.SEED_ADVISORY_USD
-        if projected >= main.BUDGET_PER_DAY_USD:
+        if projected >= BUDGET_PER_DAY_USD:
             logger.error(
-                f"[{ticker}] Refusing to start: the {main.BUDGET_DAY_WINDOW_HOURS}h "
-                f"ceiling ${main.BUDGET_PER_DAY_USD:.2f} would be reached "
+                f"[{ticker}] Refusing to start: the {BUDGET_DAY_WINDOW_HOURS}h "
+                f"ceiling ${BUDGET_PER_DAY_USD:.2f} would be reached "
                 f"(${prior:.2f} already spent, this needs about "
                 f"${refine.SEED_ADVISORY_USD:.2f}). Use --no-budget to override."
             )
@@ -139,13 +155,13 @@ def generate_sale_advisory(ticker: str, company_name: str = None,
     # The advisory's triggers are business events rather than price levels, but its
     # prose routinely refers to what the stock costs — one stated price, from the same
     # place every other document takes it, beats each agent finding its own.
-    verified_figures = main._format_verified_figures(candidate, main._price_snapshot(ticker))
+    verified_figures = _format_verified_figures(candidate, _price_snapshot(ticker))
     quarterly_data = fmp_quarterly_trends(ticker)
 
     # 4. Its own cost row — see the module docstring for why this is not folded into
     # the target run's totals.
     advisory_run_id = str(uuid.uuid4())
-    main._check_db(db_create_pipeline_run(advisory_run_id, [ticker]),
+    _check_db(db_create_pipeline_run(advisory_run_id, [ticker]),
                    "create sale-advisory run")
 
     logger.info(f"[{ticker}] Running the sale advisor...")
@@ -155,31 +171,31 @@ def generate_sale_advisory(ticker: str, company_name: str = None,
         )
     except Exception as e:
         logger.error(f"[{ticker}] Sale advisor failed: {e}")
-        main._finalize_run(advisory_run_id, main._new_usage(), "Sale Advisory Run",
+        _finalize_run(advisory_run_id, _new_usage(), "Sale Advisory Run",
                            status="FAILED")
         return
 
-    cost = main._log_usage(f"{ticker} sale advisor", usage)
+    cost = _log_usage(f"{ticker} sale advisor", usage)
     if not sale_data.strip():
         logger.error(f"[{ticker}] Sale advisor produced no output; nothing stored. "
                      f"The attempt still cost ${cost:.4f}.")
-        main._finalize_run(advisory_run_id, usage, "Sale Advisory Run", status="FAILED")
+        _finalize_run(advisory_run_id, usage, "Sale Advisory Run", status="FAILED")
         return
 
     # 5. Same gate the pipeline runs over an advisory: its thresholds must not
     # contradict the figures they are supposed to be anchored to.
-    recon = main._reconcile_agent_figures(sale_data, candidate, "Sale advisory")
+    recon = _reconcile_agent_figures(sale_data, candidate, "Sale advisory")
     for f in recon:
         logger.warning(
-            main.reconciliation_warning(ticker, f)
+            reconciliation_warning(ticker, f)
         )
     if not recon:
         logger.info(f"[{ticker}] Reconciliation gate passed on the new advisory.")
 
-    stored = main._with_run_header(
+    stored = _with_run_header(
         _origin_note(target_run, advisory_run_id) + sale_data, target_run, ticker
     )
-    main._check_db(
+    _check_db(
         db_store_agent_output(
             target_run, ticker, "SALE_CASE", stored,
             json.dumps({"ticker": ticker, "origin": "regenerated_standalone",
@@ -192,12 +208,12 @@ def generate_sale_advisory(ticker: str, company_name: str = None,
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(stored)
 
-    main._collect_embedding_usage(usage)
+    _collect_embedding_usage(usage)
     logger.info(
         f"[{ticker}] Sale advisory stored on run {target_run} and saved to "
         f"{out_path}. `--sell-check {ticker} --run {target_run}` will now use it."
     )
-    main._finalize_run(advisory_run_id, usage, "Sale Advisory Run")
+    _finalize_run(advisory_run_id, usage, "Sale Advisory Run")
 
 
 def _origin_note(target_run: str, advisory_run_id: str) -> str:

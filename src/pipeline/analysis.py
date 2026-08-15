@@ -298,10 +298,11 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     # Python decision taken after the graph has finished. The report is already
     # persisted at this point, so a failure here costs the buy case and nothing else.
     #
-    # The import is deferred on purpose: `buy_case_agent` imports this module for the
-    # shared cost/logging plumbing (as `critic_agent` does), so importing it at the
-    # top of this file would be a cycle. See the `sys.modules` alias at the top for
-    # why `import main` inside it resolves back here rather than re-running this file.
+    # The import is deferred on purpose. `buy_case_agent` imports `_with_run_header`
+    # from this package, so importing it at the top of this module would be a genuine
+    # circular import — pipeline -> buy_case_agent -> pipeline — resolved at a point
+    # where `pipeline` is still half-initialised. Deferring it to call time means the
+    # package is fully imported by the time buy_case_agent asks anything of it.
     import buy_case_agent
     if buy_case_agent.is_watch(verdict) and not skip_buy_case:
         buy_case_agent.write_buy_case(

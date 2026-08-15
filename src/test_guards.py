@@ -12,7 +12,10 @@ regenerate a near-identical report.
 """
 import math
 
-import main
+from agents import analyst_agent
+from pipeline import _analysis_key
+from settings import BUDGET_PER_DAY_USD, BUDGET_PER_RUN_USD, BudgetExceeded
+from usage import _check_budget, _new_usage
 import settings
 
 
@@ -29,7 +32,7 @@ def _usage_costing(usd):
     passed at $15.00 and failed at $20.00, reporting a guard regression where the
     guard was correct and the fixture was wrong.
     """
-    u = main._new_usage()
+    u = _new_usage()
     u["by_model"]["gemini-3.6-flash"] = {
         "input": 0, "cached_input": 0,
         "output": math.ceil(usd / 7.50 * 1e6),
@@ -40,8 +43,8 @@ def _usage_costing(usd):
 
 def _budget_cases():
     """(name, run_cost_usd, prior_day_usd, should_halt)"""
-    per_run = main.BUDGET_PER_RUN_USD
-    per_day = main.BUDGET_PER_DAY_USD
+    per_run = BUDGET_PER_RUN_USD
+    per_day = BUDGET_PER_DAY_USD
     return [
         ("under both ceilings", 1.0, 0.0, False),
         ("run cost hits the per-run ceiling", per_run, 0.0, True),
@@ -54,13 +57,13 @@ def _budget_cases():
 def run():
     failures = []
 
-    print(f"--- budget guard (per_run=${main.BUDGET_PER_RUN_USD:.2f}, "
-          f"per_day=${main.BUDGET_PER_DAY_USD:.2f}) ---")
+    print(f"--- budget guard (per_run=${BUDGET_PER_RUN_USD:.2f}, "
+          f"per_day=${BUDGET_PER_DAY_USD:.2f}) ---")
     for name, run_usd, prior_usd, should_halt in _budget_cases():
         try:
-            main._check_budget(_usage_costing(run_usd), prior_usd, "NEXT")
+            _check_budget(_usage_costing(run_usd), prior_usd, "NEXT")
             halted = False
-        except main.BudgetExceeded:
+        except BudgetExceeded:
             halted = True
         ok = halted == should_halt
         failures += [] if ok else [name]
@@ -81,9 +84,9 @@ def run():
         saved = getattr(settings, attr)
         setattr(settings, attr, value)
         try:
-            main._check_budget(_usage_costing(9999.0), 9999.0, "NEXT")
+            _check_budget(_usage_costing(9999.0), 9999.0, "NEXT")
             halted = False
-        except main.BudgetExceeded:
+        except BudgetExceeded:
             halted = True
         finally:
             setattr(settings, attr, saved)
@@ -95,19 +98,19 @@ def run():
     print()
     print("--- reuse fingerprint ---")
     base = {"BalanceSheetDate": "2026-03-31"}
-    k_same = main._analysis_key("FISV", dict(base))
+    k_same = _analysis_key("FISV", dict(base))
     checks = [
         ("same ticker + same filing -> same key",
-         main._analysis_key("FISV", dict(base)) == k_same),
+         _analysis_key("FISV", dict(base)) == k_same),
         ("new filing date -> different key",
-         main._analysis_key("FISV", {"BalanceSheetDate": "2026-06-30"}) != k_same),
+         _analysis_key("FISV", {"BalanceSheetDate": "2026-06-30"}) != k_same),
         ("different ticker -> different key",
-         main._analysis_key("VICR", dict(base)) != k_same),
+         _analysis_key("VICR", dict(base)) != k_same),
         # No balance-sheet date means we cannot establish what the report was based
         # on. Returning "" disables reuse for that ticker: pay again rather than
         # serve a report of unknown provenance.
         ("unknown balance-sheet date -> reuse disabled",
-         main._analysis_key("FISV", {}) == ""),
+         _analysis_key("FISV", {}) == ""),
     ]
     for name, got in checks:
         failures += [] if got else [name]
@@ -115,16 +118,16 @@ def run():
 
     # A prompt edit must invalidate reuse, or tuning the verdict stance would keep
     # serving reports written under the old rules.
-    original = main.analyst_agent.instruction
+    original = analyst_agent.instruction
     try:
-        main.analyst_agent.instruction = original + "\nAn extra instruction."
-        changed = main._analysis_key("FISV", dict(base)) != k_same
+        analyst_agent.instruction = original + "\nAn extra instruction."
+        changed = _analysis_key("FISV", dict(base)) != k_same
     finally:
-        main.analyst_agent.instruction = original
+        analyst_agent.instruction = original
     failures += [] if changed else ["prompt edit -> different key"]
     print(f"{'PASS' if changed else 'FAIL'}  {'prompt edit -> different key':<48} {changed}")
 
-    restored = main._analysis_key("FISV", dict(base)) == k_same
+    restored = _analysis_key("FISV", dict(base)) == k_same
     failures += [] if restored else ["key stable after restoring the prompt"]
     print(f"{'PASS' if restored else 'FAIL'}  "
           f"{'key stable after restoring the prompt':<48} {restored}")

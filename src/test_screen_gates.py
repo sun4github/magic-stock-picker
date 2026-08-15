@@ -501,7 +501,11 @@ def run():
     # Two regressions guarded here, both of which failed SILENTLY (a missing section,
     # not an error), and both on the batch runs where the guard matters most.
     print("\n--- ROC companion (ROIC / ROA fallback) ---")
-    import main
+    from report import (
+        _format_magic_formula_section,
+        _format_verified_figures,
+        _normalize_candidate,
+    )
 
     # 1. Screener-CSV shape: raw ratio columns, no *_Pct keys. Before _normalize_candidate
     #    the report read only the *_Pct form, so the companion vanished on every
@@ -513,7 +517,7 @@ def run():
         "IntangiblesShareOfAssets": 0.50289, "ROA": 0.3037,
         "BalanceSheetDate": "2026-05-29",
     }
-    section = main._format_magic_formula_section(main._normalize_candidate(csv_shape))
+    section = _format_magic_formula_section(_normalize_candidate(csv_shape))
     companion_cases = [
         ("raw CSV ratio yields the companion figure",
          "**Return on capital actually spent (including takeover costs):** 70.16%" in section),
@@ -532,8 +536,8 @@ def run():
         "ROIC_Unavailable_Reason": "negative_invested_capital", "ROA": 0.3424,
         "BalanceSheetDate": "2026-03-31",
     }
-    neg_section = main._format_magic_formula_section(main._normalize_candidate(neg_equity))
-    neg_vf = main._format_verified_figures(main._normalize_candidate(neg_equity))
+    neg_section = _format_magic_formula_section(_normalize_candidate(neg_equity))
+    neg_vf = _format_verified_figures(_normalize_candidate(neg_equity))
     companion_cases += [
         ("negative equity: says it cannot be calculated",
          "cannot be calculated for this company" in neg_section),
@@ -549,7 +553,7 @@ def run():
         ("agent block supplies ROA instead", "USE INSTEAD" in neg_vf and "34.24%" in neg_vf),
         # ...and must stay quiet when the real figure is available.
         ("no substitution when ROIC IS computable",
-         "USE INSTEAD" not in main._format_verified_figures(main._normalize_candidate(csv_shape))),
+         "USE INSTEAD" not in _format_verified_figures(_normalize_candidate(csv_shape))),
     ]
     # 3. Same company, but from a CSV written BEFORE ROIC_Unavailable_Reason existed.
     #    The promise "the companion figure below" is made unconditionally by the
@@ -558,8 +562,8 @@ def run():
     #    instead" with nothing to be instead OF — caught only by reading a real report.
     legacy = dict(neg_equity)
     legacy.pop("ROIC_Unavailable_Reason")
-    legacy_section = main._format_magic_formula_section(main._normalize_candidate(legacy))
-    legacy_vf = main._format_verified_figures(main._normalize_candidate(legacy))
+    legacy_section = _format_magic_formula_section(_normalize_candidate(legacy))
+    legacy_vf = _format_verified_figures(_normalize_candidate(legacy))
     companion_cases += [
         ("legacy CSV: still states the figure cannot be calculated",
          "cannot be calculated for this company" in legacy_section),
@@ -576,7 +580,7 @@ def run():
     #    it has negative equity — the inference has to stay evidence-based.
     odd = {k: v for k, v in neg_equity.items() if k != "ROIC_Unavailable_Reason"}
     odd["TotalEquity"] = 5.0e9
-    odd_section = main._format_magic_formula_section(main._normalize_candidate(odd))
+    odd_section = _format_magic_formula_section(_normalize_candidate(odd))
     companion_cases += [
         ("positive equity: no buyback explanation invented",
          "share buybacks" not in odd_section),
