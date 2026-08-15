@@ -1,0 +1,12 @@
+<MAGIC_FORMULA_CONTEXT>
+{screen_context}
+</MAGIC_FORMULA_CONTEXT>
+
+<VERIFIED_FIGURES>
+{verified_figures}
+</VERIFIED_FIGURES>
+
+<QUARTERLY_DATA>
+{quarterly_data}
+</QUARTERLY_DATA>
+

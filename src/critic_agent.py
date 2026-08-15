@@ -18,7 +18,7 @@ FIGURES; nothing catches wrong REASONING.
 
 The critic is deliberately outside that lineage:
 
-- its own instruction file (`critic-instructions.md`), written without reference
+- its own instruction file (`prompts/critic.md`), written without reference
   to the analyst's prompt, so it is not primed to accept the analyst's framing;
 - its own tools (FMP news/profile/metrics/quarterly + Tavily), so it can check the
   report's load-bearing claims against the world rather than against the same
@@ -60,7 +60,7 @@ logger = main.logger
 
 # The critic's own instruction set. Like the other instruction files it contains no
 # '{' or '}', so it is safe to embed in a state-templated ADK instruction.
-_critic_path = os.path.join(os.path.dirname(__file__), "critic-instructions.md")
+_critic_path = os.path.join(os.path.dirname(__file__), "prompts", "critic.md")
 with open(_critic_path, "r", encoding="utf-8") as f:
     critic_instructions = f.read()
 

@@ -1091,10 +1091,28 @@ def fmp_pending_ma_filings(ticker: str) -> str:
 # ==========================================
 # DATABASE INITIALIZATION & TOOLS
 # ==========================================
-def get_db_connection():
+# Schema bootstrap runs ONCE per process, on the first connection that actually
+# needs it — not at import. It used to run at module scope (see the note where
+# `initialize_database` is defined), which meant every importer paid for a remote
+# Postgres round trip plus ~350 lines of DDL before executing a single statement:
+# two minutes on a cold import, charged to every test file, every cron script and
+# every `--help`. Nothing is lost by deferring it, because the schema only has to
+# exist before the first read or write, and that is exactly where this now fires.
+_SCHEMA_READY = {"done": False}
+
+
+def get_db_connection(ensure_schema: bool = True):
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
         raise ValueError("DATABASE_URL not set")
+    # Flag is set BEFORE the call, not after: `initialize_database` opens its own
+    # connection, and without this it would recurse into itself forever. Setting it
+    # first also means a failed bootstrap is not retried on every subsequent
+    # connection — matching the old import-time behaviour, where a failure was
+    # logged once and the process carried on.
+    if ensure_schema and not _SCHEMA_READY["done"]:
+        _SCHEMA_READY["done"] = True
+        initialize_database()
     return psycopg2.connect(db_url)
 
 def initialize_database():
@@ -1102,9 +1120,12 @@ def initialize_database():
     authoritative schema): a pipeline_runs parent table referenced by
     agent_outputs and final_reports via FK, a `metadata` (not metadata_json)
     JSONB column, and a verdict CHECK constrained to BUY/SELL/HOLD.
-    Uses IF NOT EXISTS so it is a safe no-op when tables already exist."""
+    Uses IF NOT EXISTS so it is a safe no-op when tables already exist.
+
+    Called lazily by `get_db_connection` on the first connection of a process;
+    `ensure_schema=False` on its own connection breaks the recursion."""
     try:
-        conn = get_db_connection()
+        conn = get_db_connection(ensure_schema=False)
         cur = conn.cursor()
         cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
 
@@ -1445,8 +1466,10 @@ def initialize_database():
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
 
-# Note: In production you'd call this outside module load, but we do it here for simplicity
-initialize_database()
+# NOT called here. This module is imported by the CLI, every test file, both cron
+# jobs and the backfill scripts, and running the schema DDL at import charged all of
+# them a remote round trip they mostly did not need. `get_db_connection` now runs it
+# on first use instead; see the guard there.
 
 # Embedding calls are billed but were never counted anywhere in the cost estimate.
 # Four vectors are generated per ticker (BEAR_CASE, BULL_CASE, SALE_CASE, final

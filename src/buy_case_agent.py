@@ -76,9 +76,9 @@ _here = os.path.dirname(__file__)
 # embed in a state-templated ADK instruction. Adding a brace to either would be read
 # by ADK as a session-state key and would fail the run at template time — there is a
 # test covering this in test_buy_case.py.
-with open(os.path.join(_here, "buy-case-instructions.md"), "r", encoding="utf-8") as f:
+with open(os.path.join(_here, "prompts", "buy-case.md"), "r", encoding="utf-8") as f:
     buy_case_instructions = f.read()
-with open(os.path.join(_here, "buy-check-instructions.md"), "r", encoding="utf-8") as f:
+with open(os.path.join(_here, "prompts", "buy-check.md"), "r", encoding="utf-8") as f:
     buy_check_instructions = f.read()
 
 

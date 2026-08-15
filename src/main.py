@@ -139,22 +139,17 @@ _UNCONFIRMED_WARNED = set()
 # Web search (Tavily) pricing (USD per 1,000 requests) for per-run cost estimates.
 TAVILY_PRICE_PER_1K = float(config.get("search_pricing", {}).get("tavily_usd_per_1k", 16.00))
 
-# Load research instructions. research-instructions.md drives the BEAR (skeptical)
-# agent; bullish-research-instructions.md drives the BULL agent. Neither file
-# contains '{' so both are safe to embed in state-templated instructions.
-instructions_path = os.path.join(os.path.dirname(__file__), "research-instructions.md")
-with open(instructions_path, "r") as f:
-    research_instructions = f.read()
-
-bullish_path = os.path.join(os.path.dirname(__file__), "bullish-research-instructions.md")
-with open(bullish_path, "r") as f:
-    bullish_instructions = f.read()
-
-# sale-advisor-instructions.md drives the Phase C SALE ADVISOR agent. It uses '['/']'
-# placeholders (not '{}'), so it is safe to embed in a state-templated instruction.
-sale_advisor_path = os.path.join(os.path.dirname(__file__), "sale-advisor-instructions.md")
-with open(sale_advisor_path, "r") as f:
-    sale_advisor_instructions = f.read()
+# Agent instructions live in prompts/, one .md per agent, and are composed by
+# prompt_loader. They were Python string literals here until the analyst's ran to
+# ~185 lines assembled from four sources 200 lines apart, at which point "what is
+# the judge actually told?" had become a code-reading exercise rather than a
+# prose-reading one.
+#
+# The loader validates every {placeholder} against the session-state keys the
+# pipeline actually seeds, which replaces the comment that used to sit here
+# claiming the files contain no '{'. That claim was both stricter than ADK
+# requires and unenforceable; see prompt_loader's module docstring.
+from prompt_loader import load_mandate, load_prompt
 
 # --- 2. AGENT DEFINITIONS (Phase B) ---
 # Two kinds of steps:
@@ -164,8 +159,8 @@ with open(sale_advisor_path, "r") as f:
 #   2. Reasoning — FOUR roles run in order over one shared session, handing off
 #      via session state (PIPELINE_AGENTS; see _run_pipeline_async for why this
 #      is a list rather than a SequentialAgent):
-#         bear_agent  (research-instructions.md) -> state['bear_data']
-#         bull_agent  (bullish-research-instructions.md) -> state['bull_data']
+#         bear_agent  (prompts/bear.md) -> state['bear_data']
+#         bull_agent  (prompts/bull.md) -> state['bull_data']
 #                     (runs after bear so it can refute it)
 #         analyst_agent (neutral judge) reads {bear_data}/{bull_data} -> final_report
 # ticker, company_name, sec_data, metrics_data, screen_context are seeded before
@@ -176,21 +171,7 @@ APP_NAME = "skeptical_decomposer"
 # analyst so no role can build a case on annual data alone. Added after a review
 # found every agent arguing from FY2023-FY2025 trends while the two most recent
 # quarters were contracting -- the annual feed simply could not show it.
-RECENCY_MANDATE = (
-    "## Recency requirement (mandatory)\n"
-    "QUARTERLY_DATA below holds two tables: the last 8 quarters of figures (USD "
-    "millions, newest first), and the year-over-year percentage change of each "
-    "recent quarter against the SAME quarter one year earlier. METRICS_DATA is "
-    "ANNUAL and cannot show recent deterioration.\n"
-    "- You MUST examine the most recent quarter before writing any conclusion.\n"
-    "- You MUST state plainly whether the most recent quarter CONFIRMS or "
-    "CONTRADICTS the multi-year annual trend, and quote the specific year-over-year "
-    "percentage changes in revenue, operating income, and operating cash flow.\n"
-    "- A deteriorating recent quarter is present-tense evidence. Do not discount it "
-    "as noise, and do not let a healthier annual trend paper over it.\n"
-    "- If quarterly data is unavailable, say so explicitly and treat it as a gap in "
-    "the evidence -- never as confirmation that recent quarters were fine.\n\n"
-)
+RECENCY_MANDATE = load_mandate("recency")
 
 # Shared prompt fragment: figures the pipeline computed deterministically from the
 # filings. Agents may not contradict these. Added after a review found a bear case
@@ -214,35 +195,15 @@ RECENCY_MANDATE = (
 # So the data stays here, in the instruction, where implicit caching demonstrably
 # works. See specs/agent_architecture.md §5B.
 # Given to every reasoning agent.
-REFERENCE_DATA_BLOCKS = (
-    "<MAGIC_FORMULA_CONTEXT>\n{screen_context}\n</MAGIC_FORMULA_CONTEXT>\n\n"
-    "<VERIFIED_FIGURES>\n{verified_figures}\n</VERIFIED_FIGURES>\n\n"
-    "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
-)
+REFERENCE_DATA_BLOCKS = load_mandate("reference-data-blocks")
 
 # Given only to the two research advocates. The judge works from their arguments
 # plus the verified figures, and the sale advisor from the finished report — neither
 # needs the raw filing extract or the annual ratio dump, and sending it to them
 # would add ~10k tokens per turn for nothing.
-RESEARCH_SOURCE_BLOCKS = (
-    "<METRICS_DATA>\n{metrics_data}\n</METRICS_DATA>\n\n"
-    "<SEC_DATA>\n{sec_data}\n</SEC_DATA>\n"
-)
+RESEARCH_SOURCE_BLOCKS = load_mandate("research-source-blocks")
 
-VERIFIED_FIGURES_MANDATE = (
-    "## Verified figures (authoritative)\n"
-    "VERIFIED_FIGURES below were computed directly from the company's filings by "
-    "this pipeline, not by a language model. They override any conflicting number "
-    "you find in news, web search, or your own recollection.\n"
-    "- You MUST NOT state a total debt, cash, market capitalisation, enterprise "
-    "value, shares-outstanding, price-to-earnings, earnings-growth or PEG figure "
-    "that contradicts VERIFIED_FIGURES.\n"
-    "- If a source you cite disagrees with a verified figure, use the verified "
-    "figure and note the discrepancy rather than silently preferring the source.\n"
-    "- Do not confuse market capitalisation with total debt: they are different "
-    "line items and a plausible-looking coincidence between them is a sign you have "
-    "mixed them up.\n\n"
-)
+VERIFIED_FIGURES_MANDATE = load_mandate("verified-figures")
 
 
 # The machine-readable tail of the analyst's report, used only to populate the
@@ -261,36 +222,7 @@ VERIFIED_FIGURES_MANDATE = (
 # and "top-10 customer exposure" as three unrelated factors, and the base rates
 # the ledger exists to accumulate would never form. The list is injected from
 # specs/config.yaml at import so the vocabulary has exactly one home.
-VERDICT_BASIS_MANDATE = (
-    "## Verdict Basis (mandatory, machine-read — write it LAST)\n"
-    "After '## What Would Make This Wrong', append a final section headed exactly "
-    "'## Verdict Basis' containing ONE fenced ```json block and nothing else. It "
-    "records the factors that actually drove your verdict, so the system can later "
-    "check which factors it reads well and which it misreads.\n"
-    "Format — a JSON array of 3 to 7 objects:\n"
-    '```json\n'
-    '[{"factor_key": "customer_concentration", "stance": "BEAR", '
-    '"materiality": "HIGH", "observation": "Two sentences, plain English, '
-    'specific to this company and citing the figure that matters."}]\n'
-    '```\n'
-    "Rules:\n"
-    "- `factor_key` MUST come from the list below. If a factor genuinely driving "
-    "your verdict is not on the list, use `OTHER_<short_snake_case_name>` — do not "
-    "force it into an approximate match, and do not coin a new bare key.\n"
-    "- `stance` is BEAR (argues against buying) or BULL (argues for). "
-    "`materiality` is HIGH, MEDIUM or LOW — how much this factor moved YOUR "
-    "verdict, not how dramatic it sounds.\n"
-    "- Include the factors that DECIDED it, including ones that cut against where "
-    "you landed. A basis listing only factors agreeing with the verdict is a "
-    "record of a conclusion, not of reasoning.\n"
-    "- Do NOT list the screen's entry criteria (high return on capital, high "
-    "earnings yield, low PEG, EPS growth). Every candidate has those; they "
-    "distinguish nothing and would swamp the ledger with a constant.\n"
-    "- `observation` is exactly two sentences and must contain the specific "
-    "number, date or event — not a restatement of the factor's name.\n"
-    "Permitted factor_key values:\n"
-    + ", ".join(LEDGER_FACTOR_TAXONOMY) + "\n\n"
-)
+VERDICT_BASIS_MANDATE = load_mandate("verdict-basis")
 
 
 # The four roles share ONE session so that `output_key` handoffs work, which means
@@ -331,25 +263,7 @@ PIPELINE_INCLUDE_CONTENTS = "none"
 bear_agent = LlmAgent(
     name="bear_agent",
     model=AGENT_MODEL,
-    instruction=(
-        research_instructions
-        + "\n\n## How to run this research\n"
-        "You are building the BEAR case for {company_name} ({ticker}). Use your tools: "
-        "call fmp_stock_news for recent factual news, web_search_tool for bear-case "
-        "risks, short-seller theses, and competitive/regulatory threats, and "
-        "fmp_company_profile to CHECK WHAT A COMPANY ACTUALLY SELLS before naming it "
-        "as a competitor — a shared sector label is not competition. Answer the "
-        "questions above skeptically, using the gathered research plus the financial "
-        "data below. Do not invent facts; cite sources.\n\n"
-        + RECENCY_MANDATE
-        + "Open your '## 3. Key Numbers' section with a MOST RECENT QUARTER table "
-        "drawn from QUARTERLY_DATA (revenue, operating income, net income, operating "
-        "cash flow, capital expenditure, total debt -- each against the same quarter a "
-        "year earlier) BEFORE presenting the three-year annual summary.\n\n"
-        + VERIFIED_FIGURES_MANDATE
-        + REFERENCE_DATA_BLOCKS
-        + RESEARCH_SOURCE_BLOCKS
-    ),
+    instruction=load_prompt("bear.md"),
     tools=[fmp_stock_news, web_search_tool, fmp_company_profile],
     output_key="bear_data",
     include_contents=PIPELINE_INCLUDE_CONTENTS,
@@ -359,34 +273,7 @@ bear_agent = LlmAgent(
 bull_agent = LlmAgent(
     name="bull_agent",
     model=AGENT_MODEL,
-    instruction=(
-        bullish_instructions
-        + "\n\n## How to run this research\n"
-        "You are building the BULL case for {company_name} ({ticker}). The required "
-        "inputs — Earnings Yield, ROC, and the PEG growth test — are in "
-        "MAGIC_FORMULA_CONTEXT below, and the "
-        "Bear Case Research Output is in BEAR_CASE below. Use your tools: call "
-        "fmp_stock_news for positive catalysts, and web_search_tool for bull-thesis "
-        "evidence (moat/pricing power, growth catalysts, historical resilience). Answer "
-        "every bullish question above; for Section 4, directly refute the specific "
-        "points raised in BEAR_CASE. Do not invent facts; cite sources.\n\n"
-        + RECENCY_MANDATE
-        + "A refutation that ignores a deteriorating recent quarter is not a "
-        "refutation. Where the bear case cites recent-quarter weakness, either "
-        "explain concretely why it is temporary (naming the specific mechanism and "
-        "when it reverses) or concede it.\n\n"
-        + VERIFIED_FIGURES_MANDATE
-        + "If the BEAR_CASE states a figure that contradicts VERIFIED_FIGURES, correct "
-        "it explicitly in your Section 4 rather than arguing against the wrong number.\n\n"
-        "## Distinguish confirmed from speculative\n"
-        "When your case rests on a catalyst, label it: CONFIRMED (already reported, "
-        "contracted, or filed) or SPECULATIVE (rumoured transaction, press report of "
-        "talks, management target for a future year, analyst projection). State each "
-        "catalyst's label inline. A rumoured deal is optionality, not a plan.\n\n"
-        + REFERENCE_DATA_BLOCKS
-        + RESEARCH_SOURCE_BLOCKS
-        + "\n<BEAR_CASE>\n{bear_data}\n</BEAR_CASE>\n"
-    ),
+    instruction=load_prompt("bull.md"),
     tools=[fmp_stock_news, web_search_tool, fmp_company_profile],
     output_key="bull_data",
     include_contents=PIPELINE_INCLUDE_CONTENTS,
@@ -396,182 +283,7 @@ bull_agent = LlmAgent(
 analyst_agent = LlmAgent(
     name="analyst_agent",
     model=AGENT_MODEL,
-    instruction=(
-        "You are a NEUTRAL, balanced investment analyst — neither skeptical-by-default "
-        "nor promotional. You are given a fully-argued BEAR case and a fully-argued BULL "
-        "case for {company_name} ({ticker}), plus the Magic Formula value/quality "
-        "context. Weigh them fairly and write a Markdown report with EXACTLY these "
-        "sections:\n"
-        "## Recent Quarter Check\n"
-        "## Bull Case (summary)\n"
-        "## Bear Case (summary)\n"
-        "## Final Verdict\n"
-        "## What Would Make This Wrong\n\n"
-        "## Writing style\n"
-        "Your reader is a college-educated adult with NO accounting or finance "
-        "background — not a professional investor. Write every section in plain, "
-        "everyday English: explain what is happening and why it matters to an "
-        "ordinary investor's money, not just what the numbers say. When a "
-        "technical/financial term genuinely earns its place (e.g. 'gross margin', "
-        "'free cash flow', 'return on capital'), you may use it, but immediately "
-        "follow it with a short plain-English explanation in brackets, e.g. 'gross "
-        "margin (the share of each sales dollar left after making the product)'. "
-        "Keep the bracketed term for readers who want it, but never leave a reader "
-        "guessing what it means. Avoid jargon, acronyms, and hedge-speak where a "
-        "plain sentence would do.\n\n"
-        "## Recent Quarter Check (write this section FIRST)\n"
-        "Before weighing either case, read QUARTERLY_DATA and report what the most "
-        "recent quarter actually did versus the same quarter a year earlier: revenue, "
-        "operating income, net income, operating cash flow, capital expenditure. Quote "
-        "the year-over-year percentages. Then state in one sentence whether the recent "
-        "quarter CONFIRMS or CONTRADICTS the longer-term annual picture the two cases "
-        "argue over. If it contradicts, that finding carries into the verdict — you may "
-        "not reach the Final Verdict without addressing it.\n\n"
-        + VERIFIED_FIGURES_MANDATE
-        + "Where BEAR_CASE and BULL_CASE disagree on a figure covered by "
-        "VERIFIED_FIGURES, the verified figure wins and you should say so plainly.\n\n"
-        "## What every candidate already has (so it cannot be your argument)\n"
-        "EVERY company you are given has already cleared a screen requiring a high "
-        "return on capital, a high earnings yield, demonstrated multi-year growth in "
-        "earnings per share off a genuinely profitable base, and a PEG below the "
-        "ceiling. Strong returns, a low multiple relative to growth, and a healthy "
-        "recent quarter are therefore TRUE OF EVERY CANDIDATE. They are the entry "
-        "ticket, not the case.\n"
-        "- Citing them is not weighing anything. A verdict whose reasoning could be "
-        "copied onto any other screened company has not done the work.\n"
-        "- Your job is to find what distinguishes THIS company from the others that "
-        "also passed: where it sits WITHIN the screen's ranges (a PEG of 1.45 against "
-        "a 1.5 ceiling is a very different fact from 0.25), what the bear case has "
-        "found that a quantitative screen cannot see, and whether anything has changed "
-        "since the filings the screen was computed from.\n"
-        "- If the screen's own figures are the strongest thing you can say about a "
-        "company, that is a 'Watch', not a 'Buy'.\n\n"
-        "## How to weigh evidence\n"
-        "Apply the same standard to both cases:\n"
-        "- Realised results outrank projections. Something that has already happened "
-        "(a reported decline, a completed refinancing, a signed contract) carries more "
-        "weight than something expected to happen. **This is a rule about the quality "
-        "of evidence, NOT a licence to dismiss the future.** A risk that has not yet "
-        "reached the income statement is not thereby refuted — regulation, patent "
-        "expiry, technological substitution and funding cycles all show up in reported "
-        "results late, by which point the price has usually moved. If your reasoning "
-        "reduces to 'the risk is real but is not yet impairing results', you have "
-        "deferred the question rather than answered it: say what would have to be true "
-        "for the risk NOT to arrive, and whether you actually believe it.\n"
-        "- Label the bull case's catalysts CONFIRMED or SPECULATIVE. A rumoured "
-        "transaction, a press report of talks, a management target for a future year, "
-        "and an analyst price target are all SPECULATIVE.\n"
-        "- A 'Buy' may not rest on a SPECULATIVE catalyst. If removing every "
-        "speculative catalyst collapses the bull case, the verdict is at best 'Watch'. "
-        "Speculative catalysts are upside on top of a case that already stands up, "
-        "never the foundation of one.\n"
-        "- 'Priced in' is a claim, not an argument. If you conclude a risk is already "
-        "reflected in the valuation, say what specifically tells you that, or drop the "
-        "claim.\n"
-        "- Return on Capital from the Magic Formula screen excludes goodwill and "
-        "acquired intangibles. For a company built by acquisition this makes the "
-        "headline figure very large while saying nothing about the return earned on the "
-        "purchase price. Where VERIFIED_FIGURES reports a goodwill-inclusive ROIC "
-        "alongside it, cite BOTH, and do not describe the business as exceptionally "
-        "capital-efficient on the strength of the screen figure alone.\n"
-        "- This screen is Greenblatt's two ratios PLUS Peter Lynch's PEG test, and the "
-        "ranking uses all three. State the company's PEG ratio and earnings-per-share "
-        "growth rate (both in VERIFIED_FIGURES) in the body of the Final Verdict — "
-        "never as its opening sentence (see the structural requirement below) and "
-        "never as the reason for the verdict. What "
-        "matters is WHERE IN THE RANGE it sits: at or below 1.0, the price paid for "
-        "each dollar of profit is no higher than the rate that profit has been "
-        "growing; approaching the screen's ceiling, the company only just qualified, "
-        "which is a materially weaker starting point and must be said plainly rather "
-        "than dressed up in the same sentence you would use for a PEG of 0.3. If the "
-        "PEG could not be computed, say so and say why rather than passing over it.\n"
-        "- The PEG is backward-looking: it measures growth already delivered over the "
-        "last few fiscal years and assumes nothing about the future. Where the recent "
-        "quarter contradicts that multi-year growth, the QUARTER is the present-tense "
-        "evidence and the PEG is the stale one — say so plainly rather than letting a "
-        "low PEG vouch for a business that is currently shrinking.\n\n"
-        "## How to open the Final Verdict (structural requirement)\n"
-        "The FIRST SENTENCE of '## Final Verdict' must name **the single fact that "
-        "decided it** — the specific thing about THIS company that tipped the balance "
-        "one way or the other. Write that sentence before you write anything else in "
-        "the section.\n"
-        "- It must NOT be the screen's own figures: rank, return on capital, earnings "
-        "yield, PEG, or growth rate. Those are identical in kind for every candidate "
-        "you will ever be given, so opening with them frames the verdict as a "
-        "restatement of the screen rather than a judgement about the company.\n"
-        "- The figures still belong in the section — as SUPPORT for that opening "
-        "claim, in the body, not as the claim itself.\n"
-        "- Test it: if your first sentence could be moved to a different screened "
-        "company without alteration, it is the wrong first sentence.\n\n"
-        "## Verdict stance\n"
-        "Assume your reader is a middle-class, mid-career professional investing "
-        "their own hard-earned savings — not a millionaire, billionaire, or "
-        "institution that can shrug off a loss. Someone mid-career has years to ride "
-        "out volatility and can reasonably accept moderate, well-reasoned risk, so do "
-        "not treat every uncertainty as disqualifying. Equally, do not let an "
-        "attractive story or a good screen score pull an unproven case up to 'Buy'. "
-        "**The two failure directions are symmetric: a wrongly cautious 'Watch' costs "
-        "the reader an opportunity, a wrongly confident 'Buy' costs them money.** "
-        "Weigh them as equals.\n"
-        "All three verdicts are live options and each should be reached regularly. If "
-        "you find yourself returning 'Buy' for every company you see, you have stopped "
-        "discriminating — these candidates all passed the same screen, and the screen "
-        "has already been applied. In the Final "
-        "Verdict, explicitly weigh the bull case against the bear case, then state "
-        "exactly one verdict for an investor who does NOT currently own the stock:\n"
-        "- 'Verdict: Buy'   = passes the screen on its own merits; a reasonable "
-        "candidate to include in a DIVERSIFIED Magic Formula basket.\n"
-        "- 'Verdict: Watch' = not compelling enough to buy now; watchlist.\n"
-        "- 'Verdict: Avoid' = actively unattractive; do not buy.\n"
-        # Listed flush-left on purpose. When these three lines were indented two
-        # spaces for readability, the model copied the indentation into the report and
-        # the verdict line rendered as an indented block instead of a paragraph.
-        "Write the verdict line in exactly one of these three forms, including the "
-        "qualifier and with no leading spaces. These are alternatives of equal "
-        "standing — the first is not a default:\n"
-        "**Verdict: Buy** — screen pass; candidate for a diversified basket, not a "
-        "single-stock recommendation.\n"
-        "**Verdict: Watch** — passes the screen but the case is not compelling "
-        "enough to buy today; worth monitoring.\n"
-        "**Verdict: Avoid** — passes the screen, but the evidence argues against "
-        "buying it.\n"
-        "Follow the verdict with a one-paragraph justification, in the plain-language "
-        "style above, of how the two cases net out — naming the specific thing that "
-        "tipped it, not a restatement of the screen's figures. Do not choose 'Watch' "
-        "merely to avoid committing, and do not choose 'Buy' merely because the "
-        "company reached this stage. Do not invent facts beyond the two cases "
-        "provided.\n\n"
-        "## Basket framing (mandatory, applies to every verdict)\n"
-        "The Magic Formula is a BASKET strategy. Greenblatt's own method buys 20–30 "
-        "screened companies and holds them about a year; it works because the winners "
-        "outweigh the individual names that turn out to be value traps. A verdict here "
-        "is a judgement about ONE name and cannot be de-risked by diversification the "
-        "reader has not actually done. In the Final Verdict you MUST include one plain "
-        "sentence telling the reader that this is a single screened candidate rather "
-        "than a standalone recommendation, and that the strategy's historical results "
-        "depend on holding many such names, not one.\n\n"
-        "## What Would Make This Wrong (mandatory final section)\n"
-        "Regardless of the verdict, close with the single most likely way it turns out "
-        "to be wrong. Name ONE specific, observable development — not 'macro "
-        "conditions' or 'execution risk' — and say what a reader would see in a future "
-        "earnings report if it were happening. For a 'Buy', this is the thing most "
-        "likely to break the case; for 'Watch' or 'Avoid', the thing most likely to "
-        "prove you too cautious. Do not use the word 'Verdict' in this section.\n"
-        "**When you point the reader at a future quarter, check the seasonality first.** "
-        "QUARTERLY_DATA gives you eight quarters with their period-end dates, so you can "
-        "see how the company's year is actually shaped. Name the quarter AND its period "
-        "end, and if the business is seasonal, say whether that one quarter captures the "
-        "whole season or only part of it — if only part, name the quarters that together "
-        "do. A tax preparer whose fiscal Q3 ends 31 March has booked most of the filing "
-        "season but not its final fortnight, and an investor told to judge the year on "
-        "Q3 alone has been pointed at an incomplete picture. The same applies to any "
-        "retailer, or to any company whose quarters are visibly uneven in "
-        "QUARTERLY_DATA.\n\n"
-        + VERDICT_BASIS_MANDATE
-        + REFERENCE_DATA_BLOCKS
-        + "<BEAR_CASE>\n{bear_data}\n</BEAR_CASE>\n\n"
-        "<BULL_CASE>\n{bull_data}\n</BULL_CASE>\n"
-    ),
+    instruction=load_prompt("analyst.md"),
     tools=[],
     output_key="final_report",
     include_contents=PIPELINE_INCLUDE_CONTENTS,
@@ -585,49 +297,7 @@ analyst_agent = LlmAgent(
 sale_advisor_agent = LlmAgent(
     name="sale_advisor_agent",
     model=AGENT_MODEL,
-    instruction=(
-        sale_advisor_instructions
-        + "\n\n## How to run this analysis\n"
-        "You are the SALE ADVISOR for {company_name} ({ticker}). The neutral analyst's "
-        "FINAL_REPORT below contains the bull thesis, bear thesis, and a verdict. "
-        "IGNORE the verdict and ASSUME the investor already owns the stock. Use your "
-        "tools: call fmp_stock_news for recent factual developments and web_search_tool "
-        "for adverse business events and thesis-breaking signals. Then write a Markdown "
-        "report titled '## Sale Advisory' that names the THREE specific business events "
-        "(NOT price movements) that would signal the original investment case is broken "
-        "and justify selling. Where possible attach concrete, measurable thresholds "
-        "(e.g. gross margin dropping below X%, two consecutive quarters of negative user "
-        "growth, loss of a key distribution contract). Do not invent facts; cite "
-        "sources.\n\n"
-        + VERIFIED_FIGURES_MANDATE
-        + "Your sell triggers are only as good as the baseline they are measured from. "
-        "Every numeric threshold you set MUST be anchored to a figure in "
-        "VERIFIED_FIGURES or QUARTERLY_DATA, and you MUST state the current actual "
-        "value next to each threshold so the investor can see how much headroom is "
-        "left (e.g. 'total debt above $32B — currently $29.3B'). A threshold that the "
-        "current figures already satisfy, or that sits so far from them it could never "
-        "realistically fire, is worse than useless: check each one against the actual "
-        "value before you write it.\n\n"
-        "## Seasonality — check it before writing any quarter-based trigger\n"
-        "QUARTERLY_DATA gives you eight quarters with their period-end dates. Read the "
-        "shape of the year before you write a threshold that counts quarters.\n"
-        "- Many businesses are structurally uneven. A tax preparer earns almost "
-        "everything in the quarter ending 31 March and LOSES money in the two quarters "
-        "before it, every single year. A trigger reading 'two consecutive quarters of "
-        "negative net income' would fire annually on such a company, in its best years "
-        "as well as its worst, and would tell the investor to sell a healthy business.\n"
-        "- So compare like with like: a quarter against the SAME quarter one year "
-        "earlier, never against the quarter immediately before it, unless you have "
-        "checked that the company's quarters are genuinely comparable.\n"
-        "- **Test every trigger against the eight quarters you were given.** If it "
-        "would have fired at some point in that window while the business was "
-        "performing normally, it is broken — rewrite it. Say explicitly which quarter "
-        "you are measuring and what its period end is, so the investor knows when to "
-        "look.\n\n"
-        + "<VERIFIED_FIGURES>\n{verified_figures}\n</VERIFIED_FIGURES>\n\n"
-        "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
-        "<FINAL_REPORT>\n{final_report}\n</FINAL_REPORT>\n"
-    ),
+    instruction=load_prompt("sale-advisor.md"),
     tools=[fmp_stock_news, web_search_tool],
     output_key="sale_data",
     include_contents=PIPELINE_INCLUDE_CONTENTS,
@@ -653,37 +323,7 @@ PIPELINE_AGENTS = [bear_agent, bull_agent, analyst_agent, sale_advisor_agent]
 sell_check_agent = LlmAgent(
     name="sell_check_agent",
     model=AGENT_MODEL,
-    instruction=(
-        "You are a SELL-CONDITION EVALUATOR for {company_name} ({ticker}). A previous "
-        "analysis produced a set of SALE CONDITIONS — specific, measurable business "
-        "events that would break the investment thesis and justify selling. Your job is "
-        "to determine, using CURRENT data, whether each condition is now MET.\n\n"
-        "Use your tools: call fmp_stock_news for the latest developments (earnings, "
-        "guidance changes, impairments, contract losses, downgrades) and web_search_tool "
-        "for anything not in the news feed. The latest FMP fundamentals are in "
-        "CURRENT_METRICS below. Compare the current figures/events against each "
-        "condition's threshold.\n\n"
-        "CURRENT_METRICS is ANNUAL. Sale conditions are frequently written in "
-        "quarterly terms ('two consecutive quarters of...'), which annual data cannot "
-        "answer — use QUARTERLY_DATA below, which holds the last 8 quarters with "
-        "year-over-year comparisons, to evaluate any condition expressed in quarters. "
-        "Quote the specific quarter and figure as your evidence.\n\n"
-        "Write a Markdown report titled '## Sell-Condition Check'. For EACH sale "
-        "condition, output:\n"
-        "- **Condition** (restated briefly)\n"
-        "- **Status:** MET / NOT MET / UNCLEAR\n"
-        "- **Evidence:** the current figure or event vs. the threshold, with sources\n\n"
-        "Then write a '## Sell Recommendation' section that states:\n"
-        "- How many conditions are MET (e.g. '1 of 3 conditions met').\n"
-        "- Exactly one recommendation line: 'Recommendation: SELL' if ANY condition is "
-        "clearly MET (the original thesis is broken), otherwise 'Recommendation: HOLD'.\n"
-        "- A one-paragraph justification of how the met/unmet conditions net out. Do not "
-        "invent facts; if data is unavailable say UNCLEAR and do not treat it as met. "
-        "Cite sources.\n\n"
-        "<SALE_CONDITIONS>\n{sale_conditions}\n</SALE_CONDITIONS>\n\n"
-        "<QUARTERLY_DATA>\n{quarterly_data}\n</QUARTERLY_DATA>\n\n"
-        "<CURRENT_METRICS>\n{metrics_data}\n</CURRENT_METRICS>\n"
-    ),
+    instruction=load_prompt("sell-check.md"),
     tools=[fmp_stock_news, web_search_tool],
     output_key="sell_check",
 )
@@ -827,7 +467,7 @@ def _read_prompt_files(*names) -> str:
     return "".join(out)
 
 
-_DOWNSTREAM_PROMPTS = _read_prompt_files("buy-case-instructions.md")
+_DOWNSTREAM_PROMPTS = _read_prompt_files(os.path.join("prompts", "buy-case.md"))
 
 
 def _prompt_version() -> str:
@@ -839,7 +479,7 @@ def _prompt_version() -> str:
     for the same reason, since a reused report also reuses the buy case copied
     alongside it.
 
-    `buy-check-instructions.md` is deliberately NOT included: nothing that command
+    `prompts/buy-check.md` is deliberately NOT included: nothing that command
     produces is stored under a reuse key, so editing it invalidates nothing."""
     blob = "".join(a.instruction for a in PIPELINE_AGENTS)
     blob += RECENCY_MANDATE + VERIFIED_FIGURES_MANDATE + REFERENCE_DATA_BLOCKS

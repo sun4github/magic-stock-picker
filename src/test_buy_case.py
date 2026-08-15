@@ -129,7 +129,8 @@ def run():
               buy_case_agent.count_triggers(text) == expected)
 
     print("\n--- prompt files are safe to embed in an ADK instruction ---")
-    for name in ("buy-case-instructions.md", "buy-check-instructions.md"):
+    for name in (os.path.join("prompts", "buy-case.md"),
+                 os.path.join("prompts", "buy-check.md")):
         with open(os.path.join(os.path.dirname(__file__), name), encoding="utf-8") as fh:
             body = fh.read()
         check(f"{name} contains no '{{' or '}}'",
