@@ -29,7 +29,13 @@ from settings import (
     INTER_CALL_DELAY_SECONDS,
     MAX_AGENT_RETRIES,
 )
-from usage import _add_event_usage, _log_usage, _merge_usage, _new_usage
+from usage import (
+    _add_event_usage,
+    _check_metered,
+    _log_usage,
+    _merge_usage,
+    _new_usage,
+)
 
 logger = logging.getLogger("InvestmentAgentPipeline")
 
@@ -117,6 +123,7 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
                 # were billed. Known and accepted — the path has never fired.
                 logger.error(f"[{ticker}] {agent.name} failed: {e}")
                 raise
+        _check_metered(f"{ticker} {agent.name}", agent_usage)
         _log_usage(f"{ticker} {agent.name}", agent_usage)
         _merge_usage(usage, agent_usage)
         # Gentle throttle between agents, replacing the old per-ticker sleep.

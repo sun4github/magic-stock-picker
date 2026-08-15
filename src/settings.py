@@ -57,6 +57,13 @@ if LEDGER_ENABLED and not LEDGER_FACTOR_TAXONOMY:
 # mismatch between this pin and the billed model is caught by the cost accounting.
 AGENT_MODEL = config.get("agents", {}).get("model", "gemini-3.6-flash")
 
+# The critic may run on a different model from everything else — see the long note
+# in specs/config.yaml for why, and for what a replacement has to support. Empty
+# means "the same model as every other agent", which is the default: falling back to
+# AGENT_MODEL keeps a single pin until someone deliberately splits it.
+_critic_model = str(config.get("agents", {}).get("critic_model", "") or "").strip()
+CRITIC_MODEL = _critic_model or AGENT_MODEL
+
 # LLM pricing (USD per 1M tokens), keyed by the RESOLVED model version the API
 # reports — see the commentary in specs/config.yaml. Pricing the alias instead of
 # the resolved model is what caused per-run spend to be understated ~2.4x once

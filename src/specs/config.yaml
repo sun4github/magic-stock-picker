@@ -23,6 +23,35 @@ agents:
   # will flag it immediately if the billed model ever differs from this pin.
   model: "gemini-3.6-flash"
 
+  # The INDEPENDENT CRITIC (Phase D) may run on a different model, and there is a
+  # methodological reason to want that: a reviewer sharing its target's weights
+  # shares its blind spots. If Gemini misreads a disclosure a certain way, Gemini
+  # reviewing Gemini tends to misread it the same way, and the review adds less than
+  # its cost. A different lineage decorrelates the errors.
+  #
+  # Empty means "use `model` above" — the critic is on the same model as everything
+  # else until this is deliberately set. Set it to a LiteLLM-style identifier to
+  # point elsewhere, e.g. "ollama_chat/glm-5.2:cloud".
+  #
+  # Two things a replacement MUST have, both load-bearing rather than nice to have:
+  #   - TOOL CALLING. The critic researches; it calls fmp_stock_news and
+  #     web_search_tool, and refinement.seed_critique_usd is set higher than the
+  #     reviser's precisely because of those calls.
+  #   - A long context. It is sent the whole report under review plus the verified
+  #     figures, the quarterly data and the accumulated critic memory.
+  # A model that quietly drops tool calls will not error — it will return a clean
+  # review that researched nothing, which is worse than no review.
+  #
+  # This does NOT change `reviser_agent`, which stays on `model` above. The reviser
+  # is built from analyst_agent.instruction verbatim: it IS the analyst revising its
+  # own work, and it should be held to the rules by the model that wrote it.
+  #
+  # Watch the run log after switching. `_check_metered` reports ZERO model calls for
+  # any agent whose responses do not carry usage metadata in the Gemini shape — that
+  # is the silent failure to look for, because a model whose tokens never reach the
+  # accounting is a model the budget guard cannot see.
+  critic_model: "ollama_chat/glm-5.2:cloud"
+
   screener_agent:
     name: "Magic_Formula_Screener"
     top_n_candidates: 30
@@ -513,6 +542,28 @@ llm_pricing:
       input_usd_per_1m: 0.30
       output_usd_per_1m: 2.50
       cached_input_usd_per_1m: 0.075
+      confirmed: true
+    # Zero because it is billed by SUBSCRIPTION, not per token — an Ollama plan is a
+    # flat monthly fee, so the marginal cost of a critic turn really is $0 and the
+    # run total should say so.
+    #
+    # It has to be listed rather than left out. An absent model makes `_model_price`
+    # log "No price configured ... reported spend is too low" on every run, and a
+    # cost guard that cries wolf is one people stop reading. Listed-at-zero says
+    # "this was priced, deliberately, and the answer is nothing"; absent says "we do
+    # not know". Those are different claims and the log should not conflate them.
+    #
+    # What is NOT free is the knock-on: a noisy critic raises BLOCKING findings that
+    # trigger revision rounds, and the reviser runs on Gemini at full rate. Watch
+    # refinement rounds, not this line, to see what a critic swap really costs.
+    # Keyed by the name ADK reports on the event (`model_version`), which for a
+    # LiteLLM-routed model is the full "provider/model" string, not the bare
+    # model id. Verified against a live call rather than assumed: the bare
+    # "glm-5.2:cloud" silently failed to match and logged "No price configured".
+    "ollama_chat/glm-5.2:cloud":
+      input_usd_per_1m: 0.0
+      output_usd_per_1m: 0.0
+      cached_input_usd_per_1m: 0.0
       confirmed: true
   # Embeddings are billed per input token. Four vectors are generated per ticker
   # (bear, bull, sale, final report), previously uncounted.

@@ -27,6 +27,7 @@ from .runtime import (
     CONTEXT_CACHE_ENABLED,
     _build_runner,
     _is_rate_limit_error,
+    resolve_model,
 )
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "analyst_agent",
     "bear_agent",
     "bull_agent",
+    "resolve_model",
     "sale_advisor_agent",
     "sell_check_agent",
 ]

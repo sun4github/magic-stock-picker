@@ -259,6 +259,33 @@ def _total_cost(usage: dict) -> float:
     return _llm_cost(usage) + _search_cost(usage)
 
 
+def _check_metered(label: str, usage: dict) -> None:
+    """Complain if an agent that definitely ran reported no tokens at all.
+
+    `_add_event_usage` returns silently when an event carries no `usage_metadata`,
+    which is correct — most events (tool calls, state deltas) have none. The failure
+    it cannot distinguish is a model whose responses never carry usage metadata AT
+    ALL: every event is skipped, the accumulator stays at zero, and the run reports
+    itself as free. That is not hypothetical. `usage_metadata` is the Gemini event
+    shape, and a model reached through a different provider may not populate it.
+
+    So the check belongs here, one level up, where "this agent ran and produced
+    output" is known. An agent that completed a turn made at least one model call;
+    zero means the meter is broken, not that the work was free. Loud, because a
+    silent zero disables the budget guard — it can only stop a run whose cost it can
+    see — and because the cost accounting being wrong by 3.5x for a while, unnoticed,
+    is the reason these guards exist at all.
+    """
+    if usage.get("requests", 0) == 0:
+        logger.error(
+            f"[{label}] ran but reported ZERO model calls. Token usage is not "
+            f"reaching the accounting, so this agent's cost is invisible and the "
+            f"budget guard cannot see it. If this agent was recently pointed at a "
+            f"non-Gemini model, its responses are probably not carrying "
+            f"`usage_metadata` in the shape `_add_event_usage` reads."
+        )
+
+
 def _log_usage(label: str, usage: dict) -> float:
     """Log token/search usage and estimated cost. Returns combined USD cost."""
     llm = _llm_cost(usage)

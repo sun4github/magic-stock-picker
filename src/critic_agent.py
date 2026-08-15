@@ -53,10 +53,16 @@ from agents import (
     _build_runner,
     _is_rate_limit_error,
     analyst_agent,
+    resolve_model,
 )
 from run_log import logger
-from settings import AGENT_MODEL, BASE_BACKOFF_SECONDS, MAX_AGENT_RETRIES
-from usage import _add_event_usage, _new_usage
+from settings import (
+    AGENT_MODEL,
+    BASE_BACKOFF_SECONDS,
+    CRITIC_MODEL,
+    MAX_AGENT_RETRIES,
+)
+from usage import _add_event_usage, _check_metered, _new_usage
 from mcp_server import (
     fmp_stock_news,
     fmp_company_profile,
@@ -95,7 +101,14 @@ _CRITIC_CONTEXT_BLOCKS = (
 
 critic_agent = LlmAgent(
     name="critic_agent",
-    model=AGENT_MODEL,
+    # CRITIC_MODEL, not AGENT_MODEL. It defaults to AGENT_MODEL, so this is the same
+    # model as everything else until `agents.critic_model` is set in config.yaml —
+    # at which point the critic, and ONLY the critic, moves. A reviewer that shares
+    # its target's weights shares its blind spots; see the note in config.yaml.
+    #
+    # `reviser_agent` below deliberately stays on AGENT_MODEL: it is built from
+    # analyst_agent.instruction verbatim, so it IS the analyst revising its own work.
+    model=resolve_model(CRITIC_MODEL),
     instruction=(
         critic_instructions
         + "\n\n## This review\n"
@@ -431,6 +444,7 @@ def run_agent(agent, state: dict, message_text: str) -> tuple:
     for attempt in range(MAX_AGENT_RETRIES):
         try:
             state_out = asyncio.run(_run_agent_async(agent, state, message_text, usage))
+            _check_metered(agent.name, usage)
             return (state_out.get(agent.output_key, "") or ""), usage
         except Exception as e:
             if _is_rate_limit_error(e) and attempt < MAX_AGENT_RETRIES - 1:

@@ -46,6 +46,35 @@ CONTEXT_CACHE = ContextCacheConfig(
 CONTEXT_CACHE_ENABLED = bool(config.get("context_cache", {}).get("enabled", True))
 
 
+def resolve_model(name: str):
+    """Turn a configured model name into something `LlmAgent(model=...)` accepts.
+
+    ADK takes a bare string as a GEMINI model and resolves it against Google's API.
+    So `model="glm-5.2:cloud"` would not error at construction — it would fail later,
+    at the first call, against the wrong provider. Anything with a provider prefix is
+    therefore routed through LiteLLM instead, which is what ADK's `LiteLlm` wrapper
+    is for:
+
+        gemini-3.6-flash            -> Gemini, handled by ADK directly
+        ollama_chat/glm-5.2:cloud   -> LiteLLM -> Ollama
+        openai/gpt-oss:120b         -> LiteLLM -> any OpenAI-compatible endpoint
+
+    The `/` is the discriminator because that is LiteLLM's own convention for
+    `provider/model`, and no Gemini model id contains one.
+
+    Credentials and endpoints are LiteLLM's business, read from the environment
+    (`OLLAMA_API_BASE`, `OLLAMA_API_KEY`, ...) rather than from config.yaml — config
+    is committed and keys are not.
+
+    LiteLLM is imported lazily. It is a heavy import, and every process that touches
+    `agents` would otherwise pay for it whether or not anything is pointed at it.
+    """
+    if "/" not in name:
+        return name
+    from google.adk.models.lite_llm import LiteLlm
+    return LiteLlm(model=name)
+
+
 def _build_runner(agent, session_service) -> Runner:
     """Runner for one agent, with context caching attached via App.
 
