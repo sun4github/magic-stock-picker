@@ -30,7 +30,6 @@ from .verdict import (
     _extract_verdict,
     _git_sha,
     _split_verdict_basis,
-    _with_run_header,
 )
 
 __all__ = [
@@ -48,7 +47,6 @@ __all__ = [
     "_run_sell_check",
     "_run_sell_check_async",
     "_split_verdict_basis",
-    "_with_run_header",
     "analyze_ticker",
     "run_pipeline",
 ]

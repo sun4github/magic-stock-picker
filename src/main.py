@@ -198,7 +198,6 @@ from pipeline import (  # noqa: F401  (re-exported for `main._name` callers)
     _run_sell_check,
     _run_sell_check_async,
     _split_verdict_basis,
-    _with_run_header,
     analyze_ticker,
     run_pipeline,
 )
@@ -245,6 +244,7 @@ from report import (  # noqa: F401  (re-exported for `main._name` callers)
     _price_snapshot,
     _reconcile_agent_figures,
     _verified_figures,
+    _with_run_header,
     reconciliation_warning,
 )
 

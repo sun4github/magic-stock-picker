@@ -31,18 +31,6 @@ _SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # --- 3. PHASE B: PER-TICKER ANALYSIS (shared by full + on-demand runs) ---
-def _with_run_header(md: str, run_id: str, ticker: str) -> str:
-    """Stamp the run_id onto a stored report so it is visible (and copyable) at the
-    top of the web viewer. When recording a purchase, this run_id is what you save
-    against the lot so the sell-condition check can pin the exact thesis you bought
-    under (`--run RUN_ID`; see specs/agent_architecture.md §8.D). Rendered as a
-    blockquote at the very top; it does not disturb '## ...' section parsing."""
-    if not md:
-        return md
-    banner = f"> **Run ID:** `{run_id}`  \n> **Ticker:** {ticker}\n\n"
-    return banner + md
-
-
 def _extract_verdict(report_text: str) -> str:
     """Extract BUY/WATCH/AVOID from the report's '## Final Verdict' section.
 

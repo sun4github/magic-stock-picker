@@ -90,8 +90,8 @@ flowchart TD
     PIPE --> AGENTS
     PIPE --> USAGE
     PIPE --> REPORT
-    BCA --> PIPE
-    PIPE -. "deferred, inside the function" .-> BCA
+    PIPE -. "deferred: Phase E is skipped<br/>on any verdict but Watch" .-> BCA
+    BCA --> REPORT
     AGENTS --> MCP
     REPORT --> MCP
     USAGE --> PERS
@@ -103,17 +103,23 @@ flowchart TD
     PERS --> BASE
 ```
 
-Read the diagram for what is *absent*: **nothing points back up at `main.py`.** Until
-recently everything did — `refine`, `buy_case_agent`, `critic_agent` and the rest all
-did `import main` to reach the agents, the cost accounting and a configured logger.
-Since `main.py` is run as a script it loads under the name `__main__`, so those
-imports re-executed the whole file and attached a second set of log handlers; a
-`sys.modules` alias papered over it. Everything shared now lives in the lower boxes,
-so the alias is gone.
+Read the diagram for what is *absent*: **no arrow points back up.** There are no
+mutual imports anywhere in `src/` — you can walk this graph top to bottom and never
+return to where you started.
 
-The one dotted arrow is the honest exception: `pipeline` imports `buy_case_agent`
-*inside the function*, because `buy_case_agent` imports back from `pipeline`. That
-cycle is real; deferring it to call time is what keeps it from biting at import.
+That is recent. Until lately `refine`, `buy_case_agent`, `critic_agent` and the rest
+all did `import main` to reach the agents, the cost accounting and a configured
+logger. Since `main.py` is run as a script it loads under the name `__main__`, so
+those imports re-executed the whole file and attached a second set of log handlers;
+a `sys.modules` alias papered over it. Everything shared now lives in the lower
+boxes, so the alias is gone.
+
+The dotted arrow is not a cycle, just a deferred import. `pipeline` calls
+`buy_case_agent` inside the function because most runs never reach Phase E — a `Buy`
+or an `Avoid` verdict skips it — and there is no reason to make every importer of
+`pipeline` load it. It *was* a cycle until `_with_run_header`, the one thing
+`buy_case_agent` needed from `pipeline`, moved to `report/provenance.py`. Nothing
+about prepending a banner to a string belonged to the pipeline.
 
 Three layers are worth dwelling on.
 

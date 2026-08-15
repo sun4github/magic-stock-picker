@@ -51,11 +51,11 @@ from google.adk.agents import LlmAgent
 
 from agents import PIPELINE_INCLUDE_CONTENTS, VERIFIED_FIGURES_MANDATE
 from persistence import _check_db
-from pipeline import _with_run_header
 from report import (
     _format_reconciliation_section,
     _reconcile_agent_figures,
     reconciliation_warning,
+    _with_run_header,
 )
 from run_log import logger
 from settings import AGENT_MODEL

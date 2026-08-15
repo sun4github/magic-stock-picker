@@ -43,10 +43,10 @@ CLI flags.
 > CLI was unavoidable — and `run_log` now owns that, with its own guard against
 > configuring the logger twice.
 >
-> One deferred import remains and is still a real cycle: `pipeline/analysis.py`
-> imports `buy_case_agent` inside the function, because `buy_case_agent` imports
-> `_with_run_header` from `pipeline`. Everything below concerns the six modes of
-> `main.py` itself.
+> There are now no mutual imports anywhere in `src/`. `pipeline/analysis.py` still
+> imports `buy_case_agent` inside the function, but only to avoid loading it on the
+> runs that never reach Phase E — not to break a cycle. Everything below concerns
+> the six modes of `main.py` itself.
 
 ## 1. Startup (module load), `main.py:1-250`
 
@@ -117,7 +117,7 @@ This is the function every Phase B/C run eventually calls. Per ticker:
 `run_pipeline` (`pipeline/execution.py:131-149`) is the synchronous wrapper (`asyncio.run`)
 that `analyze_ticker` calls; it adds one gentle inter-ticker sleep afterward.
 
-## 4. Per-ticker orchestration, `pipeline/analysis.py:68-329` (`analyze_ticker`)
+## 4. Per-ticker orchestration, `pipeline/analysis.py:68-334` (`analyze_ticker`)
 
 The single function every execution mode funnels through for Phase B/C. In order:
 
@@ -141,7 +141,7 @@ The single function every execution mode funnels through for Phase B/C. In order
      `BEAR_CASE`/`BULL_CASE`/`SALE_CASE` (embedded).
    - Run the **reconciliation gate** (`_reconcile_agent_figures`, `report/reconciliation.py:225-306`)
      over bear/bull/final/sale text against the verified figures.
-   - Extract the verdict (`_extract_verdict`, `pipeline/verdict.py:46-59`) and prepend
+   - Extract the verdict (`_extract_verdict`, `pipeline/verdict.py:34-47`) and prepend
      the deterministic `## Magic Formula Metrics` section
      (`_format_magic_formula_section`) plus any reconciliation warnings.
    - `db_store_final_report`, `db_store_ticker_run`, and write

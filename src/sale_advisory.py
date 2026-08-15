@@ -52,12 +52,12 @@ import json
 import uuid
 
 from persistence import _check_db
-from pipeline import _with_run_header
 from report import (
     _format_verified_figures,
     _price_snapshot,
     _reconcile_agent_figures,
     reconciliation_warning,
+    _with_run_header,
 )
 from run_log import logger
 from settings import BUDGET_DAY_WINDOW_HOURS, BUDGET_ENABLED, BUDGET_PER_DAY_USD

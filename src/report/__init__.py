@@ -26,6 +26,7 @@ from .figures import (
     _verified_figures,
 )
 from .price import _format_price_section, _price_snapshot
+from .provenance import _with_run_header
 from .reconciliation import (
     _BACKWARD_GAP_MAX,
     _COMPARISON_ROW_MIN_AMOUNTS,
@@ -86,5 +87,6 @@ __all__ = [
     "_price_snapshot",
     "_reconcile_agent_figures",
     "_verified_figures",
+    "_with_run_header",
     "reconciliation_warning",
 ]

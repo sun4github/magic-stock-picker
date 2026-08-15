@@ -25,7 +25,7 @@ session-state keys (`output_key` on write, `{key_name}` templating on read).
 There is **no** SEC/metrics/search "agent" — that data is fetched by direct
 Python function calls (`fetch_sec_10k_data`, `fmp_metrics_extractor`,
 `fmp_quarterly_trends` in `mcp_server.py`) with zero LLM tokens spent, called
-directly from `analyze_ticker` (`pipeline/analysis.py:68-329`) before any agent runs.
+directly from `analyze_ticker` (`pipeline/analysis.py:68-334`) before any agent runs.
 
 ## Which tools each agent can call, and where those tools reach
 
@@ -137,7 +137,7 @@ sequenceDiagram
   `## Recent Quarter Check`, `## Bull Case (summary)`, `## Bear Case
   (summary)`, `## Final Verdict`, `## What Would Make This Wrong`.
 - `output_key="final_report"`. This string is what `_extract_verdict`
-  (`pipeline/verdict.py:46`) parses and what gets persisted via `db_store_final_report`.
+  (`pipeline/verdict.py:34`) parses and what gets persisted via `db_store_final_report`.
 - Verdict vocabulary: `Buy` / `Watch` / `Avoid`, always for a reader who does
   **not** currently own the stock.
 

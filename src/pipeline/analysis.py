@@ -42,6 +42,7 @@ from report import (
     _price_snapshot,
     _reconcile_agent_figures,
     _verified_figures,
+    _with_run_header,
     reconciliation_warning,
 )
 from settings import (
@@ -59,7 +60,6 @@ from .verdict import (
     _extract_verdict,
     _git_sha,
     _split_verdict_basis,
-    _with_run_header,
 )
 
 logger = logging.getLogger("InvestmentAgentPipeline")
@@ -298,11 +298,16 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     # Python decision taken after the graph has finished. The report is already
     # persisted at this point, so a failure here costs the buy case and nothing else.
     #
-    # The import is deferred on purpose. `buy_case_agent` imports `_with_run_header`
-    # from this package, so importing it at the top of this module would be a genuine
-    # circular import — pipeline -> buy_case_agent -> pipeline — resolved at a point
-    # where `pipeline` is still half-initialised. Deferring it to call time means the
-    # package is fully imported by the time buy_case_agent asks anything of it.
+    # Deferred, but no longer to break a cycle. `buy_case_agent` used to import
+    # `_with_run_header` from this package, which made pipeline -> buy_case_agent ->
+    # pipeline a real circular import that only worked because of this line; that
+    # function is a pure string stamp with no pipeline in it, so it moved to
+    # `report.provenance` and the cycle went with it. A module-level import here
+    # works now, and was checked.
+    #
+    # It stays deferred because `buy_case_agent` pulls in `critic_agent` behind it,
+    # and most runs never reach Phase E — a `Buy` or an `Avoid` verdict skips this
+    # entirely. No reason to make every importer of `pipeline` pay for it.
     import buy_case_agent
     if buy_case_agent.is_watch(verdict) and not skip_buy_case:
         buy_case_agent.write_buy_case(

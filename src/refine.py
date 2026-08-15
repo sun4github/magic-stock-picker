@@ -53,7 +53,7 @@ from datetime import datetime, timezone
 
 from agents import sale_advisor_agent
 from persistence import _check_db
-from pipeline import _extract_verdict, _with_run_header
+from pipeline import _extract_verdict
 from report import (
     _RECONCILIATION_HEADING,
     _format_magic_formula_section,
@@ -66,6 +66,7 @@ from report import (
     _price_snapshot,
     _reconcile_agent_figures,
     reconciliation_warning,
+    _with_run_header,
 )
 from run_log import logger
 from settings import BUDGET_DAY_WINDOW_HOURS, BUDGET_ENABLED, BUDGET_PER_DAY_USD, config
