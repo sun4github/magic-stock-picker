@@ -30,6 +30,7 @@ import json
 import contextlib
 
 import main
+import pipeline.reuse
 import refine
 import buy_case_agent
 
@@ -172,8 +173,12 @@ def run():
     # A buy-case prompt edit must invalidate reuse: a reused report carries the buy
     # case copied alongside it, so serving it would serve a document written under
     # the old instructions.
-    original = main._DOWNSTREAM_PROMPTS
-    with _patched(main, _DOWNSTREAM_PROMPTS=original + "\nAn extra instruction."):
+    # Patched on `pipeline.reuse`, where the value lives and where `_prompt_version`
+    # reads it. `main` no longer re-exports it precisely so that this cannot be
+    # written against a copy that the fingerprint never consults.
+    original = pipeline.reuse._DOWNSTREAM_PROMPTS
+    with _patched(pipeline.reuse,
+                  _DOWNSTREAM_PROMPTS=original + "\nAn extra instruction."):
         moved = main._analysis_key("FISV", dict(base)) != keys["full"]
     check("buy-case prompt edit -> different key", moved)
     check("key restored after the edit is reverted",
