@@ -124,243 +124,32 @@ from settings import (  # noqa: F401  (re-exported for `main.NAME` callers)
     top_n,
 )
 
-# Agent instructions live in prompts/, one .md per agent, and are composed by
-# prompt_loader. They were Python string literals here until the analyst's ran to
-# ~185 lines assembled from four sources 200 lines apart, at which point "what is
-# the judge actually told?" had become a code-reading exercise rather than a
-# prose-reading one.
-#
-# The loader validates every {placeholder} against the session-state keys the
-# pipeline actually seeds, which replaces the comment that used to sit here
-# claiming the files contain no '{'. That claim was both stricter than ADK
-# requires and unenforceable; see prompt_loader's module docstring.
-from prompt_loader import load_mandate, load_prompt
-
 # --- 2. AGENT DEFINITIONS (Phase B) ---
-# Two kinds of steps:
-#   1. Pure data relays (SEC 10-K, FMP metrics) — deterministic tool calls invoked
-#      DIRECTLY in analyze_ticker (100% fidelity, 0 tokens), seeded into session
-#      state as sec_data / metrics_data (shared by both advocates below).
-#   2. Reasoning — FOUR roles run in order over one shared session, handing off
-#      via session state (PIPELINE_AGENTS; see _run_pipeline_async for why this
-#      is a list rather than a SequentialAgent):
-#         bear_agent  (prompts/bear.md) -> state['bear_data']
-#         bull_agent  (prompts/bull.md) -> state['bull_data']
-#                     (runs after bear so it can refute it)
-#         analyst_agent (neutral judge) reads {bear_data}/{bull_data} -> final_report
-# ticker, company_name, sec_data, metrics_data, screen_context are seeded before
-# the graph runs; each agent templates the keys it references.
-APP_NAME = "skeptical_decomposer"
-
-# Shared prompt fragment: the same recency mandate is given to bear, bull, and
-# analyst so no role can build a case on annual data alone. Added after a review
-# found every agent arguing from FY2023-FY2025 trends while the two most recent
-# quarters were contracting -- the annual feed simply could not show it.
-RECENCY_MANDATE = load_mandate("recency")
-
-# Shared prompt fragment: figures the pipeline computed deterministically from the
-# filings. Agents may not contradict these. Added after a review found a bear case
-# asserting $36.9B of debt for a company carrying $29.3B -- the wrong figure then
-# propagated into the bull refutation, the final verdict, and a sell trigger that
-# was calibrated against a number that never existed.
-# Reference data blocks, templated into each agent's instruction.
-#
-# An attempt was made to move these out of the instruction and into the first
-# conversation message, so that ADK could build an explicit Gemini cache (a cache
-# cannot be created from a system instruction alone — the API returns "contents are
-# required", which is why ADK's every attempt failed silently). Measured on FISV,
-# that restructure made things WORSE: cached share fell 32% -> 6% and cost rose
-# $0.32 -> $0.43 per run.
-#
-# The reason is that the long, stable system instruction was precisely what Gemini's
-# IMPLICIT caching had been matching on. Moving the bulk into `contents` — which
-# grows and shifts as each agent appends to the session — destroyed the stable
-# prefix and bought nothing, because no explicit cache was created either.
-#
-# So the data stays here, in the instruction, where implicit caching demonstrably
-# works. See specs/agent_architecture.md §5B.
-# Given to every reasoning agent.
-REFERENCE_DATA_BLOCKS = load_mandate("reference-data-blocks")
-
-# Given only to the two research advocates. The judge works from their arguments
-# plus the verified figures, and the sale advisor from the finished report — neither
-# needs the raw filing extract or the annual ratio dump, and sending it to them
-# would add ~10k tokens per turn for nothing.
-RESEARCH_SOURCE_BLOCKS = load_mandate("research-source-blocks")
-
-VERIFIED_FIGURES_MANDATE = load_mandate("verified-figures")
-
-
-# The machine-readable tail of the analyst's report, used only to populate the
-# verdict ledger (see sql-schema.sql tables 6-9). It is PARSED AND STRIPPED by
-# `_split_verdict_basis` before the report is stored, so no reader ever sees it:
-# the report is written for someone with no finance background, and a JSON dump
-# at the end of it would be noise to every human who opens it.
-#
-# Asked for as a fenced block rather than as prose because it is the one part of
-# the output that a program consumes. Prose would need a parser that guesses,
-# and a guessing parser writing to a table meant to be a factual record of what
-# we claimed is the wrong trade.
-#
-# The factor list is a CONTROLLED VOCABULARY, and that is the whole point: free
-# text keys would record "customer concentration", "client concentration risk"
-# and "top-10 customer exposure" as three unrelated factors, and the base rates
-# the ledger exists to accumulate would never form. The list is injected from
-# specs/config.yaml at import so the vocabulary has exactly one home.
-VERDICT_BASIS_MANDATE = load_mandate("verdict-basis")
-
-
-# The four roles share ONE session so that `output_key` handoffs work, which means
-# the session's event log accumulates every earlier role's turns. Under ADK's default
-# `include_contents='default'` each agent is then sent the WHOLE prior transcript,
-# rewritten as user-role context ("For context: [bear_agent] said: ...", and one entry
-# per tool call carrying the full Tavily/FMP payload). That is pure waste here: no
-# agent reads the transcript. Every input they use is templated from session state --
-# {bear_data}, {bull_data}, {final_report}, {verified_figures}, {quarterly_data} --
-# so the replay only duplicated, in raw form, what the instruction already carried in
-# distilled form, and it landed hardest on the LAST agents (the sale advisor was
-# receiving bear + bull + analyst in full).
-#
-# 'none' sends the current turn only: the user message plus this agent's own tool
-# calls and responses, which is exactly what a tool loop needs to function.
-#
-# Measured on FISV, same verdict (WATCH) both times: 183,202 -> 129,617 input tokens,
-# LLM spend $0.3881 -> $0.2869 (-26%), run total $0.4201 -> $0.3349. The saving scales
-# with position in the pipeline, which is the signature of history replay:
-#   bear    37,303 -> 56,289  (unaffected -- it runs first, so there is no history to
-#                              replay; the rise is one extra tool round trip, and the
-#                              per-call prompt is flat at 18.6k -> 18.8k)
-#   bull    66,687 -> 50,986  (-24%)
-#   analyst 29,599 -> 11,355  (-62%)
-#   sale    49,613 -> 10,987  (-78%)
-# Caveat: live web search makes runs non-identical (2 vs 3 Tavily calls here), so
-# treat the per-agent figures as indicative and the direction as established.
-#
-# Note this does NOT silence the "Event from an unknown agent" warnings from
-# runners.py -- those come from `_find_agent_to_run` scanning the shared session's
-# event authors, which happens regardless of what ends up in `contents`. The warning
-# is benign: each per-agent Runner has no sub-agents, so the scan finds nothing it
-# recognises and correctly falls through to its own root agent.
-PIPELINE_INCLUDE_CONTENTS = "none"
-
-
-# --- Advocate 1: BEAR (skeptical research) ---
-bear_agent = LlmAgent(
-    name="bear_agent",
-    model=AGENT_MODEL,
-    instruction=load_prompt("bear.md"),
-    tools=[fmp_stock_news, web_search_tool, fmp_company_profile],
-    output_key="bear_data",
-    include_contents=PIPELINE_INCLUDE_CONTENTS,
+# The five agents, the prompt fragments they share, and the Runner that executes
+# them are in `agents/`. Re-exported here because `critic_agent`, `refine`,
+# `buy_case_agent` and three test modules read them as `main.NAME` — and because
+# `_prompt_version` below hashes PIPELINE_AGENTS' assembled instructions into every
+# report's reuse fingerprint, so this module remains where that fingerprint is
+# defined even though the text it hashes now lives next door.
+from agents import (  # noqa: F401  (re-exported for `main.NAME` callers)
+    APP_NAME,
+    CONTEXT_CACHE,
+    CONTEXT_CACHE_ENABLED,
+    PIPELINE_AGENTS,
+    PIPELINE_INCLUDE_CONTENTS,
+    RECENCY_MANDATE,
+    REFERENCE_DATA_BLOCKS,
+    RESEARCH_SOURCE_BLOCKS,
+    VERDICT_BASIS_MANDATE,
+    VERIFIED_FIGURES_MANDATE,
+    _build_runner,
+    _is_rate_limit_error,
+    analyst_agent,
+    bear_agent,
+    bull_agent,
+    sale_advisor_agent,
+    sell_check_agent,
 )
-
-# --- Advocate 2: BULL (runs after bear; §4 refutes the bear case) ---
-bull_agent = LlmAgent(
-    name="bull_agent",
-    model=AGENT_MODEL,
-    instruction=load_prompt("bull.md"),
-    tools=[fmp_stock_news, web_search_tool, fmp_company_profile],
-    output_key="bull_data",
-    include_contents=PIPELINE_INCLUDE_CONTENTS,
-)
-
-# --- Judge: NEUTRAL analyst (no skeptical prompt) weighs bull vs bear ---
-analyst_agent = LlmAgent(
-    name="analyst_agent",
-    model=AGENT_MODEL,
-    instruction=load_prompt("analyst.md"),
-    tools=[],
-    output_key="final_report",
-    include_contents=PIPELINE_INCLUDE_CONTENTS,
-)
-
-# --- Phase C: SALE ADVISOR (runs after the analyst; reads {final_report}) ---
-# Assumes the stock is ALREADY OWNED (ignores the verdict) and advises on the
-# specific, measurable business events that would break the original thesis and
-# justify selling. Uses fmp_stock_news + Tavily to ground the analysis in real
-# recent developments. Its output is persisted as SALE_CASE.
-sale_advisor_agent = LlmAgent(
-    name="sale_advisor_agent",
-    model=AGENT_MODEL,
-    instruction=load_prompt("sale-advisor.md"),
-    tools=[fmp_stock_news, web_search_tool],
-    output_key="sale_data",
-    include_contents=PIPELINE_INCLUDE_CONTENTS,
-)
-
-# The reasoning graph: bear -> bull -> neutral analyst (Phase B) -> sale advisor
-# (Phase C). SEC and metrics are gathered by direct tool calls in analyze_ticker,
-# not by agents. The sale advisor runs last so it can read the analyst's
-# {final_report} (bull + bear thesis + verdict) from session state.
-# Run in order, each against the SAME session so `output_key` handoffs work exactly
-# as they did inside SequentialAgent. Kept as a plain list rather than a
-# SequentialAgent so `_run_pipeline_async` can retry ONE failed role on a 429
-# instead of re-running (and re-paying for) every role before it.
-PIPELINE_AGENTS = [bear_agent, bull_agent, analyst_agent, sale_advisor_agent]
-
-# --- Phase C follow-up: SELL-CONDITION CHECK (standalone, on-demand) ---
-# A separate single-stock flow. It loads the ticker's most recent SALE_CASE (the
-# measurable sell triggers the sale advisor defined) and tests, against CURRENT
-# data, whether any/all of them are now met — advising Sell vs. Hold for someone
-# who already owns the stock. It is NOT part of the analysis graph; it is run on
-# demand for one ticker via `run_sell_check`. Reads {sale_conditions} (from the DB)
-# and {metrics_data} (a fresh direct FMP call), plus live news/web research.
-sell_check_agent = LlmAgent(
-    name="sell_check_agent",
-    model=AGENT_MODEL,
-    instruction=load_prompt("sell-check.md"),
-    tools=[fmp_stock_news, web_search_tool],
-    output_key="sell_check",
-)
-
-# --- 2b. AGENT EXECUTION HELPER ---
-
-# --- Context caching ----------------------------------------------------------
-# Gemini bills a repeated prompt prefix at $0.15/1M instead of $1.50/1M. Two ways to
-# get it: IMPLICIT (automatic prefix matching) and EXPLICIT (a pinned CachedContent).
-#
-# Explicit caching is DISABLED by default, on evidence. An explicit cache cannot be
-# built from a system instruction alone — the API rejects it with "contents are
-# required" — and all of our data lives in the agent instruction, so ADK's every
-# attempt failed silently on every turn.
-#
-# The obvious fix, moving the data block into the first conversation message so it
-# lands in `contents`, was implemented and measured on FISV. It was WORSE: cached
-# share fell 32% -> 6% and cost rose $0.32 -> $0.43 per run. The long, stable
-# system instruction turned out to be exactly what implicit caching had been
-# matching on; relocating it into `contents` (which grows as each agent appends to
-# the session) destroyed that stable prefix and bought no explicit cache either.
-#
-# So: leave the data in the instruction, let implicit caching do its job (~32% of
-# prompt tokens), and keep this switch here for when ADK or the API supports
-# caching a system instruction directly. See specs/agent_architecture.md §5B.
-#
-# ttl_seconds: cache storage bills per token-hour, so this covers one ticker only.
-# min_tokens: below this, storage costs more than it saves.
-# cache_intervals: invocations reusing one cache before it is refreshed.
-CONTEXT_CACHE = ContextCacheConfig(
-    ttl_seconds=int(config.get("context_cache", {}).get("ttl_seconds", 900)),
-    min_tokens=int(config.get("context_cache", {}).get("min_tokens", 4096)),
-    cache_intervals=int(config.get("context_cache", {}).get("cache_intervals", 10)),
-)
-CONTEXT_CACHE_ENABLED = bool(config.get("context_cache", {}).get("enabled", True))
-
-
-def _build_runner(agent, session_service) -> Runner:
-    """Runner for one agent, with context caching attached via App.
-
-    Caching is configured on the App rather than the Runner, so each agent gets an
-    App wrapper. Falls back to a plain Runner if caching is disabled in config, so
-    the feature can be switched off without touching code."""
-    if not CONTEXT_CACHE_ENABLED:
-        return Runner(app_name=APP_NAME, agent=agent, session_service=session_service)
-    app = App(name=APP_NAME, root_agent=agent, context_cache_config=CONTEXT_CACHE)
-    return Runner(app=app, session_service=session_service)
-
-
-def _is_rate_limit_error(err: Exception) -> bool:
-    text = str(err).upper()
-    return "429" in text or "RESOURCE_EXHAUSTED" in text or "RATE" in text and "LIMIT" in text
 
 
 # --- Token usage / cost accounting ---------------------------------------
