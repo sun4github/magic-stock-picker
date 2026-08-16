@@ -203,7 +203,7 @@ echo scheduled task. ^(Windows reserves logon/boot-triggered tasks for
 echo administrators; re-run this from an Administrator prompt if you need the
 echo server up BEFORE anyone logs in.^)
 echo.
-"%PYTHON%" "%REPO_ROOT%\tools\install_mcp_startup.py" --port %PORT% --python "%PYTHON%"
+"%PYTHON%" "%REPO_ROOT%\tools\mcp_service.py" install --port %PORT% --python "%PYTHON%"
 if errorlevel 1 (
     echo ERROR: could not install the Startup launcher.
     exit /b 1
@@ -232,7 +232,7 @@ echo.
 if "!ELEVATED!"=="1" (
     echo     schtasks /Run /TN "%TASK_NAME%"
 ) else (
-    echo     wscript.exe "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\MagicStockPicker-MCP.vbs"
+    echo     "%PYTHON%" tools\mcp_service.py start
 )
 echo.
 echo Then check it is listening ^(no token needed for this^):
@@ -286,9 +286,10 @@ if "!ELEVATED!"=="1" (
     echo   Remove it:    schtasks /Delete /TN "%TASK_NAME%" /F
     echo   Status:       schtasks /Query  /TN "%TASK_NAME%" /V /FO LIST
 ) else (
-    echo   Stop it:      powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort %PORT% -State Listen ^| ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }"
-    echo   Remove it:    "%PYTHON%" tools\install_mcp_startup.py --remove
-    echo   Status:       curl http://localhost:%PORT%/health
+    echo   Start it:     "%PYTHON%" tools\mcp_service.py start
+    echo   Stop it:      "%PYTHON%" tools\mcp_service.py stop
+    echo   Status:       "%PYTHON%" tools\mcp_service.py status
+    echo   Remove it:    "%PYTHON%" tools\mcp_service.py remove
     echo   Server log:   %REPO_ROOT%\logs\mcp_server.log
 )
 echo.
