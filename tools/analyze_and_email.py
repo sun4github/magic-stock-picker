@@ -33,8 +33,10 @@ tracker, the sweep alerts and this.
 """
 
 import argparse
+import base64
 import html
 import os
+import re
 import subprocess
 import sys
 import time
@@ -53,9 +55,11 @@ PLUNK_URL = "https://next-api.useplunk.com/v1/send"
 #: email: the verdict first, then the documents derived from it.
 KINDS = ("Final_Report", "Refined_Report", "Sale_Advisory", "Buy_Case")
 
-#: Total characters of report text to include. Comfortably more than three reports
-#: need; a guard against mailing something enormous rather than a real limit.
-MAX_BODY_CHARS = 400_000
+#: Plunk's limits: 10 attachments, 10MB total. A run produces at most four documents
+#: of a few tens of kilobytes, so these are guards against something unexpected
+#: rather than limits anyone will meet.
+MAX_ATTACHMENTS = 10
+MAX_ATTACHMENT_BYTES = 9_000_000
 
 
 def recipient() -> str:
@@ -99,47 +103,104 @@ def verdict_of(paths: list) -> str:
     return ""
 
 
-def build_body(ticker: str, paths: list, verdict: str) -> str:
-    """One HTML document holding every report, readable on a phone.
+def _price_line(paths: list) -> str:
+    """The share price and timestamp, lifted from the report's own price table.
 
-    Each report goes inside <pre>. Markdown tables, the price header every report
-    opens with, and the numeric alignment throughout only survive in a monospaced
-    block — converted to paragraphs they become unreadable, which for a document
-    whose whole point is figures is worse than sending nothing.
+    Every report opens with a one-row table whose first cell is the bolded price and
+    whose second is when it was taken. Parsed rather than recomputed so the summary
+    can never disagree with the document attached beside it.
     """
-    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    head = [
-        '<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif">',
-        f"<h2>{html.escape(ticker)}"
-        + (f" &mdash; {html.escape(verdict)}" if verdict else "")
-        + "</h2>",
-        f"<p style='color:#666'>Generated {stamp} by magic-stock-picker. "
-        f"{len(paths)} document{'s' if len(paths) != 1 else ''}.</p>",
-        "<p style='color:#666'>A report is a point-in-time document: the price it "
-        "opens with is what the stock cost when it was written, not now.</p>",
-    ]
-
-    budget = MAX_BODY_CHARS
     for path in paths:
+        if "_Final_Report" not in path.name and "_Refined_Report" not in path.name:
+            continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        if len(text) > budget:
-            text = text[:budget] + "\n\n[... truncated; read the full file on the host ...]"
-        budget -= len(text)
-        title = path.stem.replace("_", " ")
-        head.append(f"<hr><h3>{html.escape(title)}</h3>")
-        head.append(
-            "<pre style='white-space:pre-wrap;word-wrap:break-word;"
-            "font-family:ui-monospace,Consolas,monospace;font-size:13px;"
-            "line-height:1.45'>" + html.escape(text) + "</pre>"
-        )
-        if budget <= 0:
-            head.append("<p><em>Remaining reports omitted for length.</em></p>")
-            break
-    head.append("</div>")
-    return "".join(head)
+        match = re.search(r"^\|\s*\*\*(\$[\d,.]+)\*\*\s*\|\s*([^|]+?)\s*\|", text, re.M)
+        if match:
+            return f"{match.group(1)} as of {match.group(2)}"
+    return ""
 
 
-def send(subject: str, body_html: str) -> bool:
+def _gist(paths: list) -> str:
+    """The opening sentence of the analyst's verdict, as the one line of substance.
+
+    The point of the summary is to let someone reading on a phone decide whether to
+    open the attachment now or later, and the first paragraph under `## Final
+    Verdict` is where the analyst states the case in a sentence.
+    """
+    for path in paths:
+        if "_Final_Report" not in path.name and "_Refined_Report" not in path.name:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"^## Final Verdict\s*\n+(.+?)(?:\n\n|\Z)", text, re.M | re.S)
+        if not match:
+            continue
+        para = " ".join(match.group(1).split())
+        if len(para) > 300:
+            cut = para[:300].rsplit(". ", 1)[0]
+            para = (cut + ".") if len(cut) > 80 else para[:300].rstrip() + "…"
+        return para
+    return ""
+
+
+def build_summary(ticker: str, paths: list, verdict: str) -> str:
+    """A few lines of orientation. The reports themselves travel as attachments.
+
+    Deliberately short. Inlining the reports made a message thousands of lines long
+    that had to be scrolled past to find anything, and Markdown tables rendered in an
+    email body are worse than the same table in a file the reader opens deliberately.
+    """
+    lines = [
+        f"<b>{html.escape(ticker)}</b>"
+        + (f" &mdash; <b>{html.escape(verdict)}</b>" if verdict else ""),
+    ]
+    price = _price_line(paths)
+    if price:
+        lines.append(f"Priced at {html.escape(price)}, when the report was written.")
+    gist = _gist(paths)
+    if gist:
+        lines.append(html.escape(gist))
+    lines.append(
+        "Attached: " + html.escape(", ".join(p.stem.replace("_", " ") for p in paths)) + "."
+    )
+    lines.append(
+        "<span style='color:#777'>A stored report is point-in-time — check the current "
+        "price before acting on it.</span>"
+    )
+    body = "".join(f"<p style='margin:0 0 10px'>{line}</p>" for line in lines)
+    return (
+        "<div style=\"font-family:-apple-system,Segoe UI,Roboto,sans-serif;"
+        "font-size:15px;line-height:1.5\">" + body + "</div>"
+    )
+
+
+def build_attachments(paths: list) -> list:
+    """The reports, base64-encoded, as Plunk expects them.
+
+    Plunk allows 10 attachments and 10MB in total; a run produces at most four
+    documents of a few tens of kilobytes, so the cap is a guard against something
+    unexpected rather than a limit anyone will meet. Anything that would breach it is
+    dropped with a note rather than silently truncated, because a half a report is
+    worse than a clearly absent one.
+    """
+    out, total = [], 0
+    for path in paths[:MAX_ATTACHMENTS]:
+        raw = path.read_bytes()
+        encoded = base64.b64encode(raw).decode("ascii")
+        if total + len(encoded) > MAX_ATTACHMENT_BYTES:
+            print(f"  skipping {path.name}: would exceed the {MAX_ATTACHMENT_BYTES // 1_000_000}MB "
+                  f"attachment limit")
+            continue
+        total += len(encoded)
+        out.append({
+            "filename": path.name,
+            "content": encoded,
+            "contentType": "text/markdown",
+            "disposition": "attachment",
+        })
+    return out
+
+
+def send(subject: str, body_html: str, attachments: list = None) -> bool:
     key, sender, to = (
         os.getenv("PLUNK_EMAIL_KEY", ""),
         os.getenv("PLUNK_FROM_EMAIL", ""),
@@ -149,18 +210,30 @@ def send(subject: str, body_html: str) -> bool:
         print("PLUNK_EMAIL_KEY / PLUNK_FROM_EMAIL / ALERT_EMAIL_TO not all set; "
               "skipping the email. The reports are still on disk.")
         return False
+    payload = {"to": to, "subject": subject, "body": body_html, "from": sender,
+               "name": os.getenv("PLUNK_FROM_NAME", "Magic Stock Picker")}
+    if attachments:
+        payload["attachments"] = attachments
     try:
-        requests.post(
+        response = requests.post(
             PLUNK_URL,
-            json={"to": to, "subject": subject, "body": body_html, "from": sender,
-                  "name": os.getenv("PLUNK_FROM_NAME", "Magic Stock Picker")},
+            json=payload,
             headers={"Authorization": f"Bearer {key}"},
-            timeout=30,
-        ).raise_for_status()
-        print(f"Emailed to {to}: {subject}")
+            # Longer than the alert path's 10s: the request now carries the reports
+            # themselves, so it is an upload rather than a few hundred bytes.
+            timeout=60,
+        )
+        response.raise_for_status()
+        count = len(attachments or [])
+        print(f"Emailed to {to}: {subject} ({count} attachment{'s' if count != 1 else ''})")
         return True
     except requests.RequestException as exc:
-        print(f"Failed to send the email: {exc}")
+        # The response body usually names the offending field; without it a schema
+        # rejection looks identical to the server being down.
+        detail = ""
+        if getattr(exc, "response", None) is not None:
+            detail = f" — {exc.response.status_code}: {exc.response.text[:400]}"
+        print(f"Failed to send the email: {exc}{detail}")
         return False
 
 
@@ -173,9 +246,39 @@ def main() -> int:
     parser.add_argument("--skip-sale-advisor", action="store_true")
     parser.add_argument("--skip-buy-case", action="store_true")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument(
+        "--email-existing", action="store_true",
+        help="Skip the analysis and mail the ticker's STORED reports. Costs nothing "
+             "and takes seconds - the way to check delivery and formatting without "
+             "paying for a run, and also how to re-send a report you already have.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="With --email-existing: build the message and print it, send nothing.",
+    )
     args = parser.parse_args()
 
     ticker = args.ticker.upper()
+
+    if args.email_existing:
+        # newer_than=0 takes whatever is on disk, rather than only what a run just
+        # wrote — there is no run.
+        paths = find_reports(ticker, 0)
+        if not paths:
+            print(f"No stored reports for {ticker}.")
+            return 1
+        verdict = verdict_of(paths)
+        subject = f"[{ticker}]" + (f" {verdict}" if verdict else "") + " — stock analysis"
+        body, attachments = build_summary(ticker, paths, verdict), build_attachments(paths)
+        if args.dry_run:
+            print(f"To:      {recipient() or '(not configured)'}")
+            print(f"Subject: {subject}")
+            print(f"Body:    {len(body)} chars")
+            for a in attachments:
+                print(f"Attach:  {a['filename']} ({a['contentType']})")
+            print("\n--- dry run: nothing sent ---")
+            return 0
+        return 0 if send(subject, body, attachments) else 1
     argv = [sys.executable, "main.py", ticker]
     if args.company:
         argv.append(args.company)
@@ -212,7 +315,7 @@ def main() -> int:
     verdict = verdict_of(paths)
     subject = f"[{ticker}]" + (f" {verdict}" if verdict else "") + " — stock analysis"
     print(f"\nEmailing {len(paths)} report(s): {', '.join(p.name for p in paths)}")
-    send(subject, build_body(ticker, paths, verdict))
+    send(subject, build_summary(ticker, paths, verdict), build_attachments(paths))
     return 0
 
 

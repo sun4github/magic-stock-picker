@@ -114,8 +114,32 @@ is `Watch` — to the address configured on the host.
 
 This is the mode for the case the whole HTTP transport exists to serve: someone asks
 you about a ticker while you are nowhere near the machine, an agent runs the analysis
-over Telegram or similar, and a job id is not a useful answer. The reports arrive as
-one message, each in a monospaced block so the price header and the tables survive.
+over Telegram or similar, and a job id is not a useful answer.
+
+**The reports arrive as `.md` attachments.** The body is five lines — the verdict, the
+price the report was written at, the analyst's opening sentence, what is attached, and
+the reminder that a stored report is point-in-time:
+
+```
+CROX — Watch
+Priced at $63.26 as of 2026-08-03 12:34, when the report was written.
+Centene's business model makes its financial survival almost entirely dependent
+on state and federal healthcare policies that are currently shifting toward…
+Attached: CROX Final Report Watch, CROX Sale Advisory, CROX Buy Case.
+A stored report is point-in-time — check the current price before acting on it.
+```
+
+The price and the opening sentence are parsed out of the attached report rather than
+recomputed, so the summary cannot disagree with the document beside it.
+
+To check delivery and formatting without paying for a run — and to re-send a report
+you already have:
+
+```bash
+python tools/analyze_and_email.py CROX --email-existing
+```
+
+Add `--dry-run` to build the message and print what would be sent without sending it.
 
 Two design points worth knowing:
 
