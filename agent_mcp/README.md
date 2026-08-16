@@ -23,11 +23,24 @@ never drift apart.
 
 ```bash
 pip install -r agent_mcp/requirements.txt
-python -m agent_mcp.server
 ```
 
-That serves over stdio, which is what a local client wants. For Claude Desktop or
-Claude Code, register it:
+**For a client on another machine** (OpenClaw, or any remote agent) — run this in a
+terminal and leave it open. Ctrl+C stops it:
+
+```bash
+python -m agent_mcp.server --transport http --host 0.0.0.0 --port 8765
+```
+
+That is all the setup there is. The bearer token is read from `.env`; see
+[the token section](#msp_mcp_token-one-secret-two-copies) to create one, and
+[Configuring OpenClaw](#configuring-openclaw) for the client side. Starting it
+automatically is [possible but fiddly on Windows](#starting-it-automatically-optional-and-the-fiddly-part)
+— running it by hand is a perfectly good answer.
+
+**For a client on this machine** (Claude Desktop, Claude Code), you do not run
+anything: stdio means the client starts and stops the server itself. Just register
+it:
 
 ```json
 {
@@ -221,6 +234,71 @@ a server that crashes does not lose your $13 run.
 **Job state is on disk, not in memory.** So a restart loses nothing else, and
 `--stateless` is safe: pass it and a restart never strands a client holding a session
 id the server has forgotten.
+
+### Running it manually — start here
+
+**The simplest thing that works, and the one to reach for first.** Open a terminal,
+run one command, leave it open. No scheduled task, no Startup folder, no elevation —
+none of which is needed for a server you are happy to start yourself.
+
+```bash
+python -m agent_mcp.server --transport http --host 0.0.0.0 --port 8765
+```
+
+It runs in the foreground and logs to that window. **Ctrl+C stops it.** From the
+repository root, and nothing else to configure — the token is read from `.env`.
+
+You should see:
+
+```
+magic-stock-picker MCP server on http://0.0.0.0:8765/mcp
+Authentication: bearer token required
+Session mode: session-tracked
+Health check: http://0.0.0.0:8765/health
+```
+
+Check it from another terminal, or a browser:
+
+```bash
+curl http://localhost:8765/health
+```
+
+```
+{"status":"ok","server":"magic-stock-picker"}
+```
+
+Two things worth knowing about running it this way:
+
+- **Closing the terminal stops the server.** If you want it to survive that, add
+  `--stateless` and run it with `start /min` on Windows or `nohup … &` on Linux — or
+  see the auto-start options below.
+- **Stopping the server does not stop a run.** Jobs are detached, so a pipeline
+  started through a tool keeps going and finishes normally. What is lost is the
+  monitor watching it, so its job reads `ORPHANED` afterwards rather than
+  `SUCCEEDED` — the log tail tells you how it actually ended.
+
+Bind `127.0.0.1` instead of `0.0.0.0` if the client is on this same machine; the
+server then refuses connections from the network entirely and needs no firewall rule.
+
+### Starting it automatically (optional, and the fiddly part)
+
+Everything below is convenience. If manual start suits you, skip it — nothing here
+changes what the server does.
+
+Be warned that this is where the friction is on Windows: **an ordinary user may
+create a `WEEKLY` scheduled task but not an `ONLOGON` or `ONSTART` one.** Both are
+refused with a bare `ERROR: Access is denied` through `schtasks` and PowerShell's
+`Register-ScheduledTask` alike. That is precisely why
+`tools\setup_weekly_jobs.cmd` installs the buy-check sweep without elevation and a
+long-running server cannot be installed the same way.
+
+So there are two routes, and `tools\setup_mcp_server.cmd` picks whichever it can:
+
+| | Elevated prompt | Ordinary prompt |
+| :--- | :--- | :--- |
+| Installs | a boot-start scheduled task | a Startup-folder launcher |
+| Starts | before anyone logs in | when you log in |
+| Manage with | `schtasks` | `python tools/mcp_service.py …` |
 
 ### As a Windows service — the scripted way
 
