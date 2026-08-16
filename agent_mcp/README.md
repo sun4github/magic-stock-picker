@@ -355,11 +355,23 @@ schtasks /End    /TN "MagicStockPicker-MCP"     REM stop
 schtasks /Delete /TN "MagicStockPicker-MCP" /F  REM remove
 ```
 
-If the client is on another machine, open the port once:
+If the client is on another machine, open the port once, from an **Administrator**
+prompt (`netsh advfirewall` needs elevation):
 
 ```bat
-netsh advfirewall firewall add rule name="MagicStockPicker MCP" dir=in action=allow protocol=TCP localport=8765
+netsh advfirewall firewall add rule name="MagicStockPicker MCP" dir=in action=allow protocol=TCP localport=8765 profile=private remoteip=localsubnet
 ```
+
+`profile=private remoteip=localsubnet` is doing real work and is worth keeping. Without
+it the rule applies to every profile, so the port stays open on any network the machine
+later joins — a hotel or coffee-shop Wi-Fi included — with the bearer token as the only
+thing in front of a server that spends money. Scoped this way it is reachable from your
+own LAN and nowhere else. Remove it with `netsh advfirewall firewall delete rule
+name="MagicStockPicker MCP"`.
+
+**A LAN rule only helps if the client is on the LAN.** If OpenClaw runs in the cloud
+rather than on your network, it cannot reach a `192.168.x.x` address at all and no
+firewall rule changes that — see below.
 
 For real crash supervision — restart on exit, backoff, log rotation — NSSM
 (`nssm install MagicStockPickerMCP`) is better than Task Scheduler, which launches
@@ -507,6 +519,24 @@ and a raw HTTP call, still reaches everything. It is a usability guardrail on to
 the server's own gates, not a replacement for them — the server-side protections
 (`confirm=True`, the billed-job lock, the budget ceilings, `--no-budget` being
 unexposed) are what actually hold.
+
+### If the client is not on your LAN
+
+The firewall rule above assumes OpenClaw is on the same network. If it runs anywhere
+else — a cloud host, a phone on mobile data — it cannot reach a private address at
+all, and the rule is beside the point. Three ways to close that gap, in the order
+worth trying:
+
+| | What it is | Trade-off |
+| :--- | :--- | :--- |
+| **Tailscale / WireGuard** | A private network both machines join | Best fit. No port exposed to the internet, no certificate to manage, and the server keeps binding a private address |
+| **Cloudflare Tunnel / ngrok** | An outbound tunnel that publishes an HTTPS URL | Easy, gives you TLS, but the endpoint is genuinely on the internet with only the bearer token in front of it |
+| **Port forwarding on the router** | Expose 8765 directly | Not recommended. Plain HTTP, so the token crosses the internet in clear text, and the port is scanned within hours |
+
+Note the second and third put a money-spending server on the public internet. If you
+go that way, use a long token, keep the `toolFilter` exclusions, and prefer the tunnel
+over the forward — a tunnel at least gives you TLS, so the token is not readable in
+transit.
 
 ### If you run more than one client
 
