@@ -322,6 +322,41 @@ def test_discovery() -> None:
     check("the costs topic matches the catalogue", not mismatched, f"{mismatched}")
 
 
+def test_email_report_option() -> None:
+    print("\nEmailed reports")
+    plain = server.start_ticker_analysis(ticker="CROX")
+    mailed = server.start_ticker_analysis(ticker="CROX", email_report=True)
+
+    check("without email_report it runs main.py directly",
+          "main.py" in plain["command"] and "analyze_and_email" not in plain["command"],
+          plain["command"])
+    check("with email_report it runs the emailing wrapper",
+          "tools/analyze_and_email.py" in mailed["command"], mailed["command"])
+    check("the wrapper still receives the ticker", " CROX" in mailed["command"],
+          mailed["command"])
+
+    flagged = server.start_ticker_analysis(ticker="CROX", email_report=True,
+                                           skip_buy_case=True, force=True)
+    check("flags are passed through to the wrapper",
+          "--skip-buy-case" in flagged["command"] and "--force" in flagged["command"],
+          flagged["command"])
+
+    # The recipient is fixed on the host. A network-reachable tool that accepted a
+    # destination would let anyone holding the bearer token send mail from the
+    # user's domain to anywhere.
+    import inspect
+
+    params = inspect.signature(server.start_ticker_analysis).parameters
+    offenders = [p for p in params if p in ("to", "email", "recipient", "email_to")]
+    check("no recipient can be passed in", not offenders, f"{offenders}")
+
+    check("emailing is still gated by confirm", mailed.get("status") == "preview",
+          f"{mailed.get('status')}")
+
+    wrapper = PROJECT_ROOT / "tools" / "analyze_and_email.py"
+    check("the wrapper the tool names actually exists", wrapper.exists(), str(wrapper))
+
+
 def test_no_budget_flag_is_unreachable() -> None:
     print("\nWithheld flags")
     # --no-budget removes the pipeline's spend ceiling. It exists on the CLI for a
@@ -380,6 +415,7 @@ def main() -> int:
     test_library()
     test_report_windowing()
     test_discovery()
+    test_email_report_option()
     test_no_budget_flag_is_unreachable()
 
     print("\n" + "=" * 70)

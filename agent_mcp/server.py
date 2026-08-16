@@ -543,6 +543,7 @@ def start_ticker_analysis(
     skip_sale_advisor: bool = False,
     skip_buy_case: bool = False,
     force: bool = False,
+    email_report: bool = False,
     confirm: bool = False,
     requested_by: str = "",
 ) -> dict:
@@ -558,7 +559,14 @@ def start_ticker_analysis(
         company: Optional explicit company name, when the symbol is ambiguous.
         skip_sale_advisor: Drop Phase C.
         skip_buy_case: Drop Phase E.
-        force: Re-analyse even if a recent report exists.
+        force: Re-analyse even if a recent report exists. Note that a report reused
+            from inside the 24h window is not rewritten, so with email_report there
+            would be nothing new to send - use force=True to regenerate and mail it.
+        email_report: Email every report this run produces - the final report, the
+            sale advisory, and the buy case if the verdict is Watch - to the address
+            configured on the host. Useful when you are away from the machine and
+            want the answer somewhere readable rather than a job id. The recipient
+            is fixed in the host's configuration and cannot be set from here.
         confirm: Required. Without it you get a costed preview and nothing runs.
         requested_by: Optional label for whoever asked.
     """
@@ -567,7 +575,17 @@ def start_ticker_analysis(
     except ValueError as exc:
         return {"status": "error", "error": str(exc)}
 
-    argv = ["main.py", symbol]
+    if email_report:
+        # A wrapper that runs the same command and then mails what it produced.
+        # The emailing belongs to the JOB, not to this server: runs are detached and
+        # take minutes, and if the send happened here it would silently not happen
+        # whenever the server was restarted mid-run. Runs from the repo root.
+        argv = ["tools/analyze_and_email.py", symbol]
+        cwd = PROJECT_ROOT
+    else:
+        argv = ["main.py", symbol]
+        cwd = SRC_DIR
+
     if company:
         argv.append(company)
     if skip_sale_advisor:
@@ -578,7 +596,12 @@ def start_ticker_analysis(
         argv.append("--force")
 
     return _launch(
-        "ticker", argv, confirm=confirm, requested_by=requested_by, label=f"Analyse {symbol}"
+        "ticker",
+        argv,
+        confirm=confirm,
+        requested_by=requested_by,
+        cwd=cwd,
+        label=f"Analyse {symbol}" + (" (emailed)" if email_report else ""),
     )
 
 

@@ -106,6 +106,32 @@ never quote a cost or a precondition that differs from the one actually enforced
 
 **Jobs** — `job_status`, `job_log`, `job_list`, `job_cancel`.
 
+### Getting the answer by email
+
+`start_ticker_analysis(ticker, email_report=True, confirm=True)` mails everything the
+run produced — the final report, the sale advisory, and the buy case if the verdict
+is `Watch` — to the address configured on the host.
+
+This is the mode for the case the whole HTTP transport exists to serve: someone asks
+you about a ticker while you are nowhere near the machine, an agent runs the analysis
+over Telegram or similar, and a job id is not a useful answer. The reports arrive as
+one message, each in a monospaced block so the price header and the tables survive.
+
+Two design points worth knowing:
+
+- **The recipient is fixed in the host's `.env`** (`ALERT_EMAIL_TO`, or
+  `REPORT_EMAIL_TO` to override) and there is no `to` parameter. A free-text
+  destination on a tool reachable over the network would make anyone holding the
+  bearer token able to send mail from your domain to anywhere.
+- **The email is the last step of the job, not of the server.** Runs are detached and
+  take minutes; if the server sent the mail, restarting it mid-run would silently
+  lose the email. `tools/analyze_and_email.py` runs the same CLI command and then
+  sends, so the run either completes and mails or does neither.
+
+One wrinkle: a report reused from inside the 24-hour reuse window is not rewritten,
+so there is nothing new to mail and the job says so. Pass `force=True` to regenerate
+and send it.
+
 **Read-only** — `list_reports`, `read_report`, `get_rankings`, `get_screen_config`.
 Immediate, free, no subprocess. These matter more than they look: a client reaching
 this server over the network shares no filesystem with it, and without them could

@@ -148,7 +148,9 @@ OPERATIONS = (
         ),
         caveat=(
             "The ticker does not have to have cleared the screen - this is the escape "
-            "hatch for analysing a name the gates rejected."
+            "hatch for analysing a name the gates rejected. Set email_report=True to "
+            "have the finished reports mailed to the address configured on the host, "
+            "which is the useful mode when the person asking is not at the machine."
         ),
     ),
     # ---------------------------------------------------------------- Phase D
