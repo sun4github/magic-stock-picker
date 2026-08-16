@@ -51,6 +51,24 @@ logger = logging.getLogger("agent_mcp")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = PROJECT_ROOT / "src"
 
+# Read the repo's .env, so MSP_MCP_TOKEN can live beside FMP_API_KEY and the rest
+# rather than being the one secret that has to be a machine environment variable.
+# That matters most under a service manager: a Windows scheduled task or a systemd
+# unit starts with an environment nobody has curated, and a token set with `setx` in
+# some past console is exactly the kind of thing that is present when you test by
+# hand and absent at boot.
+#
+# The path is explicit rather than discovered, because dotenv searches upward from
+# the CURRENT directory and a service can be started from anywhere. A real
+# environment variable still wins - load_dotenv does not override - so `systemd`'s
+# Environment= or an explicit export stays authoritative.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(PROJECT_ROOT / ".env")
+except ImportError:  # pragma: no cover - dotenv is optional for a bare stdio run
+    pass
+
 INSTRUCTIONS = """\
 Operator interface for magic-stock-picker: a multi-agent stock research pipeline
 combining Greenblatt's Magic Formula, Lynch's PEG ratio, and an LLM chain that argues

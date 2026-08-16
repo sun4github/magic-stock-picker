@@ -12,3 +12,4 @@
 # Install with:  pip install -r agent_mcp/requirements.txt
 mcp>=1.2
 pyyaml
+python-dotenv

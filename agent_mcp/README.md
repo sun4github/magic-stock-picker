@@ -124,7 +124,6 @@ absurd.
 ## Over the network
 
 ```bash
-export MSP_MCP_TOKEN="$(python -c 'import secrets;print(secrets.token_urlsafe(32))')"
 python -m agent_mcp.server --transport http --host 0.0.0.0 --port 8765
 ```
 
@@ -137,13 +136,49 @@ configuration this server will adopt. If you'd rather not manage a token, bind
 
 The bearer check is deliberately the smallest thing that is actually correct: a
 constant-time compare against a shared secret. For anything multi-tenant, put a real
-proxy in front and keep this as the backstop. Note also that the token is the only
-thing between a caller and a $13 run — treat it like a credential, and prefer
-`MSP_MCP_TOKEN` over `--token`, which is visible to anyone who can list processes.
+proxy in front and keep this as the backstop.
 
 Set `requested_by` on `start_*` calls when several agents share one server; it is
 recorded on the job and shown in `job_list`, which is how you answer "who started
 this?".
+
+### `MSP_MCP_TOKEN`: one secret, two copies
+
+This is the part worth being precise about, because the token lives in **two places
+and both are required**. It is not issued by any service — you invent a random
+string, and both ends have to hold the same one:
+
+| Copy | Lives in | What it does |
+| :--- | :--- | :--- |
+| **Server's** | `.env` in the repo root (or a real environment variable) | the value the server **compares against**. Never leaves the machine |
+| **Client's** | `openclaw.json` → `headers.Authorization` | the value the client **sends over the wire**, on every request |
+
+The client puts it in an HTTP header; the server checks that header against its own
+copy with a constant-time compare and returns 401 on any mismatch. Same idea as an
+API key: the presenter needs it to present, the verifier needs it to verify.
+
+**Generate one:**
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+**Server side** — put it in `.env` alongside `FMP_API_KEY` and the rest. The server
+reads that file explicitly at startup, so it works under a service manager, where the
+environment is whatever the scheduler happened to hand the process:
+
+```env
+MSP_MCP_TOKEN=paste-the-generated-string-here
+```
+
+`.env` is already gitignored, so the token is not committed. A real environment
+variable still wins over the file, which is what lets a systemd `Environment=` or a
+container secret override it without editing anything.
+
+Prefer either over `--token`, which is visible to anyone who can list processes.
+
+**Rotating it:** change both copies and restart the server. Changing only one gives
+every call a 401 — which, if you ever see one, is almost always what has happened.
 
 ### Environment
 
@@ -187,21 +222,44 @@ a server that crashes does not lose your $13 run.
 `--stateless` is safe: pass it and a restart never strands a client holding a session
 id the server has forgotten.
 
-### As a Windows service (Task Scheduler)
-
-The house pattern here — same as `tools/setup_weekly_jobs.cmd`. Run at startup, no
-login required:
+### As a Windows service — the scripted way
 
 ```bat
-schtasks /Create /TN "MagicStockPicker MCP" /SC ONSTART /RU SYSTEM /RL HIGHEST ^
-  /TR "cmd /c cd /d E:\repos\magic-stock-picker && python -m agent_mcp.server --transport http --host 0.0.0.0 --stateless" ^
-  /F
+tools\setup_mcp_server.cmd
 ```
 
-Set `MSP_MCP_TOKEN` as a **machine-level** environment variable first
-(`setx MSP_MCP_TOKEN "..." /M`), or the task will refuse to bind a non-loopback
-address. For automatic restart on crash, NSSM (`nssm install MagicStockPickerMCP`) is
-better than Task Scheduler — it supervises rather than merely launching.
+Run it once, from anywhere. Same conventions as `tools/setup_weekly_jobs.cmd`: it
+derives the repo root from its own location, finds an interpreter (rejecting the
+Microsoft Store stub), smoke-tests that the dependencies import, and only then
+registers anything.
+
+It also handles the token: if `.env` has no `MSP_MCP_TOKEN` it generates one and
+appends it, and if there already is one it leaves it alone — so re-running never
+invalidates a client that is already configured. At the end it prints the OpenClaw
+config with the token filled in and this machine's IPv4 addresses to choose from.
+
+Pass a port as the first argument if 8765 is taken: `tools\setup_mcp_server.cmd 9000`.
+
+The registered task starts at boot, runs as you (so it reads the same `.env`), has
+its execution time limit removed — the default would kill a long-running server after
+three days — and restarts up to three times if it stops.
+
+```bat
+schtasks /Run    /TN "MagicStockPicker-MCP"     REM start it now
+schtasks /Query  /TN "MagicStockPicker-MCP" /V /FO LIST
+schtasks /End    /TN "MagicStockPicker-MCP"     REM stop
+schtasks /Delete /TN "MagicStockPicker-MCP" /F  REM remove
+```
+
+If the client is on another machine, open the port once:
+
+```bat
+netsh advfirewall firewall add rule name="MagicStockPicker MCP" dir=in action=allow protocol=TCP localport=8765
+```
+
+For real crash supervision — restart on exit, backoff, log rotation — NSSM
+(`nssm install MagicStockPickerMCP`) is better than Task Scheduler, which launches
+rather than supervises.
 
 ### As a Linux service (systemd)
 
@@ -246,7 +304,9 @@ It deliberately reveals nothing about jobs; that is `job_list`, behind the token
 
 OpenClaw keeps MCP servers in `~/.openclaw/openclaw.json` under `mcp.servers`.
 
-**Remote (the normal case)** — the server is running on the box with the pipeline:
+**Remote (the normal case)** — the server is running on the box with the pipeline.
+The `Authorization` value is the client's copy of the token: the same string that is
+in the server's `.env`, sent on every request.
 
 ```json
 {
@@ -256,10 +316,14 @@ OpenClaw keeps MCP servers in `~/.openclaw/openclaw.json` under `mcp.servers`.
         "url": "http://<pipeline-host>:8765/mcp",
         "transport": "streamable-http",
         "headers": {
-          "Authorization": "Bearer YOUR_MSP_MCP_TOKEN"
+          "Authorization": "Bearer PASTE_THE_SAME_TOKEN_AS_IN_SERVER_DOTENV"
         },
         "requestTimeoutMs": 30000,
-        "connectionTimeoutMs": 5000
+        "connectionTimeoutMs": 5000,
+        "toolFilter": {
+          "include": [],
+          "exclude": ["start_pipeline", "start_analysis_from_csv"]
+        }
       }
     }
   }
@@ -269,9 +333,11 @@ OpenClaw keeps MCP servers in `~/.openclaw/openclaw.json` under `mcp.servers`.
 Or from the CLI:
 
 ```bash
-openclaw mcp set magic-stock-picker '{"url":"http://<pipeline-host>:8765/mcp","transport":"streamable-http","headers":{"Authorization":"Bearer YOUR_TOKEN"}}'
+openclaw mcp set magic-stock-picker '{"url":"http://<pipeline-host>:8765/mcp","transport":"streamable-http","headers":{"Authorization":"Bearer YOUR_TOKEN"},"toolFilter":{"include":[],"exclude":["start_pipeline","start_analysis_from_csv"]}}'
 openclaw mcp probe magic-stock-picker --json
 ```
+
+The `toolFilter` is doing real work — see [below](#why-that-toolfilter).
 
 **A 30-second `requestTimeoutMs` is plenty**, which is the whole payoff of the job
 model: no tool here blocks. `start_pipeline` returns a job id in milliseconds even
@@ -295,24 +361,48 @@ start and stop it for you:
 }
 ```
 
-### Worth setting: `toolFilter`
+### Why that `toolFilter`
 
-OpenClaw can hide tools from the model. Given that one of these spends $11–13, that is
-a useful second lock alongside `confirm=True` — the agent cannot confirm a tool it
-cannot see:
+`confirm=True` protects against an accidental call. It does not protect against a
+*confident* one — an agent that has read the preview, decided the spend is justified,
+and confirmed. For the two operations that cost $11–13 that is a decision worth
+keeping with a person, so the config above hides them from the model entirely. An
+agent cannot confirm a tool it cannot see.
+
+What stays available after that exclusion:
+
+| Still there | Gone |
+| :--- | :--- |
+| `describe_capabilities` | `start_pipeline` |
+| `start_screen` (free) | `start_analysis_from_csv` |
+| `start_ticker_analysis` (~$0.37–0.55) | |
+| `start_critic_review`, `start_buy_case`, `start_sale_advisory` | |
+| `start_sell_check`, `start_buy_check`, `start_buy_check_sweep` | |
+| `start_ledger_snapshot`, `start_growth_persistence_study` (free) | |
+| all four `job_*` and all four read-only tools | |
+
+So the agent can still screen for free, analyse a single name for cents, run the
+checks and sweeps, and read everything — it just cannot commit the two double-digit
+batch runs, which stay on the command line where you type them.
+
+Tighten or loosen to taste. A **read-only** deployment, useful for an agent that
+should be able to discuss the research but never start anything:
 
 ```json
 "toolFilter": {
-  "include": [],
-  "exclude": ["start_pipeline", "start_analysis_from_csv"]
+  "include": ["describe_capabilities", "list_reports", "read_report",
+              "get_rankings", "get_screen_config",
+              "job_status", "job_log", "job_list"],
+  "exclude": []
 }
 ```
 
-That leaves discovery, the cheap per-ticker operations, the checks and everything
-read-only, while the two operations that spend double digits stay on the command line
-where a person types them. Tighten or loosen to taste — a read-only deployment is
-`"include": ["describe_capabilities", "list_reports", "read_report", "get_rankings",
-"get_screen_config", "job_*"]`.
+Note this is a *client-side* filter: it governs what that client's model is offered,
+not what the server will do. Another client with a different filter, or the same token
+and a raw HTTP call, still reaches everything. It is a usability guardrail on top of
+the server's own gates, not a replacement for them — the server-side protections
+(`confirm=True`, the billed-job lock, the budget ceilings, `--no-budget` being
+unexposed) are what actually hold.
 
 ### If you run more than one client
 
