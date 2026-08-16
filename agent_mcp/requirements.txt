@@ -1,0 +1,14 @@
+# Dependencies for the MCP layer (agent_mcp/) ONLY.
+#
+# This layer reaches the pipeline by running the CLI, never by importing it, so it
+# needs none of the agent stack — no google-adk, no pandas, no edgartools. That is
+# what makes it installable on its own: a thin front end can run here and drive a
+# pipeline that lives in a heavier environment, with MSP_PYTHON pointing at that
+# environment's interpreter.
+#
+# `mcp` already brings starlette and uvicorn, so the HTTP transports need nothing
+# extra. pyyaml is only for reading config.yaml in get_screen_config.
+#
+# Install with:  pip install -r agent_mcp/requirements.txt
+mcp>=1.2
+pyyaml
