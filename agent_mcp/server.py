@@ -1201,6 +1201,43 @@ class _Health:
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
 
+def _local_host_names(bind_host: str) -> list:
+    """Every name a client might legitimately put in the Host header for this machine.
+
+    A client sends the address it dialled, so the allowlist has to cover the LAN
+    addresses and hostnames this box answers to - not the address it bound. Each
+    entry is listed bare and with `:*`, which the middleware reads as "any port".
+
+    Anything not predictable from here - a tunnel's generated hostname, a DNS alias,
+    a reverse proxy's name - has to be added with MSP_MCP_ALLOWED_HOSTS.
+    """
+    import socket
+
+    names = {"localhost", "127.0.0.1", "[::1]", "::1"}
+    if bind_host not in ("0.0.0.0", "::", ""):
+        names.add(bind_host)
+
+    hostname = socket.gethostname()
+    if hostname:
+        names.update({hostname, hostname.lower(), f"{hostname}.local".lower()})
+
+    # Every address this machine resolves to. getaddrinfo covers the multi-homed
+    # case - this box has three - where guessing one of them would be wrong twice.
+    for target in (hostname, None):
+        try:
+            for info in socket.getaddrinfo(target, None):
+                addr = info[4][0]
+                if addr:
+                    names.add(addr)
+        except (socket.gaierror, OSError):
+            continue
+
+    out = []
+    for name in sorted(n for n in names if n):
+        out.extend((name, f"{name}:*"))
+    return out
+
+
 def _serve_http(host: str, port: int, token: Optional[str], stateless: bool = False) -> None:
     import uvicorn
     from mcp.server.transport_security import TransportSecuritySettings
@@ -1213,13 +1250,25 @@ def _serve_http(host: str, port: int, token: Optional[str], stateless: bool = Fa
             "bind 127.0.0.1 and reach it through an SSH tunnel instead."
         )
 
-    # With rebinding protection on, an empty allowed_hosts rejects every request, so
-    # the list has to be populated explicitly for a non-loopback bind. `:*` matches
-    # any port on that host.
-    configured = os.environ.get("MSP_MCP_ALLOWED_HOSTS", "")
-    allowed = [h.strip() for h in configured.split(",") if h.strip()] or [
-        f"{host}:*", host, "localhost:*", "localhost", "127.0.0.1:*", "127.0.0.1",
-    ]
+    # MCP's DNS-rebinding protection checks the Host header, and an empty
+    # allowed_hosts rejects EVERY request - so the list has to be populated. The
+    # trap is that it must contain what clients DIAL, not what the server BINDS.
+    # Deriving it from `host` is wrong for the normal case: bind 0.0.0.0 and the
+    # list gets "0.0.0.0", which no client ever sends, so every request from the
+    # LAN comes back "Invalid Host header" while localhost works and makes it look
+    # like a networking fault. So enumerate the addresses this machine can actually
+    # be reached on.
+    configured = os.environ.get("MSP_MCP_ALLOWED_HOSTS", "").strip()
+    if configured == "*":
+        # No way to predict the hostname a tunnel will invent
+        # (xyz.trycloudflare.com), and the bearer token is the real gate here.
+        allowed, disable_rebinding = [], True
+    elif configured:
+        allowed = [h.strip() for h in configured.split(",") if h.strip()]
+        disable_rebinding = False
+    else:
+        allowed, disable_rebinding = _local_host_names(host), False
+
     mcp.settings.host = host
     mcp.settings.port = port
     # Stateless suits an always-on server with remote clients: every request stands
@@ -1227,8 +1276,16 @@ def _serve_http(host: str, port: int, token: Optional[str], stateless: bool = Fa
     # longer knows. Nothing is lost by it here - this layer keeps no per-session
     # state at all, only job files on disk.
     mcp.settings.stateless_http = stateless
-    mcp._transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
+    # `settings.transport_security`, NOT `_transport_security`. The session manager
+    # is constructed with `security_settings=self.settings.transport_security`, so
+    # that is the only field it reads; assigning to the private name silently creates
+    # an attribute nothing consults. Worse, FastMCP's __init__ has already populated
+    # settings.transport_security with a LOOPBACK-ONLY allowlist, because the host
+    # defaults to 127.0.0.1 at construction time - so the failure is not "no checking"
+    # but "checking against localhost", which is exactly the shape that lets a
+    # localhost smoke test pass and every real client get "Invalid Host header".
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=not disable_rebinding,
         allowed_hosts=allowed,
         allowed_origins=[f"http://{h}" for h in allowed] + [f"https://{h}" for h in allowed],
     )
@@ -1244,6 +1301,16 @@ def _serve_http(host: str, port: int, token: Optional[str], stateless: bool = Fa
     logger.info("Authentication: %s", "bearer token required" if token else "NONE (loopback only)")
     logger.info("Session mode: %s", "stateless" if stateless else "session-tracked")
     logger.info("Health check: http://%s:%d/health", host, port)
+    # Logged because "Invalid Host header" says nothing about what WOULD have been
+    # accepted, and the answer is not guessable from the command line.
+    if disable_rebinding:
+        logger.warning("Host header checking DISABLED (MSP_MCP_ALLOWED_HOSTS=*). "
+                       "The bearer token is the only gate.")
+    else:
+        logger.info("Accepted Host headers: %s",
+                    ", ".join(h for h in allowed if not h.endswith(":*")))
+        logger.info("A client dialling any other name gets 'Invalid Host header'. "
+                    "Add it with MSP_MCP_ALLOWED_HOSTS=name1,name2 (or '*' to disable).")
     uvicorn.run(app, host=host, port=port, log_level=mcp.settings.log_level.lower())
 
 
