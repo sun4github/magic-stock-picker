@@ -1130,10 +1130,37 @@ class _BearerAuth:
         await self.app(scope, receive, send)
 
 
+class _Health:
+    """Unauthenticated liveness endpoint at /health.
+
+    An always-on deployment needs something a service manager or an uptime check can
+    poll without holding a credential. It reports liveness only - no job details, no
+    counts - because it sits outside the token gate and a monitoring probe does not
+    need to know what the box is working on. `job_list` gives that, authenticated.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path") != "/health":
+            return await self.app(scope, receive, send)
+        body = b'{"status":"ok","server":"magic-stock-picker"}'
+        await send({
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+
 _LOOPBACK = {"127.0.0.1", "::1", "localhost"}
 
 
-def _serve_http(host: str, port: int, token: Optional[str]) -> None:
+def _serve_http(host: str, port: int, token: Optional[str], stateless: bool = False) -> None:
     import uvicorn
     from mcp.server.transport_security import TransportSecuritySettings
 
@@ -1154,6 +1181,11 @@ def _serve_http(host: str, port: int, token: Optional[str]) -> None:
     ]
     mcp.settings.host = host
     mcp.settings.port = port
+    # Stateless suits an always-on server with remote clients: every request stands
+    # alone, so a restart does not strand a client holding a session id the server no
+    # longer knows. Nothing is lost by it here - this layer keeps no per-session
+    # state at all, only job files on disk.
+    mcp.settings.stateless_http = stateless
     mcp._transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=allowed,
@@ -1163,10 +1195,14 @@ def _serve_http(host: str, port: int, token: Optional[str]) -> None:
     app = mcp.streamable_http_app()
     if token:
         app = _BearerAuth(app, token)
+    # Outside the token gate, so an uptime check needs no credential.
+    app = _Health(app)
 
     endpoint = f"http://{host}:{port}{mcp.settings.streamable_http_path}"
     logger.info("magic-stock-picker MCP server on %s", endpoint)
     logger.info("Authentication: %s", "bearer token required" if token else "NONE (loopback only)")
+    logger.info("Session mode: %s", "stateless" if stateless else "session-tracked")
+    logger.info("Health check: http://%s:%d/health", host, port)
     uvicorn.run(app, host=host, port=port, log_level=mcp.settings.log_level.lower())
 
 
@@ -1203,6 +1239,12 @@ def main() -> None:
         help="Bearer token clients must present. Prefer MSP_MCP_TOKEN over this - an "
              "argument is visible to anyone who can list processes",
     )
+    parser.add_argument(
+        "--stateless", action="store_true",
+        help="Treat every HTTP request as independent. Recommended for an always-on "
+             "server with remote clients: a restart then never strands a client "
+             "holding a session id the server has forgotten",
+    )
     parser.add_argument("--log-level", default="INFO",
                         choices=("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"))
     args = parser.parse_args()
@@ -1224,7 +1266,7 @@ def main() -> None:
     if args.transport == "stdio":
         mcp.run(transport="stdio")
     elif args.transport == "http":
-        _serve_http(args.host, args.port, token)
+        _serve_http(args.host, args.port, token, stateless=args.stateless)
     else:
         mcp.settings.host, mcp.settings.port = args.host, args.port
         if args.host not in _LOOPBACK and not token:

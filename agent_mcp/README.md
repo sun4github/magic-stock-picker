@@ -158,6 +158,169 @@ this?".
 `mcp` and `pyyaml`, none of the agent stack — while driving a pipeline installed
 somewhere heavier.
 
+## Does it need to be running all the time?
+
+**It depends entirely on the transport, and the transport depends on where the client
+is.**
+
+| | stdio | HTTP |
+| :--- | :--- | :--- |
+| Who starts the server | the **client** does, as a child process | **you** do, ahead of time |
+| Always-on? | no — it starts and stops with the client | **yes** |
+| Client must be | on this machine | anywhere |
+| Auth | none needed (a pipe, not a socket) | bearer token |
+| Good for | Claude Desktop / Claude Code on the same box | OpenClaw, or any remote agent |
+
+**For a remote agent, HTTP — so yes, it has to be running before the client connects,
+and stay running.** There is no way for a client on another machine to spawn a process
+on this one.
+
+Two properties make the always-on case work, and both are worth knowing:
+
+**Jobs outlive the server.** Launched runs are detached into their own process group,
+so restarting the server does not kill a pipeline mid-run. What is lost is the monitor
+thread watching it, which is exactly what the `ORPHANED` state reports — the run
+finished, but this server was not there to see how. A server that stays up avoids that;
+a server that crashes does not lose your $13 run.
+
+**Job state is on disk, not in memory.** So a restart loses nothing else, and
+`--stateless` is safe: pass it and a restart never strands a client holding a session
+id the server has forgotten.
+
+### As a Windows service (Task Scheduler)
+
+The house pattern here — same as `tools/setup_weekly_jobs.cmd`. Run at startup, no
+login required:
+
+```bat
+schtasks /Create /TN "MagicStockPicker MCP" /SC ONSTART /RU SYSTEM /RL HIGHEST ^
+  /TR "cmd /c cd /d E:\repos\magic-stock-picker && python -m agent_mcp.server --transport http --host 0.0.0.0 --stateless" ^
+  /F
+```
+
+Set `MSP_MCP_TOKEN` as a **machine-level** environment variable first
+(`setx MSP_MCP_TOKEN "..." /M`), or the task will refuse to bind a non-loopback
+address. For automatic restart on crash, NSSM (`nssm install MagicStockPickerMCP`) is
+better than Task Scheduler — it supervises rather than merely launching.
+
+### As a Linux service (systemd)
+
+```ini
+[Unit]
+Description=Magic Stock Picker MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=msp
+WorkingDirectory=/home/msp/magic-stock-picker
+Environment=MSP_MCP_TOKEN=your-token-here
+ExecStart=/usr/bin/python3 -m agent_mcp.server --transport http --host 0.0.0.0 --stateless
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now magic-stock-picker-mcp
+```
+
+Prefer an `EnvironmentFile=` over an inline `Environment=` for the token — a unit file
+is world-readable by default.
+
+### Health check
+
+`GET /health` needs no token and reports liveness only:
+
+```bash
+curl http://localhost:8765/health
+# {"status":"ok","server":"magic-stock-picker"}
+```
+
+It deliberately reveals nothing about jobs; that is `job_list`, behind the token.
+
+## Configuring OpenClaw
+
+OpenClaw keeps MCP servers in `~/.openclaw/openclaw.json` under `mcp.servers`.
+
+**Remote (the normal case)** — the server is running on the box with the pipeline:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "magic-stock-picker": {
+        "url": "http://<pipeline-host>:8765/mcp",
+        "transport": "streamable-http",
+        "headers": {
+          "Authorization": "Bearer YOUR_MSP_MCP_TOKEN"
+        },
+        "requestTimeoutMs": 30000,
+        "connectionTimeoutMs": 5000
+      }
+    }
+  }
+}
+```
+
+Or from the CLI:
+
+```bash
+openclaw mcp set magic-stock-picker '{"url":"http://<pipeline-host>:8765/mcp","transport":"streamable-http","headers":{"Authorization":"Bearer YOUR_TOKEN"}}'
+openclaw mcp probe magic-stock-picker --json
+```
+
+**A 30-second `requestTimeoutMs` is plenty**, which is the whole payoff of the job
+model: no tool here blocks. `start_pipeline` returns a job id in milliseconds even
+though the run it started takes an hour. Had these been blocking calls, no timeout
+value would have worked.
+
+**Same machine?** Use stdio instead and skip the service entirely — OpenClaw will
+start and stop it for you:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "magic-stock-picker": {
+        "command": "python",
+        "args": ["-m", "agent_mcp.server"],
+        "cwd": "/path/to/magic-stock-picker"
+      }
+    }
+  }
+}
+```
+
+### Worth setting: `toolFilter`
+
+OpenClaw can hide tools from the model. Given that one of these spends $11–13, that is
+a useful second lock alongside `confirm=True` — the agent cannot confirm a tool it
+cannot see:
+
+```json
+"toolFilter": {
+  "include": [],
+  "exclude": ["start_pipeline", "start_analysis_from_csv"]
+}
+```
+
+That leaves discovery, the cheap per-ticker operations, the checks and everything
+read-only, while the two operations that spend double digits stay on the command line
+where a person types them. Tighten or loosen to taste — a read-only deployment is
+`"include": ["describe_capabilities", "list_reports", "read_report", "get_rankings",
+"get_screen_config", "job_*"]`.
+
+### If you run more than one client
+
+Point them all at **one** server rather than giving each its own. The billed-job lock
+is enforced per job store, so a single shared server means "one billed run at a time"
+actually holds across all of them. Set `requested_by` on `start_*` calls so `job_list`
+can answer who started what.
+
 ## Tests
 
 ```bash
