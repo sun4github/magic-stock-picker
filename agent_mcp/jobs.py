@@ -9,11 +9,10 @@ a job id immediately, and `job_status` / `job_log` report on it afterwards.
 
 Why subprocesses, rather than importing the pipeline and calling it:
 
-  * `src/main.py` is both the CLI entry point and the module every other entry point
-    imports, and it says so at the top of the file: importing it builds the agent
-    objects, reads the config, attaches handlers to a logger singleton, and aliases
-    itself in `sys.modules` to stop a second copy loading. That is fine once per
-    process and wrong in a server that must run many operations over days.
+  * Importing `src/main.py` configures the run logger and drags the whole agent stack
+    in behind it - google-adk, the tool layer, pandas, edgartools - as a side effect
+    of the import. That is fine once per process and wrong in a server that must run
+    many operations over days.
   * Two of the CLI flags (`--top-n`, `--no-budget`) work by rebinding module globals.
     In-process, one job's flags would leak into the next one's run.
   * A subprocess that hangs or dies takes nothing with it. In-process, it would take

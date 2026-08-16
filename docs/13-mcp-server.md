@@ -34,19 +34,26 @@ Every operation runs the CLI as a child process
 and calling a function. That looks like the clumsier option and is not, for four
 reasons.
 
-**`main.py` cannot safely be imported by a long-lived server.** Its own header
-comment ([`src/main.py:16-27`](../src/main.py)) explains that it is both the CLI
-entry point *and* the module every other entry point imports, and that it aliases
-itself in `sys.modules` to stop a second copy loading — because a second copy means
-a second read of the config, a second set of agent objects, and a second
-`FileHandler` on the same logger singleton, which duplicates every console line and
-splits the run across two log files. That machinery is correct for a process that
-runs once and exits. A server that must run many operations over days is not that
-process.
+**Importing `main` is not free, and never was.** It configures the run logger and
+pulls the entire agent stack in behind it — google-adk, the tool layer, pandas,
+edgartools, a little under a thousand modules — as a side effect of the import
+itself. That is the right shape for a process which does one run and exits. A server
+that must stay up for days and launch many runs is not that process.
+
+> This argument used to be stronger, and it is worth recording why it is not. Before
+> the `src/` restructure, `main.py` was also the shared plumbing every other entry
+> point imported, and it carried a `sys.modules.setdefault("main", …)` alias to stop
+> a second copy of itself executing — which would otherwise have given a second set
+> of agent objects and a second `FileHandler` on the same logger singleton. The
+> restructure moved the shared code into `settings`, `agents`, `usage`, `report`,
+> `pipeline`, `persistence` and `run_log`, none of which import `main`, so the cycle
+> and its guard are both gone (see the header comment in
+> [`src/main.py`](../src/main.py)). The import is merely heavy now, not hazardous.
+> The next three reasons are the load-bearing ones.
 
 **Two flags work by rebinding module globals.** `--top-n` and `--no-budget` both
 reassign module-level names in the `__main__` block
-([`src/main.py:3383-3396`](../src/main.py)). In-process, one job's flags would leak
+([`src/main.py:761-772`](../src/main.py)). In-process, one job's flags would leak
 into the next one's run — a `--top-n 5` invocation quietly capping the 30-ticker run
 that followed it.
 
