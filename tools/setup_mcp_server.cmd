@@ -109,9 +109,25 @@ if exist "%REPO_ROOT%\.env" (
 if not defined TOKEN (
     echo.
     echo No MSP_MCP_TOKEN in .env - generating one.
-    for /f "delims=" %%T in ('"%PYTHON%" -c "import secrets; print(secrets.token_urlsafe(32))"') do set "TOKEN=%%T"
+    REM -----------------------------------------------------------------------
+    REM Via a temp file rather than `for /f ... in ('"%PYTHON%" -c "..."')`.
+    REM
+    REM for /f runs its command through `cmd /c`, which strips the first and last
+    REM quote of the whole string. With a QUOTED interpreter path followed by a
+    REM quoted -c argument that leaves `C:\...\python.exe" -c "import` as the
+    REM thing it tries to execute, and it reports that the command is not
+    REM recognised - which reads like a missing Python rather than a quoting bug.
+    REM There is an escape that works (^"..^" around the lot); this is plainer,
+    REM and this script's whole job is to be reliable in front of someone
+    REM setting up for the first time.
+    REM -----------------------------------------------------------------------
+    set "TOKEN_TMP=%TEMP%\msp_mcp_token_%RANDOM%.tmp"
+    "%PYTHON%" -c "import secrets; print(secrets.token_urlsafe(32))" > "!TOKEN_TMP!" 2>nul
+    if exist "!TOKEN_TMP!" set /p TOKEN=<"!TOKEN_TMP!"
+    del "!TOKEN_TMP!" 2>nul
     if not defined TOKEN (
         echo ERROR: could not generate a token.
+        echo Check that "%PYTHON%" runs and that %TEMP% is writable.
         exit /b 1
     )
     >>"%REPO_ROOT%\.env" echo.
@@ -123,12 +139,30 @@ if not defined TOKEN (
     echo Using the MSP_MCP_TOKEN already in .env.
 )
 
+REM ---------------------------------------------------------------------------
+REM Pick the trigger by whether we are elevated.
+REM
+REM /SC ONSTART registers a BOOT-time task, and Windows will not let a
+REM non-administrator create one - schtasks fails with a bare "Access is
+REM denied" that reads like a broken script rather than a missing privilege.
+REM (This is why tools\setup_weekly_jobs.cmd needs no elevation: /SC WEEKLY is
+REM allowed to an ordinary user.)
+REM
+REM ONLOGON is the unelevated equivalent and is the right default here anyway:
+REM the task runs as you, reads your .env and your venv, so on a workstation
+REM there is nothing for it to do before you have logged in. Elevate only if you
+REM want the server up on a machine that reboots unattended.
+REM ---------------------------------------------------------------------------
+net session >nul 2>&1
+if errorlevel 1 (set "ELEVATED=0") else (set "ELEVATED=1")
+
 echo.
 echo Repo:        %REPO_ROOT%
 echo Interpreter: %PYTHON%
-echo Task:        %TASK_NAME%  ^(at every boot^)
 echo Endpoint:    http://0.0.0.0:%PORT%/mcp
 echo.
+
+if "!ELEVATED!"=="0" goto :startup_folder
 
 REM /RU %USERNAME% runs it as you, so it reads the same .env and has the same
 REM network access you do by hand. Deliberately NOT SYSTEM, which has a
@@ -137,6 +171,7 @@ REM
 REM cmd /c ... keeps the working directory at the repo root, which is what makes
 REM `python -m agent_mcp.server` resolve and what the server's own path
 REM detection expects.
+echo Registering a boot-start scheduled task ^(elevated^)...
 schtasks /Create ^
     /TN "%TASK_NAME%" ^
     /TR "cmd /c cd /d \"%REPO_ROOT%\" && \"%PYTHON%\" -m agent_mcp.server --transport http --host 0.0.0.0 --port %PORT% --stateless" ^
@@ -147,10 +182,35 @@ schtasks /Create ^
 
 if errorlevel 1 (
     echo.
-    echo FAILED to register the task. If the message above mentions access or
-    echo privileges, re-run this from an Administrator command prompt.
+    echo FAILED to register the task even though this prompt is elevated.
+    echo Falling back to the Startup folder.
+    goto :startup_folder
+)
+goto :configure_task
+
+REM ---------------------------------------------------------------------------
+REM :startup_folder - the unelevated path.
+REM
+REM Windows lets an ordinary user create a WEEKLY task but refuses ONLOGON and
+REM ONSTART, both with a bare "Access is denied". That is why
+REM tools\setup_weekly_jobs.cmd installs without elevation and this does not.
+REM The per-user Startup folder has no such restriction and gives the same
+REM practical result on a workstation you log into.
+REM ---------------------------------------------------------------------------
+:startup_folder
+echo Not elevated - installing a Startup-folder launcher instead of a
+echo scheduled task. ^(Windows reserves logon/boot-triggered tasks for
+echo administrators; re-run this from an Administrator prompt if you need the
+echo server up BEFORE anyone logs in.^)
+echo.
+"%PYTHON%" "%REPO_ROOT%\tools\install_mcp_startup.py" --port %PORT% --python "%PYTHON%"
+if errorlevel 1 (
+    echo ERROR: could not install the Startup launcher.
     exit /b 1
 )
+goto :after_register
+
+:configure_task
 
 REM A server is meant to stay up, so unlike the weekly sweep this gets NO
 REM execution time limit - the default would kill it after three days - and it
@@ -165,10 +225,15 @@ powershell -NoProfile -Command ^
   "$t.Settings.StopIfGoingOnBatteries = $false;" ^
   "Set-ScheduledTask -TaskName '%TASK_NAME%' -Settings $t.Settings | Out-Null" 2>nul
 
+:after_register
 echo.
-echo Registered. It will start at every boot. To start it NOW:
+echo Installed. To start it NOW without waiting:
 echo.
-echo     schtasks /Run /TN "%TASK_NAME%"
+if "!ELEVATED!"=="1" (
+    echo     schtasks /Run /TN "%TASK_NAME%"
+) else (
+    echo     wscript.exe "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\MagicStockPicker-MCP.vbs"
+)
 echo.
 echo Then check it is listening ^(no token needed for this^):
 echo.
@@ -216,9 +281,16 @@ echo ---------------------------------------------------------------------------
 echo  Other useful commands
 echo ---------------------------------------------------------------------------
 echo.
-echo   Stop it:      schtasks /End    /TN "%TASK_NAME%"
-echo   Remove it:    schtasks /Delete /TN "%TASK_NAME%" /F
-echo   Status:       schtasks /Query  /TN "%TASK_NAME%" /V /FO LIST
+if "!ELEVATED!"=="1" (
+    echo   Stop it:      schtasks /End    /TN "%TASK_NAME%"
+    echo   Remove it:    schtasks /Delete /TN "%TASK_NAME%" /F
+    echo   Status:       schtasks /Query  /TN "%TASK_NAME%" /V /FO LIST
+) else (
+    echo   Stop it:      powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort %PORT% -State Listen ^| ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }"
+    echo   Remove it:    "%PYTHON%" tools\install_mcp_startup.py --remove
+    echo   Status:       curl http://localhost:%PORT%/health
+    echo   Server log:   %REPO_ROOT%\logs\mcp_server.log
+)
 echo.
 echo   If a client gets 401, the token in its config does not match the one in
 echo   .env. If it cannot connect at all, check the firewall allows inbound TCP
