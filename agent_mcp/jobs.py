@@ -240,8 +240,24 @@ def launch(
 
     # Own process group, so cancelling kills the whole tree rather than orphaning
     # whatever the run had spawned.
-    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if _IS_WINDOWS else 0
-    popen_kwargs = {"creationflags": creationflags} if _IS_WINDOWS else {"start_new_session": True}
+    #
+    # DETACHED_PROCESS matters more than it looks. CREATE_NEW_PROCESS_GROUP alone
+    # changes how Ctrl+C is routed but leaves the child ATTACHED TO THE CONSOLE of
+    # whoever started the server - verified with GetConsoleProcessList, which lists
+    # the child's pid without it and does not list it with it. Every process on that
+    # list receives CTRL_CLOSE_EVENT when the terminal window is closed, so a server
+    # run from a terminal would take a half-finished pipeline run down with it the
+    # moment someone clicked the X - after the money for it had been spent. Detached,
+    # the run has no console to lose. stdout and stderr still reach the log file
+    # because they are explicit handles, not inherited console ones.
+    if _IS_WINDOWS:
+        popen_kwargs = {
+            "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        }
+    else:
+        # setsid does the same job: a new session with no controlling terminal, so a
+        # SIGHUP when the terminal closes is never delivered to the run.
+        popen_kwargs = {"start_new_session": True}
 
     try:
         proc = subprocess.Popen(
