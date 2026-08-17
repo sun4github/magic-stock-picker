@@ -1,10 +1,14 @@
-"""Run every test file in src/ and report exit codes.
+"""Run every test file in the repository and report exit codes.
 
 Runs every test file in the suite, records exit code, elapsed time and the tail of
-the output. Run once before the restructure and once after; the two reports must
-agree on every exit code. Usage:
+the output. Originally written for the src/ restructure — run once before and once
+after, and the two reports must agree on every exit code — and kept since as the one
+command that runs everything. Usage:
 
     python run_tests.py <output-file> [src-dir]
+
+Most suites live in src/ and run from there; see EXTERNAL_TESTS for the ones that
+do not.
 """
 import os
 import subprocess
@@ -21,12 +25,27 @@ TESTS = [
     "test_buy_check_sweep",
 ]
 
+# Suites that live outside src/ and run from somewhere else. Held separately because
+# every entry above resolves against src_dir and runs with src/ as its working
+# directory; these each carry their own. Without this the MCP layer's suite is
+# invisible to the one command that claims to run every test.
+#   (label, path relative to the repo root, working directory relative to the root)
+EXTERNAL_TESTS = [
+    ("agent_mcp/test_agent_mcp", "agent_mcp/test_agent_mcp.py", "."),
+]
+
 out_path = sys.argv[1]
 src_dir = sys.argv[2] if len(sys.argv) > 2 else r"E:\repos\magic-stock-picker\src"
+repo_root = os.path.dirname(os.path.abspath(src_dir.rstrip("\\/")))
+
+CASES = [(name, os.path.join(src_dir, name + ".py"), src_dir) for name in TESTS]
+CASES += [
+    (label, os.path.join(repo_root, rel), os.path.join(repo_root, cwd))
+    for label, rel, cwd in EXTERNAL_TESTS
+]
 
 with open(out_path, "w", encoding="utf-8") as out:
-    for name in TESTS:
-        path = os.path.join(src_dir, name + ".py")
+    for name, path, workdir in CASES:
         if not os.path.exists(path):
             out.write(f"===== {name} =====\nMISSING {path}\n\n")
             out.flush()
@@ -34,7 +53,7 @@ with open(out_path, "w", encoding="utf-8") as out:
         start = time.time()
         proc = subprocess.run(
             [sys.executable, "-u", path],
-            cwd=src_dir, capture_output=True, text=True, timeout=900,
+            cwd=workdir, capture_output=True, text=True, timeout=900,
         )
         elapsed = time.time() - start
         combined = (proc.stdout or "") + (proc.stderr or "")

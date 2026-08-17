@@ -36,6 +36,7 @@ Come here once you need to change or extend the code.
 | [10-sale-advisory-regeneration.md](10-sale-advisory-regeneration.md) | The standalone `sale_advisory.py` command: generating or repairing a Phase C sale advisory for any stored report, and why its artefact and its cost land on different runs | `src/sale_advisory.py` |
 | [11-buy-case-and-buy-check.md](11-buy-case-and-buy-check.md) | Phase E: the buy case written for a `Watch` verdict (the entry price range and the triggers that would make it a Buy), the forward-looking feeds only it reads, and the `--buy-check` command that tests it later | `src/buy_case_agent.py`, `src/buy_case.py`, `src/prompts/buy-case.md`, `src/prompts/buy-check.md` |
 | [12-verdict-ledger.md](12-verdict-ledger.md) | The verdict ledger: what each verdict claimed, what the stock did next, and the off-box weekly job that grades it by arithmetic. Also the externally-sourced picks this system did not make, graded to their exit on the same arithmetic. Records only — it feeds nothing back into any prompt | `src/sql-schema.sql`, `src/persistence/ledger.py`, `src/pipeline/analysis.py`, `src/cron/run_outcome_snapshot.py`, `src/sync_external_picks.py`, `src/ledger-queries.sql` |
+| [13-mcp-server.md](13-mcp-server.md) | The MCP layer that exposes the CLI as tools for another agent: why it runs subprocesses rather than importing the pipeline, why operations are jobs rather than blocking calls, and what it withholds | `agent_mcp/server.py`, `agent_mcp/jobs.py`, `agent_mcp/catalog.py`, `agent_mcp/library.py` |
 
 ## What is *not* in the runtime path
 
@@ -77,6 +78,15 @@ not. Put anything similar there rather than in `src/`.
     bookkeeping: it reads nothing back, changes no verdict, and its scoring job lives
     off-box on a Raspberry Pi with none of this repo's dependencies. Read it when you
     need to know how the system's own track record is being accumulated.
+11. **13** only if you are exposing the tool to another agent over MCP. It sits
+    entirely outside the pipeline — nothing in `src/` imports it, and it reaches the
+    pipeline only by running the same commands **01** documents.
+
+> **Two things called "MCP server" live in this repo.** [`src/mcp_server.py`](../src/mcp_server.py)
+> (doc **03**) is the *agents'* toolbelt: one filing, one metric, one database row,
+> called by the LLM agents inside a run. [`agent_mcp/`](../agent_mcp/README.md) (doc
+> **13**) is the *operator's*: start a run, watch it, read what it produced. They are
+> at different layers and never call each other.
 
 ## Conventions used in these docs
 
