@@ -230,6 +230,48 @@ refused rather than accepted, because every entry is real money waiting to be sp
 And the queue only advances while the server is running — see
 [what closing the window does](#the-three-ways-to-run-it-and-what-closing-the-window-does).
 
+### Checking before you run something by hand
+
+The serialisation above governs work **this server launched**. A `python main.py …`
+you type in another terminal is a different process that never touches the job store,
+so the queue cannot see it and will happily start a job alongside it. They would then
+share the database, the reports directory and the run logs.
+
+`job_list` is the check. Free, instant, and safe to call at any time:
+
+```
+billed_slot : "free - a billed operation can start now"     -> nothing running
+queue       : []                                             -> nothing pending
+```
+
+When something is in flight it reads:
+
+```json
+"billed_slot": { "in_use_by": "ticker-20260817-003149-921d0d", "operation": "ticker" },
+"queue": [ { "position": 1, "label": "Analyse AMD", "requested_by": "openclaw" } ]
+```
+
+**Both empty means it is safe to start a manual run.** Ask an agent *"is the stock
+picker busy?"* or *"anything running or queued?"*, or check straight from a terminal
+without involving the server at all:
+
+```bash
+python -c "from agent_mcp import server; print(server.job_list()['billed_slot'])"
+```
+
+Note the check only works in one direction, and the asymmetry is worth holding in
+mind:
+
+| | Sees the other side? |
+| :--- | :--- |
+| You, about to start a manual run, checking `job_list` | **yes** — this is the case that works |
+| The server, about to start a job while your manual run is going | **no** — it will start anyway |
+
+Closing that second gap needs a lock file both entry points acquire, which means
+adding the acquire/release to `src/main.py` — and would end the property that this
+layer changes nothing in the pipeline package. Checking before you type costs nothing
+and is the working habit until that trade is worth making.
+
 ## Over the network
 
 ```bash
