@@ -134,8 +134,23 @@ never quote a cost or a precondition that differs from the one actually enforced
 ### Getting the answer by email
 
 `start_ticker_analysis(ticker, email_report=True, confirm=True)` mails everything the
-run produced — the final report, the sale advisory, and the buy case if the verdict
-is `Watch` — to the address configured on the host.
+run produced, to the address configured on the host:
+
+| Attachment | Comes from |
+| :--- | :--- |
+| `<T>_Final_Report_<Verdict>.md` | `reports/` |
+| `<T>_Bear_Case.md` | **the database** — never written to disk |
+| `<T>_Bull_Case.md` | **the database** — never written to disk |
+| `<T>_Sale_Advisory.md` | `reports/` |
+| `<T>_Buy_Case.md` | `reports/`, `Watch` verdicts only |
+
+The bear and bull cases are the only run artefacts the pipeline does not write to
+`reports/` — it stores them in `agent_outputs`, which is where the web viewer reads
+them from. An email assembled from the filesystem alone therefore omits the two
+documents containing the actual *argument*: the verdict is the conclusion, these are
+the reasoning. They are fetched by the run id printed in the report's own header, so
+they are the pair the analyst was weighing rather than whatever is newest for that
+ticker. If the database is unreachable the rest of the email still goes.
 
 This is the mode for the case the whole HTTP transport exists to serve: someone asks
 you about a ticker while you are nowhere near the machine, an agent runs the analysis
@@ -289,6 +304,34 @@ The bearer check is deliberately the smallest thing that is actually correct: a
 constant-time compare against a shared secret. For anything multi-tenant, put a real
 proxy in front and keep this as the backstop.
 
+### Why Host-header checking is off on a network bind
+
+MCP ships DNS-rebinding protection, which validates the `Host` header against an
+allowlist. **When a token is set and the bind is not loopback, this server turns it
+off** — a deliberate default, and worth explaining because "Invalid Host header" is
+otherwise a baffling failure.
+
+That protection exists to stop a malicious web page driving a victim's browser at an
+**unauthenticated** server on their own machine. A browser will attach cookies but
+cannot invent a bearer token, so once a token is required the attack is already dead.
+
+What it does cost is real, and it bit here. The allowlist can only be a **snapshot of
+this machine's addresses taken at startup**, and those change:
+
+```
+server starts 00:41:45  ->  allowlist: 127.0.0.1, 192.168.1.100, Suneel-PC, …
+Wi-Fi gets its DHCP lease at ~00:44  ->  192.168.4.115 now exists
+client dials 192.168.4.115           ->  "Invalid Host header", forever
+```
+
+A laptop joining Wi-Fi after boot, a VPN coming up, Hyper-V renumbering — any of them
+strands an interface the server will reject for the rest of its life, with no hint
+that the cure is a restart. That is a confusing failure traded for no security.
+
+Loopback binds and token-less binds keep the protection: that is the case it was
+designed for, and `127.0.0.1` cannot go stale. To force an explicit allowlist back on
+for a network bind, set `MSP_MCP_ALLOWED_HOSTS=host1,host2`; `*` disables it anywhere.
+
 Set `requested_by` on `start_*` calls when several agents share one server; it is
 recorded on the job and shown in `job_list`, which is how you answer "who started
 this?".
@@ -336,7 +379,7 @@ every call a 401 — which, if you ever see one, is almost always what has happe
 | Variable | Does |
 | :--- | :--- |
 | `MSP_MCP_TOKEN` | Bearer token clients must present (HTTP transports) |
-| `MSP_MCP_ALLOWED_HOSTS` | Comma-separated `Host` allowlist, if the default (bind host plus loopback) is wrong for your proxy |
+| `MSP_MCP_ALLOWED_HOSTS` | Comma-separated `Host` allowlist, or `*`. Only needed to turn Host checking back **on** for an authenticated network bind — see below |
 | `MSP_MCP_JOB_DIR` | Where job metadata and logs live. Default `agent_mcp/.jobs/` |
 | `MSP_PYTHON` | Interpreter used to run the pipeline, if not the one running this server |
 

@@ -471,6 +471,48 @@ def test_email_report_option() -> None:
     wrapper = PROJECT_ROOT / "tools" / "analyze_and_email.py"
     check("the wrapper the tool names actually exists", wrapper.exists(), str(wrapper))
 
+    # The bear and bull cases are the only run artefacts never written to reports/,
+    # so an email built from the filesystem alone silently omits the two documents
+    # containing the actual argument. Assert the wrapper reaches for them.
+    sys.path.insert(0, str(PROJECT_ROOT / "tools"))
+    import analyze_and_email as mailer
+
+    check("the wrapper can fetch bear/bull from the database",
+          callable(getattr(mailer, "fetch_db_documents", None)))
+    check("it reads the run id off the report header",
+          callable(getattr(mailer, "_run_id_of", None)))
+
+    # Ordering: verdict first, then the two cases it weighed, then what follows from it.
+    from pathlib import Path as _P
+
+    fake_paths = [_P("AAA_Final_Report_Watch.md"), _P("AAA_Sale_Advisory.md"),
+                  _P("AAA_Buy_Case.md")]
+    reads = {p.name: b"x" for p in fake_paths}
+    original = _P.read_bytes
+    try:
+        _P.read_bytes = lambda self: reads[self.name]  # type: ignore[method-assign]
+        ordered = mailer.collect_documents(
+            fake_paths, [("AAA_Bear_Case.md", "bear"), ("AAA_Bull_Case.md", "bull")])
+    finally:
+        _P.read_bytes = original  # type: ignore[method-assign]
+
+    names = [n for n, _ in ordered]
+    check("all five documents are attached", len(names) == 5, f"{names}")
+    check("bear and bull are included",
+          "AAA_Bear_Case.md" in names and "AAA_Bull_Case.md" in names, f"{names}")
+    check("order is verdict, bear, bull, then derived documents",
+          names == ["AAA_Final_Report_Watch.md", "AAA_Bear_Case.md", "AAA_Bull_Case.md",
+                    "AAA_Sale_Advisory.md", "AAA_Buy_Case.md"], f"{names}")
+
+    # A missing database must cost the bear/bull cases, never the whole email.
+    saved = os.environ.pop("DATABASE_URL", None)
+    try:
+        check("a missing DATABASE_URL degrades rather than raises",
+              mailer.fetch_db_documents("AAA", "") == [])
+    finally:
+        if saved is not None:
+            os.environ["DATABASE_URL"] = saved
+
 
 def test_no_budget_flag_is_unreachable() -> None:
     print("\nWithheld flags")

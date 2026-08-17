@@ -93,6 +93,83 @@ def find_reports(ticker: str, newer_than: float) -> list:
     return found
 
 
+def _run_id_of(paths: list) -> str:
+    """The run id, read off the header every report carries.
+
+    Used to fetch the bear and bull cases belonging to THIS run rather than the most
+    recent ones for the ticker, which could come from a different analysis entirely.
+    """
+    for path in paths:
+        if "_Final_Report" not in path.name and "_Refined_Report" not in path.name:
+            continue
+        head = path.read_text(encoding="utf-8", errors="replace")[:400]
+        match = re.search(r"\*\*Run ID:\*\*\s*`([0-9a-fA-F-]{8,})`", head)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def fetch_db_documents(ticker: str, run_id: str) -> list:
+    """The bear and bull cases, as (filename, text) pairs.
+
+    These are the only parts of a run that never reach the filesystem - the pipeline
+    stores them in `agent_outputs` and the web viewer reads them from there - so an
+    email built purely from `reports/` silently omits the two documents that contain
+    the actual argument. The verdict is the conclusion; these are the reasoning.
+
+    Queried directly rather than through `persistence.reports.db_get_agent_output`,
+    because that module registers MCP tools and importing it pulls in FastMCP and its
+    thousand-module dependency tree to run one SELECT. A failure here is logged and
+    skipped, never fatal: the run is finished and paid for, and losing the whole
+    email because the database is unreachable would be the wrong trade.
+    """
+    dsn = os.getenv("DATABASE_URL", "")
+    if not dsn:
+        print("  DATABASE_URL not set; skipping the bear and bull cases.")
+        return []
+    try:
+        import psycopg2
+    except ImportError:
+        print("  psycopg2 not installed; skipping the bear and bull cases.")
+        return []
+
+    wanted = (("BEAR_CASE", "Bear_Case"), ("BULL_CASE", "Bull_Case"))
+    out = []
+    try:
+        with psycopg2.connect(dsn) as conn:
+            with conn.cursor() as cur:
+                for agent_type, label in wanted:
+                    if run_id:
+                        cur.execute(
+                            "SELECT raw_content FROM agent_outputs "
+                            "WHERE ticker = %s AND agent_type = %s AND run_id = %s "
+                            "ORDER BY created_at DESC LIMIT 1",
+                            (ticker, agent_type, run_id),
+                        )
+                        row = cur.fetchone()
+                    else:
+                        row = None
+                    if not row:
+                        # No run id, or a run whose outputs were reused and stored
+                        # under a different id. The latest for the ticker is the
+                        # right fallback and is what the viewer would show.
+                        cur.execute(
+                            "SELECT raw_content FROM agent_outputs "
+                            "WHERE ticker = %s AND agent_type = %s "
+                            "ORDER BY created_at DESC LIMIT 1",
+                            (ticker, agent_type),
+                        )
+                        row = cur.fetchone()
+                    if row and row[0]:
+                        out.append((f"{ticker}_{label}.md", row[0]))
+                    else:
+                        print(f"  no {agent_type} stored for {ticker}")
+    except Exception as exc:  # psycopg2.Error, and anything the driver wraps
+        print(f"  could not read the bear/bull cases: {exc}")
+        return []
+    return out
+
+
 def verdict_of(paths: list) -> str:
     """The verdict, read off the report filename the pipeline chose."""
     for path in paths:
@@ -142,7 +219,7 @@ def _gist(paths: list) -> str:
     return ""
 
 
-def build_summary(ticker: str, paths: list, verdict: str) -> str:
+def build_summary(ticker: str, paths: list, verdict: str, documents: list = None) -> str:
     """A few lines of orientation. The reports themselves travel as attachments.
 
     Deliberately short. Inlining the reports made a message thousands of lines long
@@ -159,8 +236,10 @@ def build_summary(ticker: str, paths: list, verdict: str) -> str:
     gist = _gist(paths)
     if gist:
         lines.append(html.escape(gist))
+    names = ([n[:-3] for n, _ in documents] if documents
+             else [p.stem for p in paths])
     lines.append(
-        "Attached: " + html.escape(", ".join(p.stem.replace("_", " ") for p in paths)) + "."
+        "Attached: " + html.escape(", ".join(n.replace("_", " ") for n in names)) + "."
     )
     lines.append(
         "<span style='color:#777'>A stored report is point-in-time — check the current "
@@ -173,26 +252,49 @@ def build_summary(ticker: str, paths: list, verdict: str) -> str:
     )
 
 
-def build_attachments(paths: list) -> list:
-    """The reports, base64-encoded, as Plunk expects them.
+def collect_documents(paths: list, extras: list) -> list:
+    """Everything to attach, as (filename, bytes), in reading order.
 
-    Plunk allows 10 attachments and 10MB in total; a run produces at most four
-    documents of a few tens of kilobytes, so the cap is a guard against something
-    unexpected rather than a limit anyone will meet. Anything that would breach it is
-    dropped with a note rather than silently truncated, because a half a report is
-    worse than a clearly absent one.
+    The verdict first, then the two cases it was weighing, then the documents derived
+    from it - which is the order someone actually reads them in, and the order the
+    pipeline produced them in apart from the verdict being promoted to the top.
+    """
+    by_name = {p.name: p.read_bytes() for p in paths}
+    extra_bytes = {name: text.encode("utf-8") for name, text in extras}
+
+    ordered = []
+    for kind in ("Final_Report", "Refined_Report"):
+        ordered += [(n, b) for n, b in by_name.items() if f"_{kind}" in n]
+    ordered += [(n, b) for n, b in extra_bytes.items() if "_Bear_Case" in n]
+    ordered += [(n, b) for n, b in extra_bytes.items() if "_Bull_Case" in n]
+    for kind in ("Sale_Advisory", "Buy_Case"):
+        ordered += [(n, b) for n, b in by_name.items() if f"_{kind}" in n]
+
+    # Anything the ordering above did not name, so a new report kind is attached
+    # rather than silently dropped.
+    named = {n for n, _ in ordered}
+    ordered += [(n, b) for n, b in by_name.items() if n not in named]
+    return ordered
+
+
+def build_attachments(documents: list) -> list:
+    """The documents, base64-encoded, as Plunk expects them.
+
+    Plunk allows 10 attachments and 10MB in total; a run produces five or six of a
+    few tens of kilobytes, so the cap guards against something unexpected rather than
+    a limit anyone will meet. Anything that would breach it is dropped with a note
+    rather than silently truncated, because half a report is worse than an absent one.
     """
     out, total = [], 0
-    for path in paths[:MAX_ATTACHMENTS]:
-        raw = path.read_bytes()
+    for name, raw in documents[:MAX_ATTACHMENTS]:
         encoded = base64.b64encode(raw).decode("ascii")
         if total + len(encoded) > MAX_ATTACHMENT_BYTES:
-            print(f"  skipping {path.name}: would exceed the {MAX_ATTACHMENT_BYTES // 1_000_000}MB "
-                  f"attachment limit")
+            print(f"  skipping {name}: would exceed the "
+                  f"{MAX_ATTACHMENT_BYTES // 1_000_000}MB attachment limit")
             continue
         total += len(encoded)
         out.append({
-            "filename": path.name,
+            "filename": name,
             "content": encoded,
             "contentType": "text/markdown",
             "disposition": "attachment",
@@ -269,7 +371,9 @@ def main() -> int:
             return 1
         verdict = verdict_of(paths)
         subject = f"[{ticker}]" + (f" {verdict}" if verdict else "") + " — stock analysis"
-        body, attachments = build_summary(ticker, paths, verdict), build_attachments(paths)
+        documents = collect_documents(paths, fetch_db_documents(ticker, _run_id_of(paths)))
+        body = build_summary(ticker, paths, verdict, documents)
+        attachments = build_attachments(documents)
         if args.dry_run:
             print(f"To:      {recipient() or '(not configured)'}")
             print(f"Subject: {subject}")
@@ -314,8 +418,13 @@ def main() -> int:
 
     verdict = verdict_of(paths)
     subject = f"[{ticker}]" + (f" {verdict}" if verdict else "") + " — stock analysis"
-    print(f"\nEmailing {len(paths)} report(s): {', '.join(p.name for p in paths)}")
-    send(subject, build_summary(ticker, paths, verdict), build_attachments(paths))
+    # The bear and bull cases come from the database; they are never written to
+    # reports/, so a file-only email omits the two documents holding the argument.
+    documents = collect_documents(paths, fetch_db_documents(ticker, _run_id_of(paths)))
+    print(f"\nEmailing {len(documents)} document(s): "
+          f"{', '.join(n for n, _ in documents)}")
+    send(subject, build_summary(ticker, paths, verdict, documents),
+         build_attachments(documents))
     return 0
 
 
