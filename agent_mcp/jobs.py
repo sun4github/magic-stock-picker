@@ -27,6 +27,7 @@ processes serving the same repo see the same jobs.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shlex
 import subprocess
@@ -45,6 +46,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 #: them on a larger or faster volume than the checkout.
 JOBS_DIR = Path(os.environ.get("MSP_MCP_JOB_DIR", PROJECT_ROOT / "agent_mcp" / ".jobs"))
 
+QUEUED = "QUEUED"
 RUNNING = "RUNNING"
 SUCCEEDED = "SUCCEEDED"
 FAILED = "FAILED"
@@ -52,7 +54,14 @@ CANCELLED = "CANCELLED"
 ORPHANED = "ORPHANED"
 TERMINAL_STATES = frozenset({SUCCEEDED, FAILED, CANCELLED, ORPHANED})
 
+#: How many billed jobs may wait behind the running one. A caller that has confirmed
+#: each of them individually is entitled to a queue; a caller that has somehow asked
+#: for fifty is doing something it will regret, and each entry is real money.
+MAX_QUEUE_DEPTH = 8
+
 _IS_WINDOWS = os.name == "nt"
+
+logger = logging.getLogger("agent_mcp.jobs")
 
 # Guards the read-modify-write of metadata files and the "one billed job" check.
 # Both are short critical sections; nothing slow happens while it is held.
@@ -61,6 +70,18 @@ _LOCK = threading.RLock()
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _now_precise() -> str:
+    """A timestamp fine enough to order a queue by.
+
+    Second resolution is fine for "when did this finish" and wrong for "who is next".
+    Two jobs submitted in the same second - which is the ordinary case when someone
+    sends two messages back to back - get identical `queued_at` values, and the sort
+    that decides who runs first becomes arbitrary. That surfaced as a flaky test
+    reporting queue position 1 for both.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _interpreter() -> str:
@@ -147,6 +168,8 @@ def _reconcile(meta: dict) -> dict:
     ORPHANED - we know it finished but not how - and the log tail is where the
     caller finds out. If it is still alive, RUNNING is still true.
     """
+    # A QUEUED job has no process yet, so pid liveness says nothing about it. It
+    # waits across a server restart and is picked up by the startup dispatch.
     if meta.get("state") != RUNNING:
         return meta
     if meta.get("monitored_by") == os.getpid():
@@ -191,6 +214,19 @@ def _monitor(job_id: str, proc: subprocess.Popen, log_file) -> None:
         meta["monitored_by"] = None
         _write_meta(meta)
 
+    # The slot this job was holding is now free. Outside the lock above, because
+    # dispatch takes it itself.
+    if meta.get("bills"):
+        try:
+            started = dispatch()
+            if started:
+                logger.info("Started queued job %s (%s)",
+                            started["job_id"], started.get("label"))
+        except Exception:
+            # A monitor thread that raises dies silently and takes the queue with it -
+            # every job behind this one would wait forever with nothing to start them.
+            logger.exception("Failed to start the next queued job after %s", job_id)
+
 
 def running_billed_job() -> Optional[dict]:
     """The billed job currently in flight, if there is one.
@@ -206,6 +242,50 @@ def running_billed_job() -> Optional[dict]:
     return None
 
 
+def queued_jobs() -> list:
+    """Everything waiting for the billed slot, oldest first."""
+    # job_id is the tiebreaker, so the order is total even if two records somehow
+    # carry the same timestamp - two processes serving the same store, say. An
+    # arbitrary but STABLE order is what matters: the queue must not reshuffle
+    # between one caller reading it and the dispatcher acting on it.
+    return sorted(
+        (m for m in list_jobs(limit=500) if m.get("state") == QUEUED),
+        key=lambda m: (m.get("queued_at") or "", m.get("job_id") or ""),
+    )
+
+
+def queue_position(job_id: str) -> Optional[int]:
+    """1-based place in the queue, or None if this job is not waiting."""
+    for index, meta in enumerate(queued_jobs(), start=1):
+        if meta["job_id"] == job_id:
+            return index
+    return None
+
+
+def dispatch() -> Optional[dict]:
+    """Start the next queued job if the billed slot is free.
+
+    Called when a job finishes and once at server startup. Holding the lock across
+    the check and the spawn is what stops two callers, or a finishing job and a
+    startup sweep, both deciding the slot is free.
+    """
+    with _LOCK:
+        if running_billed_job() is not None:
+            return None
+        waiting = queued_jobs()
+        if not waiting:
+            return None
+        meta = waiting[0]
+        try:
+            return _spawn(meta)
+        except RuntimeError as exc:
+            meta["state"] = FAILED
+            meta["ended_at"] = _now()
+            meta["detail"] = f"Could not start when its turn came: {exc}"
+            _write_meta(meta)
+            return None
+
+
 def launch(
     *,
     operation: str,
@@ -214,13 +294,66 @@ def launch(
     label: str,
     bills: bool,
     requested_by: Optional[str] = None,
+    allow_queue: bool = True,
 ) -> dict:
-    """Start an operation and return its job record.
+    """Submit an operation, starting it now or queueing it behind the billed slot.
 
     `argv` is the command after the interpreter, e.g. `["main.py", "--screen-only"]`.
+
+    A billed operation submitted while another is running is QUEUED rather than
+    refused. Refusing was wrong for the case this server exists to serve: two
+    questions arriving a few seconds apart over Telegram are both things the person
+    wants answered, and telling the second one "busy, try again" leaves the caller
+    to invent a retry loop. Queueing keeps the one-at-a-time property that the
+    shared daily ceiling and the shared log directory need, while still accepting
+    the work.
+
+    Free operations never queue - they cost nothing and nothing serialises them.
     """
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
     job_id = f"{operation}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+
+    meta = {
+        "job_id": job_id,
+        "operation": operation,
+        "label": label,
+        "state": QUEUED,
+        "bills": bills,
+        # Stored so a queued job can be started later, by a dispatcher that was not
+        # the caller and may not even be the same server process.
+        "argv": list(argv),
+        "command": " ".join(shlex.quote(c) for c in [_interpreter(), *argv]),
+        "cwd": str(cwd),
+        "pid": None,
+        "queued_at": _now_precise(),
+        "started_at": None,
+        "ended_at": None,
+        "exit_code": None,
+        "requested_by": requested_by,
+        "monitored_by": None,
+        "log_file": str(_log_path(job_id)),
+        "detail": None,
+    }
+
+    with _LOCK:
+        if bills and allow_queue and running_billed_job() is not None:
+            depth = len(queued_jobs())
+            if depth >= MAX_QUEUE_DEPTH:
+                raise RuntimeError(
+                    f"{depth} billed jobs are already queued (limit {MAX_QUEUE_DEPTH}). "
+                    f"Each one will spend money when it runs; cancel some before adding more."
+                )
+            meta["detail"] = "Waiting for the billed slot."
+            _write_meta(meta)
+            return meta
+        _write_meta(meta)
+        return _spawn(meta)
+
+
+def _spawn(meta: dict) -> dict:
+    """Actually start a job's process. Caller holds the lock."""
+    job_id = meta["job_id"]
+    argv, cwd = meta["argv"], Path(meta["cwd"])
     command = [_interpreter(), *argv]
 
     env = os.environ.copy()
@@ -273,25 +406,15 @@ def launch(
         log_file.close()
         raise RuntimeError(f"Could not start `{' '.join(command)}`: {exc}") from exc
 
-    meta = {
-        "job_id": job_id,
-        "operation": operation,
-        "label": label,
+    meta = dict(meta)
+    meta.update({
         "state": RUNNING,
-        "bills": bills,
-        "command": " ".join(shlex.quote(c) for c in command),
-        "cwd": str(cwd),
         "pid": proc.pid,
         "started_at": _now(),
-        "ended_at": None,
-        "exit_code": None,
-        "requested_by": requested_by,
         "monitored_by": os.getpid(),
-        "log_file": str(_log_path(job_id)),
         "detail": None,
-    }
-    with _LOCK:
-        _write_meta(meta)
+    })
+    _write_meta(meta)
 
     threading.Thread(
         target=_monitor, args=(job_id, proc, log_file), name=f"monitor-{job_id}", daemon=True
@@ -373,6 +496,17 @@ def cancel(job_id: str) -> dict:
                 "state": meta["state"],
                 "detail": "Already finished; nothing to cancel.",
             }
+        # A job still in the queue has no process to kill, so it is simply dropped.
+        # Worth handling first: taskkill on its null pid would otherwise fail and
+        # report the cancellation as unsuccessful.
+        if meta.get("state") == QUEUED:
+            meta["state"] = CANCELLED
+            meta["ended_at"] = _now()
+            meta["detail"] = "Cancelled before it started. Nothing ran, nothing spent."
+            _write_meta(meta)
+            return {"job_id": job_id, "state": CANCELLED, "killed": False,
+                    "detail": meta["detail"]}
+
         pid = int(meta.get("pid") or 0)
 
         # Record the intent BEFORE killing anything. Killing first loses a race: the

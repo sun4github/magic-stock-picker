@@ -131,28 +131,7 @@ def _launch(
     if op.bills and not confirm:
         return _preview(op, argv, cost_override)
 
-    if op.bills:
-        # Billed work is serialised. Two overlapping runs share one rolling daily
-        # ceiling and one log directory, and with several agents able to call this
-        # server there is nothing else stopping them from starting at once.
-        busy = jobs.running_billed_job()
-        if busy:
-            return {
-                "status": "refused",
-                "reason": "Another billed operation is already running.",
-                "running_job": {
-                    "job_id": busy["job_id"],
-                    "operation": busy["operation"],
-                    "label": busy.get("label"),
-                    "started_at": busy.get("started_at"),
-                    "requested_by": busy.get("requested_by"),
-                },
-                "detail": (
-                    "Billed operations run one at a time: they share the rolling daily "
-                    "spend ceiling and would interleave their run logs. Wait for it, or "
-                    "stop it with job_cancel."
-                ),
-            }
+    busy = jobs.running_billed_job() if op.bills else None
 
     try:
         meta = jobs.launch(
@@ -167,21 +146,45 @@ def _launch(
         return {"status": "error", "error": str(exc)}
 
     cost = cost_override or op.cost_usd
-    return {
-        "status": "started",
+    result = {
+        "status": "queued" if meta["state"] == jobs.QUEUED else "started",
         "job_id": meta["job_id"],
         "operation": op_key,
         "label": meta["label"],
         "command": meta["command"],
-        "started_at": meta["started_at"],
         "estimated_cost": catalog.format_cost(cost),
         "typical_duration": catalog.format_duration(op.minutes),
         "writes": list(op.writes),
-        "next_step": (
+    }
+
+    if meta["state"] == jobs.QUEUED:
+        position = jobs.queue_position(meta["job_id"]) or 1
+        result.update({
+            "queued_at": meta["queued_at"],
+            "queue_position": position,
+            "waiting_behind": {
+                "job_id": busy["job_id"],
+                "label": busy.get("label"),
+                "started_at": busy.get("started_at"),
+            } if busy else None,
+            "detail": (
+                f"Accepted and queued at position {position}. Billed operations run "
+                f"one at a time - they share the rolling daily spend ceiling and would "
+                f"otherwise interleave their run logs. This starts by itself as soon as "
+                f"the one ahead finishes; nothing needs re-submitting."
+            ),
+            "next_step": (
+                f"Poll job_status('{meta['job_id']}'). It reports QUEUED with its "
+                f"position until it starts, then RUNNING."
+            ),
+        })
+    else:
+        result["started_at"] = meta["started_at"]
+        result["next_step"] = (
             f"Poll job_status('{meta['job_id']}'). Expect it to take "
             f"{catalog.format_duration(op.minutes)}; job_log shows progress meanwhile."
-        ),
-    }
+        )
+    return result
 
 
 def _ticker(value: str) -> str:
@@ -318,6 +321,11 @@ def describe_capabilities(topic: str = "overview") -> dict:
                 "job_cancel": "Stop a running job and its whole process tree.",
             },
             "states": {
+                jobs.QUEUED: (
+                    "Accepted, waiting for the billed slot. Starts by itself when the "
+                    "job ahead finishes - do not re-submit. job_status reports its "
+                    "position; job_cancel drops it before it spends anything."
+                ),
                 jobs.RUNNING: "In flight.",
                 jobs.SUCCEEDED: "Exited 0.",
                 jobs.FAILED: "Exited non-zero - read job_log for why.",
@@ -370,8 +378,11 @@ def describe_capabilities(topic: str = "overview") -> dict:
                 "and a dry-run sweep) need no confirmation."
             ),
             "serialisation": (
-                "One billed operation at a time, server-wide. A second is refused and "
-                "told which job is holding the slot."
+                "One billed operation at a time, server-wide. A second is QUEUED, not "
+                "refused: it returns a job id and a queue position and starts by itself "
+                "when the one ahead finishes, so two questions asked seconds apart are "
+                f"both answered. The queue holds {jobs.MAX_QUEUE_DEPTH}; beyond that a "
+                "submission is refused, because every entry is money waiting to be spent."
             ),
             "budget_ceilings": (
                 "The pipeline's own guards still apply underneath this layer: a per-run "
@@ -987,6 +998,14 @@ def job_status(job_id: str) -> dict:
         }
     if meta["state"] == jobs.FAILED:
         meta["hint"] = f"Read job_log('{job_id}') for the traceback or the failing step."
+    elif meta["state"] == jobs.QUEUED:
+        position = jobs.queue_position(job_id)
+        meta["queue_position"] = position
+        meta["hint"] = (
+            f"Waiting for the billed slot at position {position}. It starts on its own "
+            f"when the job ahead finishes - nothing to re-submit. job_cancel drops it "
+            f"before it spends anything."
+        )
     elif meta["state"] == jobs.RUNNING:
         meta["hint"] = f"Still running. job_log('{job_id}') shows current progress."
     elif meta["state"] == jobs.SUCCEEDED:
@@ -1043,6 +1062,11 @@ def job_list(limit: int = 20, state: Optional[str] = None) -> dict:
             if billed
             else "free - a billed operation can start now"
         ),
+        "queue": [
+            {"position": i, "job_id": m["job_id"], "label": m.get("label"),
+             "queued_at": m.get("queued_at"), "requested_by": m.get("requested_by")}
+            for i, m in enumerate(jobs.queued_jobs(), start=1)
+        ],
     }
 
 
@@ -1368,6 +1392,16 @@ def main() -> None:
 
     if not SRC_DIR.exists():
         raise SystemExit(f"Expected the pipeline at {SRC_DIR}, but it is not there.")
+
+    # A queued job waits on disk, so one submitted before a restart is still waiting
+    # after it. Nothing else would ever start it: the dispatcher normally runs when a
+    # job finishes, and the job it was queued behind died with the previous process.
+    resumed = jobs.dispatch()
+    if resumed:
+        logger.info("Resumed queued job %s (%s)", resumed["job_id"], resumed.get("label"))
+    waiting = len(jobs.queued_jobs())
+    if waiting:
+        logger.info("%d job(s) waiting for the billed slot.", waiting)
 
     token = args.token or os.environ.get("MSP_MCP_TOKEN")
 

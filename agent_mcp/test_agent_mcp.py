@@ -26,7 +26,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 _TMP = tempfile.mkdtemp(prefix="agent_mcp_tests_")
 os.environ["MSP_MCP_JOB_DIR"] = _TMP
 
+# Printed BEFORE the import, and flushed, because that import is the slowest thing
+# in the file - `mcp` pulls in pydantic, starlette, uvicorn and httpx, about a
+# thousand modules. On a machine whose antivirus is scanning every file on read it
+# can take minutes, and with the banner printed afterwards the suite looks hung when
+# it is only loading. One line here is the difference between "it does nothing" and
+# "it is still importing".
+print("agent_mcp test suite: importing (this is the slow part)...", flush=True)
+_IMPORT_STARTED = time.time()
+
 from agent_mcp import catalog, jobs, library, server  # noqa: E402
+
+print(f"  imports done in {time.time() - _IMPORT_STARTED:.1f}s", flush=True)
 
 PASSED, FAILED = [], []
 
@@ -194,7 +205,7 @@ def test_log_filtering() -> None:
 
 def test_cancellation() -> None:
     print("\nCancellation")
-    meta = _launch_trivial(seconds=60)
+    meta = _launch_trivial(seconds=20)
     time.sleep(0.5)
     result = jobs.cancel(meta["job_id"])
     check("cancel reports CANCELLED", result.get("state") == jobs.CANCELLED, f"{result}")
@@ -211,13 +222,37 @@ def test_cancellation() -> None:
 
 def test_billed_job_lock() -> None:
     print("\nBilled-job serialisation")
-    holder = _launch_trivial(seconds=30, bills=True)
+    holder = _launch_trivial(seconds=8, bills=True)
     time.sleep(0.3)
 
-    refused = server.start_ticker_analysis(ticker="CROX", confirm=True)
-    check("a second billed job is refused", refused.get("status") == "refused", f"{refused}")
-    check("the refusal names the holding job",
-          refused.get("running_job", {}).get("job_id") == holder["job_id"])
+    # Queued, not refused. Two questions arriving seconds apart over Telegram are
+    # both things the person wants answered.
+    second = server.start_ticker_analysis(ticker="CROX", confirm=True)
+    check("a second billed job is queued, not refused",
+          second.get("status") == "queued", f"{second.get('status')}")
+    check("the queued job reports its position", second.get("queue_position") == 1,
+          f"{second.get('queue_position')}")
+    check("the queued job names what it waits behind",
+          (second.get("waiting_behind") or {}).get("job_id") == holder["job_id"])
+    check("a queued job still gets a job id", bool(second.get("job_id")))
+
+    # Submitted immediately after `second`, i.e. within the same second. Ordering
+    # must still be correct: this is the ordinary case when two messages arrive back
+    # to back, and a second-resolution timestamp made it a coin toss.
+    third = server.start_ticker_analysis(ticker="MSFT", confirm=True)
+    check("a third queues behind the second", third.get("queue_position") == 2,
+          f"{third.get('queue_position')}")
+
+    listing = server.job_list()
+    check("job_list exposes the queue in order",
+          [q["job_id"] for q in listing["queue"]] == [second["job_id"], third["job_id"]],
+          f"{[q['job_id'] for q in listing['queue']]}")
+    check("positions are distinct", len({q["position"] for q in listing["queue"]}) == 2,
+          f"{[q['position'] for q in listing['queue']]}")
+    check("same-second submissions get distinct timestamps",
+          jobs.status(second["job_id"])["queued_at"]
+          != jobs.status(third["job_id"])["queued_at"],
+          f"{jobs.status(second['job_id'])['queued_at']}")
 
     # Free work must not be blocked by the billed lock - it costs nothing and waiting
     # on an hour-long pipeline to read a snapshot would be absurd.
@@ -226,9 +261,89 @@ def test_billed_job_lock() -> None:
     if free.get("status") == "started":
         jobs.cancel(free["job_id"])
 
+    # Cancelling a queued job must not try to kill a pid it does not have.
+    dropped = jobs.cancel(third["job_id"])
+    check("a queued job cancels without a process", dropped.get("state") == jobs.CANCELLED,
+          f"{dropped}")
+    check("cancelling a queued job spends nothing",
+          "nothing spent" in (dropped.get("detail") or ""), f"{dropped.get('detail')}")
+    check("cancelling reorders the queue", len(jobs.queued_jobs()) == 1)
+
+    # CRITICAL: `second` is a real `main.py CROX` command. Before the queue existed a
+    # second billed submission was REFUSED, so nothing was ever created and these
+    # assertions cost nothing. Now it is queued - and freeing the slot would DISPATCH
+    # it, running a genuine $0.37-0.55 analysis from the test suite. Drop it first.
+    # Nothing in this file may leave a real pipeline command reachable by the
+    # dispatcher; that is what `_launch_trivial` is for.
+    jobs.cancel(second["job_id"])
+    check("no real pipeline command is left queued", not jobs.queued_jobs(),
+          f"{[m['label'] for m in jobs.queued_jobs()]}")
+
+    # The dispatch path itself is exercised with a harmless command instead.
+    waiter = _launch_trivial(seconds=1, bills=True)
+    check("the stand-in queues behind the holder",
+          jobs.status(waiter["job_id"])["state"] == jobs.QUEUED)
+
     jobs.cancel(holder["job_id"])
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        if jobs.status(waiter["job_id"])["state"] != jobs.QUEUED:
+            break
+        time.sleep(0.2)
+    check("the queued job starts when the slot frees",
+          jobs.status(waiter["job_id"])["state"] in (jobs.RUNNING, jobs.SUCCEEDED),
+          f"{jobs.status(waiter['job_id'])['state']}")
+
+    _await_terminal(waiter["job_id"])
+    check("the slot frees once it finishes", jobs.running_billed_job() is None)
+
+
+def test_queue_drains_in_order() -> None:
+    print("\nQueue drains in order")
+    a = _launch_trivial(seconds=2, bills=True)
+    time.sleep(0.3)
+    b = _launch_trivial(seconds=2, bills=True)
+    c = _launch_trivial(seconds=2, bills=True)
+
+    check("only the first runs", jobs.status(a["job_id"])["state"] == jobs.RUNNING)
+    check("the rest wait", [jobs.status(j["job_id"])["state"] for j in (b, c)]
+          == [jobs.QUEUED, jobs.QUEUED])
+
+    deadline = time.time() + 40
+    while time.time() < deadline:
+        if all(jobs.status(j["job_id"])["state"] in jobs.TERMINAL_STATES for j in (a, b, c)):
+            break
+        time.sleep(0.3)
+
+    states = [jobs.status(j["job_id"])["state"] for j in (a, b, c)]
+    check("every queued job eventually ran", states == [jobs.SUCCEEDED] * 3, f"{states}")
+    check("each produced its own output",
+          all("working" in jobs.read_log(j["job_id"])["log"] for j in (a, b, c)))
+
+    # The whole point of serialising: they must not have overlapped.
+    sa, sb, sc = (jobs.status(j["job_id"]) for j in (a, b, c))
+    check("they never overlapped",
+          sb["started_at"] >= sa["ended_at"] and sc["started_at"] >= sb["ended_at"],
+          f"{sa['ended_at']} / {sb['started_at']} / {sb['ended_at']} / {sc['started_at']}")
+
+
+def test_queue_depth_limit() -> None:
+    print("\nQueue depth limit")
+    holder = _launch_trivial(seconds=8, bills=True)
+    time.sleep(0.3)
+    filled = [_launch_trivial(seconds=1, bills=True) for _ in range(jobs.MAX_QUEUE_DEPTH)]
+    check("the queue fills to its limit", len(jobs.queued_jobs()) == jobs.MAX_QUEUE_DEPTH,
+          f"{len(jobs.queued_jobs())}")
+
+    overflow = server.start_ticker_analysis(ticker="CROX", confirm=True)
+    check("beyond the limit is refused rather than queued",
+          overflow.get("status") == "error", f"{overflow.get('status')}")
+    check("the refusal explains the limit",
+          "queued" in (overflow.get("error") or "").lower(), f"{overflow.get('error')}")
+
+    for job in filled + [holder]:
+        jobs.cancel(job["job_id"])
     time.sleep(0.5)
-    check("the slot frees on cancellation", jobs.running_billed_job() is None)
 
 
 def test_job_listing() -> None:
@@ -411,6 +526,8 @@ def main() -> int:
     test_log_filtering()
     test_cancellation()
     test_billed_job_lock()
+    test_queue_drains_in_order()
+    test_queue_depth_limit()
     test_job_listing()
     test_library()
     test_report_windowing()

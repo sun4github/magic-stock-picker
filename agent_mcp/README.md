@@ -56,6 +56,31 @@ it:
 
 Then ask the client to call **`describe_capabilities`** — it explains the rest.
 
+## Things to say to it
+
+Written as you would actually type them to an agent connected to this server. The
+agent picks the tool; these are here to show what the surface is good for.
+
+| What you say | What it does |
+| :--- | :--- |
+| *"What can the stock picker do?"* | `describe_capabilities` — the map, including what each operation costs |
+| *"Analyse NVDA and email me the reports"* | `start_ticker_analysis(ticker="NVDA", email_report=True, confirm=True)` — ~$0.40, 2–5 min, reports arrive as attachments |
+| *"What did the last screen turn up?"* | `get_rankings` — free, instant, no run needed |
+| *"Read me the verdict on CROX"* | `read_report(ticker="CROX", kind="final")` |
+| *"Is there a buy case for MRVL yet?"* | `read_report(ticker="MRVL", kind="buy_case")` |
+| *"Has anything on my watchlist triggered?"* | `start_buy_check_sweep(dry_run=True)` first — free — then `confirm=True` |
+| *"Should I still hold CROX?"* | `start_sell_check(ticker="CROX", run_id=…, confirm=True)` |
+| *"How's that NVDA analysis going?"* | `job_status` / `job_log` |
+| *"Stop that run"* | `job_cancel` — work already finished is kept |
+| *"Refresh the screen"* | `start_screen` — free, 20–30 min |
+
+Two phrasings worth having in muscle memory:
+
+- **"…and email me the reports"** is the one that matters when you are away from the
+  machine. Without it you get a job id, which is not an answer you can read on a phone.
+- **"What would that cost?"** — every billed tool called without `confirm=True`
+  returns a costed preview and spends nothing, so an agent can always check first.
+
 ## The two rules
 
 Everything else here follows from these.
@@ -175,14 +200,35 @@ start a run and never read what the run produced.
 The pipeline's own guards still apply underneath all of this: the per-run and rolling
 24-hour ceilings from `config.yaml` halt a run cleanly rather than overspending.
 
-## One billed job at a time
+## One billed job at a time — and a queue behind it
 
-Billed operations are serialised server-wide. A second is refused and told which job
-holds the slot. They share one rolling daily ceiling and one run-log directory, and
-once several agents can call this server, two overlapping pipeline runs stops being a
-theoretical problem — an expensive one, whose logs interleave. Free operations are
-never blocked; waiting on an hour-long pipeline to read a price snapshot would be
-absurd.
+Billed operations are serialised server-wide: exactly one runs at a time. They share
+one rolling daily spend ceiling and one run-log directory, and once several agents can
+call this server, two overlapping pipeline runs stops being a theoretical problem — an
+expensive one, whose logs interleave.
+
+**A second request is queued, not refused.** Ask about two tickers a few seconds apart
+over Telegram and both are accepted; the second returns immediately with a job id and
+its position, and starts by itself when the first finishes. Nothing needs
+re-submitting, and the caller does not have to invent a retry loop.
+
+```
+start_ticker_analysis("AAPL", confirm=True)  ->  status: started,  job_id: ticker-…-a1b2c3
+start_ticker_analysis("MSFT", confirm=True)  ->  status: queued,   queue_position: 1
+start_ticker_analysis("NVDA", confirm=True)  ->  status: queued,   queue_position: 2
+```
+
+`job_status` reports `QUEUED` with the position until it starts, then `RUNNING`.
+`job_list` shows the whole queue in order, with who asked for each. `job_cancel` on a
+queued job drops it before it spends anything — there is no process to kill.
+
+Free operations are never blocked by any of this; waiting on an hour-long pipeline to
+read a price snapshot would be absurd.
+
+Two limits worth knowing. The queue holds **8** jobs; beyond that a submission is
+refused rather than accepted, because every entry is real money waiting to be spent.
+And the queue only advances while the server is running — see
+[what closing the window does](#the-three-ways-to-run-it-and-what-closing-the-window-does).
 
 ## Over the network
 
@@ -317,18 +363,40 @@ curl http://localhost:8765/health
 {"status":"ok","server":"magic-stock-picker"}
 ```
 
-Two things worth knowing about running it this way:
-
-- **Closing the terminal stops the server.** If you want it to survive that, add
-  `--stateless` and run it with `start /min` on Windows or `nohup … &` on Linux — or
-  see the auto-start options below.
-- **Stopping the server does not stop a run.** Jobs are detached, so a pipeline
-  started through a tool keeps going and finishes normally. What is lost is the
-  monitor watching it, so its job reads `ORPHANED` afterwards rather than
-  `SUCCEEDED` — the log tail tells you how it actually ended.
-
 Bind `127.0.0.1` instead of `0.0.0.0` if the client is on this same machine; the
 server then refuses connections from the network entirely and needs no firewall rule.
+
+### The three ways to run it, and what closing the window does
+
+| | Command | Logs | Survives closing the window? |
+| :--- | :--- | :--- | :--- |
+| **Foreground** | `python -m agent_mcp.server --transport http --host 0.0.0.0 --port 8765` | in the window, live | **No** |
+| **Minimized** | `start "" /min python -m agent_mcp.server --transport http --host 0.0.0.0 --port 8765 --stateless` | in its own minimized window | No — closing *that* window stops it |
+| **Background (hidden)** | `python tools/mcp_service.py start` | `logs\mcp_server.log` | **Yes** |
+
+On `start /min`, the empty `""` is the window **title**. `start` treats a lone quoted
+argument as a title, so leaving it out makes it swallow the first part of your
+command — the classic footgun with this builtin.
+
+On Linux the equivalent of the third row is `nohup python -m agent_mcp.server
+--transport http --host 0.0.0.0 --stateless >> logs/mcp_server.log 2>&1 &`.
+
+**What closing the window actually does.** Windows sends `CTRL_CLOSE_EVENT` to every
+process attached to that console; they get roughly five seconds, then they are killed.
+The server is attached, so it dies. Two consequences that are easy to get backwards:
+
+- **The server dying does not stop a run in flight.** Analyses are launched
+  *detached* — no console of their own to lose — so a pipeline started through a tool
+  keeps going, finishes, writes its reports, and sends its email if one was asked for.
+- **What you lose is the watcher, not the work.** The thread that would have recorded
+  the exit code died with the server, so that job reads `ORPHANED` afterwards rather
+  than `SUCCEEDED`. The report is on disk either way; `job_log` shows how it ended.
+
+**A queued job is the exception, and it is worth knowing.** A job still waiting for
+its turn has no process yet, so there is nothing detached to survive. It stays
+`QUEUED` on disk and is picked up the next time the server starts — which the server
+does automatically at startup, logging `Resumed queued job …`. So nothing is lost, but
+nothing progresses either while the server is down.
 
 ### Starting it automatically (optional, and the fiddly part)
 
