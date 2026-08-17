@@ -1286,12 +1286,33 @@ def _serve_http(host: str, port: int, token: Optional[str], stateless: bool = Fa
     if configured == "*":
         # No way to predict the hostname a tunnel will invent
         # (xyz.trycloudflare.com), and the bearer token is the real gate here.
-        allowed, disable_rebinding = [], True
+        allowed, disable_rebinding, why = [], True, "MSP_MCP_ALLOWED_HOSTS=*"
     elif configured:
         allowed = [h.strip() for h in configured.split(",") if h.strip()]
-        disable_rebinding = False
+        disable_rebinding, why = False, "MSP_MCP_ALLOWED_HOSTS"
+    elif token and host not in _LOOPBACK:
+        # An authenticated bind on a real interface. Host checking is OFF here, and
+        # that is a deliberate default rather than a shortcut.
+        #
+        # DNS-rebinding protection exists to stop a malicious WEB PAGE driving a
+        # victim's browser at an unauthenticated server on their own machine. The
+        # browser will attach cookies but cannot invent a bearer token, so once a
+        # token is required that attack is already dead and the Host allowlist is
+        # defending a door that is bolted.
+        #
+        # What it does cost is real. The allowlist can only be a SNAPSHOT of this
+        # machine's addresses taken at startup, and those change: a laptop joins
+        # Wi-Fi after boot, a VPN comes up, Hyper-V renumbers. A server started
+        # before an interface appears rejects that interface's address for the rest
+        # of its life, with "Invalid Host header" and no hint that the fix is a
+        # restart. That is a confusing failure traded for no security.
+        #
+        # Set MSP_MCP_ALLOWED_HOSTS to an explicit list to turn it back on.
+        allowed, disable_rebinding, why = [], True, "authenticated non-loopback bind"
     else:
-        allowed, disable_rebinding = _local_host_names(host), False
+        # Loopback, or no token: keep the protection. This is the case it was
+        # designed for, and the address list cannot go stale for 127.0.0.1.
+        allowed, disable_rebinding, why = _local_host_names(host), False, "derived from local addresses"
 
     mcp.settings.host = host
     mcp.settings.port = port
