@@ -134,8 +134,23 @@ never quote a cost or a precondition that differs from the one actually enforced
 ### Getting the answer by email
 
 `start_ticker_analysis(ticker, email_report=True, confirm=True)` mails everything the
-run produced — the final report, the sale advisory, and the buy case if the verdict
-is `Watch` — to the address configured on the host.
+run produced, to the address configured on the host:
+
+| Attachment | Comes from |
+| :--- | :--- |
+| `<T>_Final_Report_<Verdict>.md` | `reports/` |
+| `<T>_Bear_Case.md` | **the database** — never written to disk |
+| `<T>_Bull_Case.md` | **the database** — never written to disk |
+| `<T>_Sale_Advisory.md` | `reports/` |
+| `<T>_Buy_Case.md` | `reports/`, `Watch` verdicts only |
+
+The bear and bull cases are the only run artefacts the pipeline does not write to
+`reports/` — it stores them in `agent_outputs`, which is where the web viewer reads
+them from. An email assembled from the filesystem alone therefore omits the two
+documents containing the actual *argument*: the verdict is the conclusion, these are
+the reasoning. They are fetched by the run id printed in the report's own header, so
+they are the pair the analyst was weighing rather than whatever is newest for that
+ticker. If the database is unreachable the rest of the email still goes.
 
 This is the mode for the case the whole HTTP transport exists to serve: someone asks
 you about a ticker while you are nowhere near the machine, an agent runs the analysis
