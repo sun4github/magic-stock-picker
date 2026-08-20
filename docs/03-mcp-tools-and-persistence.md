@@ -160,7 +160,7 @@ flowchart LR
     end
     A3 -. embed=True .-> Embed["get_embedding()\npersistence/embeddings.py:50"]
     A4 -. embed always .-> Embed
-    Embed --> GenAI[("google.genai\ngemini-embedding-001")]
+    Embed --> Ollama[("Ollama (local)\nnomic-embed-text")]
     A1 --> FMP[("FMP /stable/*")]
     A1 --> EDGAR[("SEC EDGAR\nvia edgar-tools")]
     A2 --> Tavily[("Tavily search")]
@@ -170,29 +170,39 @@ flowchart LR
 ## Embeddings, `persistence/embeddings.py:1-98`
 
 Not a `@mcp.tool()` itself — `get_embedding` is a plain helper called from
-inside `db_store_agent_output` and `db_store_final_report`. Its external
-source is **Google's Generative AI API** (`google.genai`), the same provider
-as the reasoning agents' LLM calls but a different endpoint/model
-(`embed_content` vs. `generate_content`), so it needs the same
-`GOOGLE_API_KEY` the agents use.
+inside `db_store_agent_output` and `db_store_final_report`. Its source is a
+**local Ollama server** running `nomic-embed-text`, not a third-party API — no
+key, no per-call cost, no data leaving the machine. This is a change from the
+reasoning agents (Bear/Bull/Analyst/Sale Advisor), which still call Gemini and
+still need `GOOGLE_API_KEY`.
 
-`get_embedding(text)` (`persistence/embeddings.py:50`) calls `google.genai`'s
-`embed_content` with `model="gemini-embedding-001"` and
-`output_dimensionality=768` (to match the schema's `vector(768)` columns). On
-any failure (missing `GOOGLE_API_KEY`, API error, wrong dimension count) it
-logs an ERROR — the first 3 per process in full, then suppressed — and
-returns a **zero vector**, so a row that failed to embed is still stored but
-silently unsearchable by `db_search_historical_reports`. This replaced an
-earlier bug where every embedding call failed silently
-(`google.generativeai`, an uninstalled legacy SDK, wrapped in a bare
-`except: pass`) — see the docstring at `persistence/embeddings.py:50-62` and
+`get_embedding(text)` (`persistence/embeddings.py:50`) POSTs to
+`{OLLAMA_EMBED_API_BASE}/api/embed` (default `http://localhost:11434`) with
+`model="nomic-embed-text"` and `truncate=true`. The env var name is
+deliberately distinct from the critic's `OLLAMA_API_BASE`/`OLLAMA_API_KEY`
+(see [09-critic-and-refinement-loop.md](09-critic-and-refinement-loop.md)),
+which point LiteLLM at Ollama's cloud service rather than the local instance
+embeddings need. `nomic-embed-text` natively outputs 768 dims, matching the
+schema's `vector(768)` columns without needing a dimensionality pin.
+`truncate=true` asks Ollama to cut input down to what the model's 2048-token
+context actually holds rather than erroring on overflow. On
+any failure (Ollama not running, wrong dimension count, etc.) it logs an ERROR
+— the first 3 per process in full, then suppressed — and returns a **zero
+vector**, so a row that failed to embed is still stored but silently
+unsearchable by `db_search_historical_reports`. This behavior predates the
+Ollama switch: the same fail-loud pattern replaced an earlier bug where every
+embedding call failed silently (`google.generativeai`, an uninstalled legacy
+SDK, wrapped in a bare `except: pass`) — see the docstring at
+`persistence/embeddings.py:50-73` and
 [agent_architecture.md §5B "Embeddings were silently broken"](../src/specs/agent_architecture.md).
 
-`EMBEDDING_USAGE` (`persistence/embeddings.py:30`) is a module-level counter of
+`EMBEDDING_USAGE` (`persistence/embeddings.py:32`) is a module-level counter of
 characters/requests, drained by `drain_embedding_usage()`
-(`persistence/embeddings.py:33`) — `main.py`'s `_collect_embedding_usage` calls this
-after each ticker to fold embedding cost into the per-ticker total (embeddings
-carry no usage metadata from the API, so cost is approximated at 4 chars/token).
+(`persistence/embeddings.py:35`) — `main.py`'s `_collect_embedding_usage` calls this
+after each ticker to fold embedding usage into the per-ticker total. Since
+Ollama is local and free, this now feeds a request-count line in the usage log
+rather than a real dollar cost (`EMBED_PRICE_INPUT_PER_1M` is 0 in
+`specs/config.yaml`).
 
 ## Where to look next
 

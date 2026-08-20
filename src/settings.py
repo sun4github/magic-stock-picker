@@ -71,7 +71,7 @@ CRITIC_MODEL = _critic_model or AGENT_MODEL
 _pricing = config.get("llm_pricing", {})
 MODEL_PRICES = _pricing.get("models", {}) or {}
 _embed_cfg = _pricing.get("embedding", {}) or {}
-EMBED_MODEL = _embed_cfg.get("model", "text-embedding-004")
+EMBED_MODEL = _embed_cfg.get("model", "nomic-embed-text")
 EMBED_PRICE_INPUT_PER_1M = float(_embed_cfg.get("input_usd_per_1m", 0.0))
 
 # Models seen at runtime with no configured price, and unconfirmed prices already
