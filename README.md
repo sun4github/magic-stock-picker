@@ -1200,6 +1200,45 @@ The viewer is now permanently available at `http://<raspberry-pi-ip>:8080`. It
 auto-restarts on failure and starts automatically after a reboot. (For heavier
 use, install `gunicorn` and set `ExecStart=/usr/bin/gunicorn -b 0.0.0.0:8080 app:app`.)
 
+## Driving it from another agent (MCP)
+
+Everything above is the command line, and the command line remains the way this tool
+works. [`agent_mcp/`](agent_mcp/README.md) adds an optional
+[MCP](https://modelcontextprotocol.io) server that exposes the same operations as
+tools, so another agent — Claude Desktop, Claude Code, or something on a different
+machine — can run the screener, analyse a ticker, order a critic review and read the
+reports, without a shell.
+
+```bash
+pip install -r agent_mcp/requirements.txt
+python -m agent_mcp.server
+```
+
+It is a layer **over** the pipeline, not part of it: every tool shells out to the same
+command you would type, from the same directory, with the same flags. Nothing in
+`src/` imports it, and **the CLI behaves exactly as before whether it is running or
+not**. Point a client at it and ask for `describe_capabilities`, which explains the
+rest.
+
+Two things shape the interface:
+
+- **Tools that spend money require `confirm=True`.** Without it they return a costed
+  preview — the exact command, the estimate, what it will write — and spend nothing.
+  A person typing `python main.py` has already decided to spend $13; an agent may be
+  exploring, and cannot be billed for getting it wrong.
+- **`start_*` returns a job id, not a result.** A pipeline run takes about an hour,
+  which no MCP client will wait for. Poll it with `job_status` and `job_log`.
+
+`--no-budget` is deliberately not exposed on any tool, and neither is editing
+`config.yaml` — see [`docs/13-mcp-server.md`](docs/13-mcp-server.md) for that
+reasoning, the network/authentication setup, and why it runs subprocesses rather than
+importing the pipeline.
+
+> **Not to be confused with `src/mcp_server.py`**, which is also an MCP server, one
+> layer down: that one is the *agents'* toolbelt (fetch a filing, read a metric, write
+> a row) used inside a run. This one is the *operator's* — start a run, watch it, read
+> what it produced.
+
 ## Notes
 
 - FMP's legacy `v3`/`v4` endpoints were retired; this project uses the

@@ -187,3 +187,5 @@ reports/
 src/magic_formula_rankings_live.csv
 src/rankings_history/
 magic_formula_rankings_live.csv
+# MCP job store (metadata + captured output for every launched run)
+agent_mcp/.jobs/
