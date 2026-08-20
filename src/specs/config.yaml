@@ -565,17 +565,18 @@ llm_pricing:
       output_usd_per_1m: 0.0
       cached_input_usd_per_1m: 0.0
       confirmed: true
-  # Embeddings ran through paid APIs in order: text-embedding-004 (retired,
-  # 404s), then gemini-embedding-001. Both billed per input token — four
-  # vectors per ticker (bear, bull, sale, final report), previously uncounted.
+  # Embeddings are billed per input token. Four vectors are generated per ticker
+  # (bear, bull, sale, final report), previously uncounted.
   #
-  # Now local: nomic-embed-text via Ollama (see persistence/embeddings.py). No
-  # API key, no network call to a third party, no per-token charge — the rate
-  # below is genuinely 0, not a placeholder awaiting calibration.
+  # NOTE: text-embedding-004 is RETIRED — the current API 404s on it. Calls were
+  # failing silently and every stored vector was zeros, so no embedding SKU has
+  # ever appeared on a bill. gemini-embedding-001 replaces it (3072 dims by
+  # default, pinned to 768 to match the vector(768) schema). The rate below is a
+  # placeholder: re-calibrate once an embedding SKU shows up in Cloud Billing.
   embedding:
-    model: "nomic-embed-text"
-    input_usd_per_1m: 0.0
-    confirmed: true
+    model: "gemini-embedding-001"
+    input_usd_per_1m: 0.15
+    confirmed: false
 
 # Tavily web-search pricing (USD per 1,000 searches) for per-run cost estimates.
 # Tavily bills per credit ($0.008/credit on Pay-as-you-go); an 'advanced' search

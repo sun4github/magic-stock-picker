@@ -41,10 +41,8 @@ CREATE TABLE agent_outputs (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     raw_content TEXT NOT NULL,
     metadata JSONB, -- Stores structured JSON like customer concentration %, P/E, etc.
-    -- nomic-embed-text (local, via Ollama) natively outputs 768 dims, so no
-    -- dimensionality pin is needed. Was gemini-embedding-001 (pinned via
-    -- output_dimensionality, which defaults to 3072); before that
-    -- text-embedding-004, now retired and 404ing on the current API.
+    -- gemini-embedding-001 pinned to 768 dims via output_dimensionality (it defaults
+    -- to 3072). text-embedding-004 is retired and 404s on the current API.
     embedding vector(768)
 );
 

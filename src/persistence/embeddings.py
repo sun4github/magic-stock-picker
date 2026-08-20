@@ -14,8 +14,6 @@ every exported signature across the move.
 import os
 from typing import List
 
-import requests
-
 from mcp_app import logger
 
 
@@ -40,21 +38,10 @@ def drain_embedding_usage() -> dict:
     return snapshot
 
 
-EMBED_MODEL = "nomic-embed-text"
+EMBED_MODEL = "gemini-embedding-001"
 
 
-EMBED_DIMS = 768          # must match vector(768) in sql-schema.sql; nomic-embed-text's
-                          # native output size, so no dimensionality pin is needed
-
-
-# Deliberately NOT `OLLAMA_API_BASE` — that variable is already claimed, in this
-# project's .env, for pointing LiteLLM at Ollama's *cloud* service
-# (`https://ollama.com`, with `OLLAMA_API_KEY`) for the critic's glm-5.2:cloud
-# model (see agents/runtime.py's resolve_model). Embeddings need the local
-# instance instead: no key, nothing leaves the machine. Reusing the chat
-# variable was tried and silently routed embedding calls to the cloud endpoint,
-# which 401s without a model pulled there — hence a separate name.
-OLLAMA_EMBED_API_BASE = os.getenv("OLLAMA_EMBED_API_BASE", "http://localhost:11434")
+EMBED_DIMS = 768          # must match vector(768) in sql-schema.sql
 
 
 _EMBED_FAILURES = {"n": 0}
@@ -63,33 +50,38 @@ _EMBED_FAILURES = {"n": 0}
 def get_embedding(text: str) -> List[float]:
     """Embed text for semantic search over stored reports.
 
-    Runs locally against Ollama's `nomic-embed-text` rather than a paid API: no
-    key, no per-call cost, no network dependency on a third party. Previously this
-    called Gemini's `embed_content`, and before that imported `google.generativeai`
-    (the legacy SDK, not installed here) inside a bare `except: pass`, so every call
-    fell through to a zero vector in complete silence — every embedding written to
-    the database was zeros and similarity search was returning noise. That history
-    is why failures here stay LOUD rather than degrading quietly.
+    Previously this imported `google.generativeai` (the legacy SDK, not installed
+    here) inside a bare `except: pass`, so every call fell through to a zero vector
+    in complete silence. Every embedding written to the database was zeros and
+    similarity search was returning noise. Two fixes: use the SDK the project
+    actually depends on, and make a failure LOUD — a degraded fallback that says
+    nothing is how that went unnoticed.
 
-    `truncate: true` asks Ollama to cut the input down to what the model's context
-    window (2048 tokens) actually holds rather than erroring on overflow — measured
-    empirically: dense numeric/ticker text can hit that limit well under 4000
-    characters, so a client-side char cap alone isn't a reliable guard.
+    `text-embedding-004` is retired (404 on the current API). `gemini-embedding-001`
+    replaces it and defaults to 3072 dimensions, so output_dimensionality is pinned
+    to 768 to match the schema.
     """
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        logger.error("GOOGLE_API_KEY not set — storing a ZERO embedding. "
+                     "Semantic search over this row will not work.")
+        return [0.0] * EMBED_DIMS
     try:
-        payload = text[:20000]
-        response = requests.post(
-            f"{OLLAMA_EMBED_API_BASE}/api/embed",
-            json={"model": EMBED_MODEL, "input": payload, "truncate": True},
-            timeout=30,
+        from google import genai
+        from google.genai import types as genai_types
+
+        payload = text[:10000]
+        client = genai.Client(api_key=api_key)
+        result = client.models.embed_content(
+            model=EMBED_MODEL,
+            contents=payload,
+            config=genai_types.EmbedContentConfig(output_dimensionality=EMBED_DIMS),
         )
-        response.raise_for_status()
-        result = response.json()
-        values = list(result["embeddings"][0])
+        values = list(result.embeddings[0].values)
         if len(values) != EMBED_DIMS:
             raise ValueError(f"expected {EMBED_DIMS} dims, got {len(values)}")
-        # Ollama is free and local, so this is for observability (request/volume
-        # counts in the usage log), not billing — EMBED_PRICE_INPUT_PER_1M is 0.
+        # The embed response carries no usage metadata, so bill from the payload
+        # actually sent; the caller converts characters to tokens.
         EMBEDDING_USAGE["chars"] += len(payload)
         EMBEDDING_USAGE["requests"] += 1
         return values
