@@ -116,10 +116,10 @@ def db_finalize_pipeline_run(
 def db_store_agent_output(run_id: str, ticker: str, agent_type: str, raw_content: str,
                           metadata_json: str, embed: bool = True) -> str:
     """
-    Stores agent output in PostgreSQL. When `embed` is True a text-embedding-004
-    vector is generated for semantic search; pass embed=False for raw provenance
-    rows (e.g. SEC/metrics) to store the text with a NULL embedding and skip the
-    embedding API call.
+    Stores agent output in PostgreSQL. When `embed` is True a nomic-embed-text
+    vector (generated locally via Ollama) is generated for semantic search;
+    pass embed=False for raw provenance rows (e.g. SEC/metrics) to store the
+    text with a NULL embedding and skip the embedding call.
     """
     try:
         embedding = get_embedding(raw_content) if embed else None

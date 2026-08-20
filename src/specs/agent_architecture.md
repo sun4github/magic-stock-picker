@@ -808,7 +808,7 @@ erDiagram
 
 ### B. Database MCP Tools
 1. `db_store_agent_output(run_id, ticker, agent_type, raw_content, metadata_json, embed=True)`:
-   - Inserts into `agent_outputs`. When `embed=True`, generates a `gemini-embedding-001` vector (pinned to 768 dims) on `raw_content`. **SEC/metrics are stored with `embed=False`** (raw provenance, low search value); **bear/bull/sale cases are embedded** for semantic search.
+   - Inserts into `agent_outputs`. When `embed=True`, generates a `nomic-embed-text` vector (768 dims, local via Ollama) on `raw_content`. **SEC/metrics are stored with `embed=False`** (raw provenance, low search value); **bear/bull/sale cases are embedded** for semantic search.
 2. `db_store_final_report(run_id, ticker, verdict, markdown_report)`:
    - Normalizes the verdict to `BUY`/`WATCH`/`AVOID` (default `WATCH`), embeds the report, and inserts into `final_reports`.
 3. `db_store_ticker_run(run_id, ticker, company_name, verdict)`:
@@ -880,12 +880,14 @@ confirms both the rates and the token accounting. Never treat a same-day export 
 the day's total: `calibrate_pricing.py` warns when the SKU token counts fall well
 short of what was recorded.
 
-**Embeddings.** Four `text-embedding-004` vectors are generated per ticker
-(`BEAR_CASE`, `BULL_CASE`, `SALE_CASE`, final report). These were billed but never
-counted. `mcp_server.EMBEDDING_USAGE` accumulates payload size and
-`analyze_ticker` drains it via `_collect_embedding_usage`. The API returns no usage
-metadata for embeddings, so tokens are approximated at 4 chars/token — immaterial
-to the total, but counted approximately rather than not at all.
+**Embeddings.** Four `nomic-embed-text` vectors are generated per ticker
+(`BEAR_CASE`, `BULL_CASE`, `SALE_CASE`, final report), run locally via Ollama —
+see "Embeddings moved off Gemini to a local Ollama model" above. Genuinely free,
+so this line contributes $0 to `_llm_cost`; `mcp_server.EMBEDDING_USAGE` still
+accumulates payload size and `analyze_ticker` still drains it via
+`_collect_embedding_usage`, purely for the request-count line in the usage log.
+(Historically these were `text-embedding-004`, then `gemini-embedding-001`, both
+billed but never counted until this accounting was added.)
 
 **Calibration.** `src/calibrate_pricing.py` reconciles recorded token counts
 against a real bill:
@@ -1038,6 +1040,26 @@ pinned to 768 via `output_dimensionality` to match `vector(768)`), and the fallb
 now logs an ERROR naming the row as unsearchable instead of failing silently.
 **Historical rows still hold zero vectors and need re-embedding to become
 searchable.**
+
+### Embeddings moved off Gemini to a local Ollama model
+
+`get_embedding` no longer calls a paid API at all. It now POSTs to a local
+Ollama server running `nomic-embed-text` (`persistence/embeddings.py`) — no
+`GOOGLE_API_KEY` involved, no per-call cost, nothing leaves the machine.
+`nomic-embed-text` natively outputs 768 dims, so unlike `gemini-embedding-001`
+there is no `output_dimensionality` pin to get right.
+
+The reasoning agents (Bear, Bull, Analyst, Sale Advisor) are unaffected — they
+still run on Gemini and still need `GOOGLE_API_KEY`. Only the embedding calls
+moved.
+
+`specs/config.yaml`'s `llm_pricing.embedding` block now prices
+`nomic-embed-text` at `$0/1M input tokens, confirmed: true` — not a placeholder
+awaiting a Cloud Billing SKU, but a genuinely free local call. Existing rows
+embedded under `gemini-embedding-001` are not automatically re-embedded; they
+remain searchable (their vectors are still valid 768-dim embeddings), but a
+similarity search now mixes vectors from two different embedding spaces unless
+those rows are backfilled through `nomic-embed-text` too.
 
 ---
 

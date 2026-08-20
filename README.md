@@ -368,23 +368,47 @@ That refreshes the rankings CSV and prints the gate breakdown, so you can see ex
 which cut moved and how many candidates survived — for free. Only then run
 `python src/main.py --from-csv`, which is the billed part.
 
-## Requirements
+## Dependencies
 
-- **Python 3.10+**
-- **PostgreSQL** with the [`pgvector`](https://github.com/pgvector/pgvector)
-  extension enabled (`CREATE EXTENSION vector;`)
-- API keys / accounts:
-  - **Google AI (Gemini)** — `GOOGLE_API_KEY`. A paid/upgraded key is strongly
-    recommended; the free tier's daily quota (20 requests/day) is exhausted in a
-    single run.
-  - **Financial Modeling Prep (FMP)** — `FMP_API_KEY`. A **Starter** plan or
-    higher (some endpoints used here, like `stable/key-metrics`, `ratios`,
-    `market-capitalization`, are not on the free tier).
-  - **Tavily** — `TAVILY_API_KEY`. Pay-as-you-go recommended for production use
-    (`advanced` search depth = 2 credits/search; each ticker uses ~2
-    searches/run between the Bear and Bull agents).
-  - **SEC EDGAR** — no key required, but SEC requires a descriptive User-Agent
-    string identifying you (`SEC_USER_AGENT`).
+Everything in this section is required to run **Phases A–C and E** (the screener,
+the Bear/Bull/Analyst pipeline, the Sale Advisory, and the Buy Case) — the core
+loop `main.py` runs. Phase D, the opt-in Critic/Reflection loop, adds one more
+requirement of its own; see the second table below.
+
+### Core (every run)
+
+| Dependency | What it's for | Notes |
+| :--- | :--- | :--- |
+| **Python 3.10+** | Runtime | |
+| **PostgreSQL** + [`pgvector`](https://github.com/pgvector/pgvector) | Stores runs, reports, and embeddings | `CREATE EXTENSION vector;` |
+| **Google AI (Gemini)** — `GOOGLE_API_KEY` | Powers the Bear, Bull, Analyst, and Sale Advisor LLM agents | A paid/upgraded key is strongly recommended; the free tier's daily quota (20 requests/day) is exhausted in a single run |
+| **Financial Modeling Prep (FMP)** — `FMP_API_KEY` | Screener universe, fundamentals, analyst consensus, news | Requires a **Starter** plan or higher — some endpoints used here (`stable/key-metrics`, `ratios`, `market-capitalization`) aren't on the free tier |
+| **Tavily** — `TAVILY_API_KEY` | Web search for the Bear/Bull/Sale Advisor agents | Pay-as-you-go recommended for production use (`advanced` search depth = 2 credits/search; each ticker uses ~2 searches/run between the Bear and Bull agents) |
+| **SEC EDGAR** — `SEC_USER_AGENT` | 10-K/10-Q filings | No key, but SEC requires a descriptive User-Agent string identifying you |
+| **[Ollama](https://ollama.com)**, running **locally**, with `nomic-embed-text` pulled (`ollama pull nomic-embed-text`) | Generates the embeddings stored on every `agent_outputs`/`final_reports` row, for semantic search | No API key, nothing leaves your machine — this is a small (274MB) model that runs fine on CPU, no GPU needed. Override the endpoint with `OLLAMA_EMBED_API_BASE` if Ollama isn't on the default `http://localhost:11434` |
+
+### Additional, only if you use the Critic/Reflection loop (Phase D, `refine.py`)
+
+The critic is configured (`agents.critic_model` in `specs/config.yaml`) to run on
+`glm-5.2:cloud` — a *different* model lineage from the Gemini analyst, deliberately,
+so the review doesn't share the analyst's blind spots (see
+[09-critic-and-refinement-loop.md](docs/09-critic-and-refinement-loop.md)). That
+model is routed through the same local Ollama install as embeddings, but reaching
+it needs one of:
+
+- **An Ollama Cloud subscription** — set `OLLAMA_API_BASE=https://ollama.com` and
+  `OLLAMA_API_KEY=...` in `.env`, and Ollama proxies the call to Ollama's hosted
+  `glm-5.2:cloud`/`kimi-k3:cloud`. No local compute needed beyond running Ollama
+  itself.
+- **A powerful local GPU** — repoint `agents.critic_model` at an equivalent model
+  pulled and served entirely locally. `glm-5.2` and `kimi-k3` are large models;
+  running them at usable speed without the cloud tier means real GPU VRAM, not the
+  same CPU-only setup that's enough for `nomic-embed-text`.
+
+This is a separate concern from the embeddings' `OLLAMA_EMBED_API_BASE` — one env
+var can point at the cloud for the critic while the other stays on `localhost` for
+embeddings, and vice versa. Skip this whole section if you never run `refine.py`;
+Phases A–C and E don't touch the critic model at all.
 
 ## Setup
 
@@ -411,6 +435,7 @@ which cut moved and how many candidates survived — for free. Only then run
    DATABASE_URL=postgresql://user:password@host:5432/dbname
    SEC_USER_AGENT="Your Name your.email@example.com"
    GOOGLE_API_KEY=...
+   # OLLAMA_EMBED_API_BASE=http://localhost:11434   # only if not on the default port
    ```
 
 4. **Review `src/specs/config.yaml`** for tunable parameters: how many top
