@@ -534,21 +534,38 @@ WITH lot_pick AS (
        AND v.verdict_stage <> 'POST_CRITIC'
      GROUP BY v.verdict_id
     UNION ALL
-    -- 2. No analysis behind it: the ordinary outside recommendation, joined on
-    --    the natural key its mirror was written with. Lots claimed by half 1 are
-    --    excluded so one purchase is never counted down both paths.
+    -- 2. No run_id to go on: joined on the natural key instead, accepting a
+    --    MANUAL mirror OR an ONDEMAND analysis. The tracker has no 'ONDEMAND'
+    --    lot source — a lot is only ever MANUAL or PIPELINE — so a name analysed
+    --    on demand and then bought is a MANUAL lot pointing at an ONDEMAND
+    --    verdict, and this half has to be able to see it.
+    --
+    --    The date must match EXACTLY. Relaxed to "same ticker", this would marry
+    --    a 2017 AMZN purchase to a 2026 AMZN analysis 3,431 days later.
+    --
+    --    Lots claimed by half 1 are excluded so one purchase is never counted
+    --    down both paths.
     SELECT v.verdict_id, SUM(l.shares * l.buy_price)
       FROM stock_tracker.lots l
       JOIN verdict_log v
-        ON v.source NOT IN ('PIPELINE', 'ONDEMAND')
+        ON v.source <> 'PIPELINE'
        AND v.ticker = l.ticker
        AND v.verdict_date = l.purchase_date
+       AND v.verdict_stage <> 'POST_CRITIC'
      WHERE l.source <> 'PIPELINE'
        AND NOT EXISTS (
              SELECT 1 FROM verdict_log a
               WHERE a.run_id::text = l.run_id
                 AND a.ticker = l.ticker
                 AND a.source IN ('PIPELINE', 'ONDEMAND'))
+       -- Should a mirror and a one-off analysis both sit on this date, the
+       -- ANALYSIS wins: it carries the factors and the prompt version, and
+       -- counting both would attach the same dollars twice.
+       AND (v.source = 'ONDEMAND' OR NOT EXISTS (
+             SELECT 1 FROM verdict_log a2
+              WHERE a2.ticker = l.ticker
+                AND a2.verdict_date = l.purchase_date
+                AND a2.source = 'ONDEMAND'))
      GROUP BY v.verdict_id
 ),
 marked AS (
