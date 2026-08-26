@@ -324,11 +324,16 @@ verdict_ledger:
   # change, so it is stored per-row (verdict_log.benchmark_symbol) as well.
   benchmark_symbol: "SPY"
 
-  # How often the outcome job re-quotes every open subject. Weekly rather than
-  # at fixed 30/90/180/365 horizons: a cron run missed on a horizon date would
-  # lose that datapoint permanently, and over a year a missed run is a certainty.
-  # The horizon marks are derived from age_days at read time instead.
-  snapshot_interval_days: 7
+  # How often the outcome job re-quotes any given subject. The cron itself also
+  # runs daily now (see the crontab in cron/run_outcome_snapshot.py), so this is
+  # set to match it -- every open subject gets a fresh snapshot each day, which
+  # is what feeds a daily dashboard. Raise it (7 for weekly, say) if daily
+  # granularity isn't needed and cutting FMP call volume matters more. Whatever
+  # it's set to, a rolling interval beats fixed 30/90/180/365-day horizons: a
+  # subject missed on a horizon date would lose that datapoint permanently, and
+  # over a year a missed one is a certainty. The horizon marks are derived from
+  # age_days at read time instead.
+  snapshot_interval_days: 1
   # Stop snapshotting a subject after this long. One year is the holding period
   # the strategy actually uses (see magic-stock-tracker's rotation rules), so a
   # verdict older than this has already been acted on one way or the other.

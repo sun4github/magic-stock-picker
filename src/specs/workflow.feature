@@ -349,11 +349,11 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
 
   Scenario: Grade past verdicts by arithmetic, on a schedule, off the analysis machine
     Given verdicts and screened candidates have been recorded
-    When the weekly outcome job runs
-    Then it quotes each subject still inside its tracking window and records the price, the benchmark level, the return and the excess return
+    When the outcome job's cron runs daily
+    Then it quotes each subject still inside its tracking window and due for a fresh snapshot, and records the price, the benchmark level, the return and the excess return
     And it grades names that were screened but never analysed or bought, so the question of whether filtering the screen beat not filtering it has a control group
     And it uses no language model at all, because a model asked to score its own past accuracy will flatter itself where subtraction will not
-    And it takes a snapshot every week rather than at fixed anniversaries, so a missed run costs nothing and a later run catches up
+    And a subject is due on a configurable interval (daily by default, matching the cron) rather than at fixed anniversaries, so a missed run costs nothing and a later run catches up
     And running it twice in one day records one observation, not two
     And it sends no notification, because a price being recorded is not news
 

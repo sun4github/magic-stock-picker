@@ -1,10 +1,18 @@
-"""Weekly price snapshot for every open subject in the verdict ledger.
+"""Price snapshot for every open subject in the verdict ledger, run daily.
 
 Intended to be scheduled externally via crontab, alongside magic-stock-tracker's
 `run_daily_check.py` on the same Raspberry Pi:
 
-    0 18 * * 5 /path/to/magic-stock-picker/.venv/bin/python \
+    0 18 * * * /path/to/magic-stock-picker/.venv/bin/python \
         /path/to/magic-stock-picker/src/cron/run_outcome_snapshot.py
+
+The cron fires every day, and `verdict_ledger.snapshot_interval_days` in
+config.yaml is set to match (1 by default), so every open subject gets a fresh
+price each day — that is what feeds a daily dashboard. The two are still
+independent knobs: raise the interval (7 for weekly, say) if daily granularity
+is not needed and cutting FMP call volume matters more than it does here (see
+"WHY A ROLLING INTERVAL..." below). Either way it costs nothing extra to check
+daily — a subject that is not due yet is skipped without an FMP call.
 
 WHY THIS FILE IMPORTS NOTHING FROM THE REST OF THE REPO
 -------------------------------------------------------
@@ -21,12 +29,14 @@ variables, DATABASE_URL and FMP_API_KEY, and sends no notifications: a price
 being recorded is not news, and an alerting scoreboard would train its reader to
 ignore it.
 
-WHY WEEKLY RATHER THAN AT 30/90/180/365 DAYS
---------------------------------------------
+WHY A ROLLING INTERVAL RATHER THAN AT 30/90/180/365 DAYS
+---------------------------------------------------------
 Fixed horizons lose a datapoint permanently whenever a run is missed on the day
 a horizon falls, and over a year a missed run is a certainty rather than a risk.
-A weekly snapshot costs one batched quote call, survives outages, and lets the
-horizon marks be derived from `age_days` at read time instead of captured.
+A rolling snapshot costs one quote call per due symbol, survives outages, and
+lets the horizon marks be derived from `age_days` at read time instead of
+captured. This is about `snapshot_interval_days`, the per-subject cadence — not
+how often the cron itself fires, which is daily (see module docstring above).
 """
 import json
 import logging
@@ -77,9 +87,9 @@ def preflight() -> None:
     This job runs unattended on a Pi. Without this, a missing DATABASE_URL
     surfaces as `psycopg2.connect(None)` raising something about a missing
     host, and a missing FMP_API_KEY as every quote silently failing — both at
-    18:00 on a Friday, in a log nobody has a reason to open. The cost of a
-    misconfiguration is therefore not one failed run, it is however many weeks
-    pass before somebody notices the scoreboard stopped moving.
+    18:00, in a log nobody has a reason to open. The cost of a misconfiguration
+    is therefore not one failed run, it is however long it takes before
+    somebody notices the scoreboard stopped moving.
     """
     missing = [k for k in ("DATABASE_URL", "FMP_API_KEY") if not os.getenv(k)]
     if not missing:
@@ -123,7 +133,7 @@ FMP_QUOTE_URL = "https://financialmodelingprep.com/stable/quote"
 _DEFAULTS = {
     "enabled": True,
     "benchmark_symbol": "SPY",
-    "snapshot_interval_days": 7,
+    "snapshot_interval_days": 1,
     "track_for_days": 400,
     "external_track_for_days": 2200,
 }
@@ -189,10 +199,10 @@ def _due(cur, cfg: dict) -> tuple:
 
     "Due" means the subject is inside its tracking window and has no snapshot
     within `snapshot_interval_days`. Expressed against the LAST snapshot rather
-    than against a schedule, so a job that misses a week catches up on its next
-    run instead of silently leaving a gap.
+    than against a schedule, so a job that misses a run catches up on its next
+    one instead of silently leaving a gap.
     """
-    interval = int(cfg.get("snapshot_interval_days", 7))
+    interval = int(cfg.get("snapshot_interval_days", 1))
     track_for = int(cfg.get("track_for_days", 400))
     external_track_for = int(cfg.get("external_track_for_days", 2200))
 

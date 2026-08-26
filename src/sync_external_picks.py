@@ -12,12 +12,18 @@ on exactly the same arithmetic as the pipeline's own picks.
 Safe to run repeatedly, and MEANT to run before cron/run_outcome_snapshot.py on
 the same schedule. Put both on one crontab line, in this order:
 
-    0 18 * * 5 cd /path/to/magic-stock-picker && .venv/bin/python \
+    0 18 * * * cd /path/to/magic-stock-picker && .venv/bin/python \
         src/sync_external_picks.py --commit && \
         .venv/bin/python src/cron/run_outcome_snapshot.py
 
 Order matters. The sync is what tells the snapshot job which subjects exist and
-which have finished, so running the snapshot first means a week's delay on both.
+which have finished, so running the snapshot first means a day's delay on both.
+
+Runs DAILY, not weekly. A purchase recorded in the tracker is mirrored into the
+ledger, and a sale settled, within a day instead of waiting up to a week for the
+next scheduled run. This costs nothing extra: the script only calls FMP when
+there is something new to mirror, settle, reprice or unmirror, and still fetches
+the whole date range in ONE call regardless of how many purchases fall in it.
 
 FOUR THINGS IT DOES, AND WHY EACH IS NEEDED
 -------------------------------------------

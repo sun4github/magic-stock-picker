@@ -818,7 +818,7 @@ own** — this tool tracks no positions. One watches the entry conditions it wro
 | Looks at | stored buy cases still on `Watch` | every verdict, and the whole screened list |
 | Uses a model | yes (ADK + Gemini) | **no** — arithmetic only |
 | Needs | the full agent stack | `requests`, `psycopg2`, `pyyaml`, `dotenv` |
-| Suggested schedule | weekly, after the close | weekly, after the close |
+| Suggested schedule | weekly, after the close | daily, after the close |
 | Notifies | yes, when something fires | never |
 | Costs | ~$0.08 per escalated ticker | nothing |
 
@@ -890,9 +890,18 @@ and it changes nothing.
 
 ### The ledger snapshot
 
-In one sentence: **once a week it writes down what every stock the system has ever had
-an opinion on is worth today.** It is a price recorder, and silent by design — a price
-being recorded is not news, so it never notifies.
+In one sentence: **every day it checks what every stock the system has ever had an
+opinion on is worth, and records a fresh price for whatever is due.** It is a price
+recorder, and silent by design — a price being recorded is not news, so it never
+notifies.
+
+The job (`src/cron/run_outcome_snapshot.py`, alongside `src/sync_external_picks.py`
+— see below) now runs daily rather than weekly, and `verdict_ledger.snapshot_interval_days`
+in config is set to match (1 day by default), so every open subject gets a fresh price
+every day — that's what feeds a daily dashboard. The two remain independent knobs:
+raise the interval back to 7 if daily granularity isn't needed and cutting FMP call
+volume matters more. Either way, a subject that isn't due yet costs nothing extra to
+check.
 
 **It has no idea what you own** — this tool tracks no positions at all. What it reads
 is two tables that your *analysis runs* fill:
@@ -914,11 +923,12 @@ row per subject to a third table:
 reads. The two tables above are what the system *thought*; this one is what actually
 happened next.
 
-It appends rather than overwrites, so each subject accumulates a weekly price history
-rather than a single latest value. That is deliberate: a name up 40% at six months and
-flat at twelve is a different story from one that climbed steadily, and a single
-end-point reading cannot tell them apart. It also means a missed week costs nothing —
-the next run simply carries on.
+It appends rather than overwrites, so each subject accumulates a price history rather
+than a single latest value. That is deliberate: a name up 40% at six months and flat
+at twelve is a different story from one that climbed steadily, and a single end-point
+reading cannot tell them apart. It also means a missed run costs nothing — the next
+one, now scheduled daily instead of weekly, catches up within a day rather than a
+week.
 
 **It deliberately prices the names that were rejected, too.** That reads backwards at
 first, and it is the whole point: a record of only the names the analysis liked has
