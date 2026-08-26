@@ -611,7 +611,7 @@ rate_limits:
 
 screening_parameters:
   min_market_cap: 100000000  # $100 Million minimum
-  universe_limit: 2500        # Max companies to pull from the FMP screener universe (raise to capture more mid/small caps)
+  universe_limit: 5000        # Max companies to pull from the FMP screener universe (raise to capture more mid/small caps)
 
   # --- Greenblatt's step-by-step screen ---------------------------------------
   # "The Little Book That Still Beats the Market", step-by-step appendix. These are
@@ -622,9 +622,9 @@ screening_parameters:
   #
   # Set any of these to null to disable that gate.
 
-  # Step 1: "screen for ROA of at least 25%".
-  min_roa: 0.25
-  # Which ROA the 25% hurdle is measured against:
+  # Step 1: "screen for ROA of at least 20%".
+  min_roa: 0.20
+  # Which ROA the 20% hurdle is measured against:
   #   "ebit"       - EBIT / Total Assets. Pre-tax, pre-interest: the same numerator
   #                  as ROC and Earnings Yield, so the whole pipeline stays on one
   #                  basis and ROA vs ROC is an apples-to-apples comparison of
