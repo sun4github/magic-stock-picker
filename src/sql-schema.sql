@@ -194,21 +194,43 @@ CREATE TABLE verdict_log (
     -- question rather than an assumption.
     verdict_stage VARCHAR(16) NOT NULL DEFAULT 'INDEPENDENT'
         CHECK (verdict_stage IN ('INDEPENDENT', 'POST_CRITIC', 'MEMORY')),
-    -- Who made this call. PIPELINE is a verdict this system reasoned its way
-    -- to; anything else is a purchase made on an outside recommendation,
-    -- recorded here so it can be measured on the same arithmetic.
+    -- WHERE THE PICK CAME FROM — which is not the same as who analysed it.
     --
-    -- This is what makes the ledger answer a question it otherwise could not:
-    -- most of the money in this household follows external picks, and without
-    -- a row for them there is nothing to compare the pipeline against except
-    -- the index. External rows carry NULL prompt_version and git_sha (no
-    -- prompt produced them) and usually no verdict_basis rows (no factors were
-    -- articulated) — both are expected, not missing data.
+    --   PIPELINE — the SCREEN chose this name and the agents analysed it. These
+    --              are the only rows with a `run_universe` control group behind
+    --              them, because only a screening run writes one.
+    --   ONDEMAND — the agents analysed it, but the screen never chose it: a
+    --              one-off `main.py TICKER`. The JUDGEMENT is the system's; the
+    --              PICK is the operator's.
+    --   MANUAL   — not an analysis at all. A purchase made on an outside
+    --              recommendation, mirrored in from the position tracker so it
+    --              can be measured on the same arithmetic.
     --
-    -- EVERY query that computes a base rate for this system MUST filter on
-    -- source = 'PIPELINE'. An external pick counted as a pipeline verdict
-    -- credits or blames the screen for a decision it never made, which is the
-    -- one error that invalidates the whole scoreboard. See ledger-queries.sql.
+    -- The MANUAL rows are what make the ledger answer a question it otherwise
+    -- could not: most of the money in this household follows external picks, and
+    -- without a row for them there is nothing to compare the pipeline against
+    -- except the index. They carry NULL prompt_version and git_sha (no prompt
+    -- produced them) and no verdict_basis rows (no factors were articulated) —
+    -- both expected, not missing data.
+    --
+    -- THE PIPELINE/ONDEMAND LINE IS THE SUBTLE ONE, because both are this system
+    -- reasoning and both carry factors and a prompt_version. The distinction is
+    -- the SCREEN:
+    --
+    --   * Q1 ("did filtering the screen beat NOT filtering it") measures
+    --     approvals against run_universe, so it must be PIPELINE ONLY. A one-off
+    --     run writes no universe rows, and counting its verdict there measures
+    --     approvals against a denominator that never contained the name.
+    --   * Q2/Q3/Q4 grade the judgement, so they read PIPELINE + ONDEMAND. A
+    --     one-off analysis is a real analyst call with real factors behind it.
+    --
+    -- A purchase counted as a pipeline verdict credits or blames the screen for a
+    -- decision it never made, which is the one error that invalidates the whole
+    -- scoreboard. See ledger-queries.sql, which states the rule per query.
+    --
+    -- NOTE: magic-stock-tracker's app/scoreboard.py renders these same questions
+    -- from this same table. Any change to the meaning of `source` has to land in
+    -- both places or the two disagree about the same database.
     source VARCHAR(32) NOT NULL DEFAULT 'PIPELINE',
     -- Set only when the position behind this row was SOLD. Their presence means
     -- the result is final: the snapshot job stops marking the row to market, and

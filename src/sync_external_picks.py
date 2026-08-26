@@ -25,10 +25,27 @@ next scheduled run. This costs nothing extra: the script only calls FMP when
 there is something new to mirror, settle, reprice or unmirror, and still fetches
 the whole date range in ONE call regardless of how many purchases fall in it.
 
+HOW A LOT IS MATCHED TO A VERDICT, AND WHY run_id WINS
+-----------------------------------------------------
+A lot carrying a `run_id` was bought off an analysis this system performed, and
+that analysis already wrote its own verdict row. So the run_id link is checked
+FIRST, and a lot it claims is never mirrored: doing so would record one decision
+twice, once as the opinion and once as the purchase, and average them as two
+independent picks.
+
+The link is honoured whatever the LOT says its source is. A name analysed by a
+one-off `main.py TICKER` is usually recorded in the tracker as MANUAL, because
+the operator chose it — but its verdict is ONDEMAND, and matching on 'PIPELINE'
+alone would miss it. That is exactly how a second MU row reached the ledger.
+
+Most external lots carry no run_id at all, because nothing analysed them. Those
+fall back to the natural key, (ticker, purchase_date), as they always have.
+
 FOUR THINGS IT DOES, AND WHY EACH IS NEEDED
 -------------------------------------------
-1. Mirrors purchases that have no ledger row yet — externally-sourced only,
-   since the pipeline writes its own verdicts as it reaches them.
+1. Mirrors purchases that have no ledger row yet — externally-sourced only, and
+   only those NOT already linked to an analysis by run_id, since any analysis
+   writes its own verdict as it reaches one.
 2. SETTLES rows whose position has since been sold — BOTH streams, pipeline
    picks included.
 3. REPRICES rows whose lot no longer says what it said — see "corrections".
@@ -43,11 +60,11 @@ and the settled result silently replaced by a hypothetical one — because every
 query here reads the LATEST snapshot. Marks taken after the sale date are
 deleted for the same reason.
 
-Step 2 covers the pipeline stream even though step 1 does not, and the asymmetry
+Step 2 covers the analysis streams even though step 1 does not, and the asymmetry
 is the point: a closed position is closed whoever picked it. Only the join key
-differs — external picks match on (ticker, purchase date), pipeline picks on
-run_id. Closing a lot in the tracker is therefore the ONLY action required to
-settle it, regardless of which stream chose it.
+differs — see "HOW A LOT IS MATCHED" above. Closing a lot in the tracker is
+therefore the ONLY action required to settle it, regardless of which stream chose
+it.
 
 CORRECTIONS: A LOT THAT CHANGED
 -------------------------------
@@ -179,6 +196,19 @@ MASS_UNMIRROR_SHARE = 0.25
 # Statuses whose lots are still held as far as the tracker knows.
 HELD_STATUSES = ("OPEN", "TARGET_REACHED")
 
+# Verdict sources that represent AN ANALYSIS THIS SYSTEM PERFORMED, as opposed to
+# a purchase mirrored in from the tracker. Both are keyed to a lot by run_id, and
+# neither is ever mirrored or unmirrored: the analysis happened whether or not the
+# name was bought.
+#
+# ONDEMAND is the reason this is a tuple rather than the single literal 'PIPELINE'
+# it used to be. A one-off `main.py TICKER` is still this system reasoning, so it
+# already has a verdict row of its own — but the lot bought off it is usually
+# recorded in the tracker as MANUAL, because the operator picked the name. Match
+# only on 'PIPELINE' and that lot looks external, gets mirrored, and one purchase
+# becomes two verdict rows: the analysis AND a mirror of the same decision.
+ANALYSIS_SOURCES = ("PIPELINE", "ONDEMAND")
+
 # A CLOSED lot is mirrored too, but ONLY when it carries a sale_price. Measured
 # to today's price a sold position reports a return nobody earned; measured to
 # its exit it is a finished, gradeable pick. A lot closed without a recorded
@@ -297,6 +327,24 @@ def pending_purchases(cur, external_source: str) -> list:
     entering it three times would let it outvote every other pick in the
     average. The fill price is share-weighted across those lots, which is the
     price the holder actually paid in aggregate.
+
+    A LOT THAT CARRIES A run_id IS ALREADY IN THE LEDGER
+    ----------------------------------------------------
+    `run_id` on a lot means the purchase was made off an analysis this system
+    performed, and that analysis wrote its own verdict row when it ran. Mirroring
+    the lot as well would record ONE decision twice — once as the opinion, once as
+    the purchase — and the two would then be averaged as though they were separate
+    picks, and double-counted in the dollar queries.
+
+    This is not hypothetical: it is what put a second MU row in the ledger. A
+    one-off `main.py MU` wrote a verdict, the resulting buy was recorded in the
+    tracker as MANUAL (the operator chose the name), and the old lot-level filter
+    of `source <> 'PIPELINE'` saw an external purchase with no mirror yet.
+
+    So the run_id link is checked FIRST and takes priority over the natural key.
+    Most external lots carry no run_id at all — nothing linked them to an
+    analysis, because there was none — and those still match on
+    (ticker, purchase_date) exactly as before.
     """
     cur.execute(
         """
@@ -318,6 +366,15 @@ def pending_purchases(cur, external_source: str) -> list:
            -- deliberately does not depend on that type existing.
            AND (l.status::text = ANY(%s)
                 OR (l.status::text = %s AND l.sale_price IS NOT NULL))
+           -- Priority match: the lot is linked to an analysis that already has a
+           -- verdict row, so the decision is recorded and must not be mirrored.
+           AND NOT EXISTS (
+                 SELECT 1 FROM verdict_log v
+                  WHERE v.run_id::text = l.run_id
+                    AND v.ticker = l.ticker
+                    AND v.source = ANY(%s))
+           -- Fallback match: the ordinary external purchase, keyed on the natural
+           -- key the mirror itself uses.
            AND NOT EXISTS (
                  SELECT 1 FROM verdict_log v
                   WHERE v.source = %s
@@ -326,7 +383,7 @@ def pending_purchases(cur, external_source: str) -> list:
          GROUP BY l.ticker, l.purchase_date
          ORDER BY l.purchase_date, l.ticker
         """,
-        (list(HELD_STATUSES), CLOSED_STATUS, external_source),
+        (list(HELD_STATUSES), CLOSED_STATUS, list(ANALYSIS_SOURCES), external_source),
     )
     return cur.fetchall()
 
@@ -350,10 +407,19 @@ def newly_closed(cur, external_source: str) -> list:
     written to prevent, applied to only one of the two streams it grades.
 
     The two halves differ only in how a lot is matched to its verdict:
-      * external — (ticker, purchase date), the natural key the mirror uses.
-      * pipeline — run_id, the only link from a trade back to the analysis that
-        justified it. A ticker alone will not do: the same name can be analysed
-        many times and reach different verdicts.
+      * run_id — the only link from a trade back to the analysis that justified
+        it. A ticker alone will not do: the same name can be analysed many times
+        and reach different verdicts. This half covers BOTH analysis sources
+        (PIPELINE and ONDEMAND) and does not care what the LOT's own source says,
+        which matters because a name bought off a one-off analysis is usually
+        recorded in the tracker as MANUAL — the operator picked it. Keyed on
+        `v.source = 'PIPELINE'` alone, as this was before ONDEMAND existed, such
+        a position could never settle: it would be marked at market forever.
+      * natural key — (ticker, purchase date), for the ordinary external
+        purchase that has no run_id because no analysis preceded it.
+
+    A lot the run_id half already claims is excluded from the natural-key half,
+    so one sale is never settled twice down two different paths.
 
     POST_CRITIC rows are deliberately NOT excluded here, unlike in the cost
     queries. Both stages describe the same holding, so both must stop being
@@ -374,6 +440,13 @@ def newly_closed(cur, external_source: str) -> list:
             ON l.ticker = v.ticker
            AND l.purchase_date = v.verdict_date
            AND l.source <> 'PIPELINE'
+           -- Not the run_id half's business. Without this a lot linked to an
+           -- analysis could settle twice, down both paths, on one sale.
+           AND NOT EXISTS (
+                 SELECT 1 FROM verdict_log a
+                  WHERE a.run_id::text = l.run_id
+                    AND a.ticker = l.ticker
+                    AND a.source = ANY(%s))
          WHERE v.source = %s
            AND v.exit_date IS NULL
          GROUP BY v.verdict_id, v.ticker, v.verdict_date, v.price, v.benchmark_price
@@ -381,7 +454,7 @@ def newly_closed(cur, external_source: str) -> list:
 
          UNION ALL
 
-        SELECT 'pipeline',
+        SELECT 'analysis',
                v.verdict_id, v.ticker, v.verdict_date, v.price, v.benchmark_price,
                MAX(l.closed_on),
                SUM(l.shares * l.sale_price) / NULLIF(SUM(l.shares), 0)
@@ -389,15 +462,14 @@ def newly_closed(cur, external_source: str) -> list:
           JOIN stock_tracker.lots l
             ON l.run_id = v.run_id::text
            AND l.ticker = v.ticker
-           AND l.source = 'PIPELINE'
-         WHERE v.source = 'PIPELINE'
+         WHERE v.source = ANY(%s)
            AND v.exit_date IS NULL
          GROUP BY v.verdict_id, v.ticker, v.verdict_date, v.price, v.benchmark_price
         HAVING BOOL_AND(l.status::text = 'CLOSED' AND l.sale_price IS NOT NULL)
 
          ORDER BY 7
         """,
-        (external_source,),
+        (list(ANALYSIS_SOURCES), external_source, list(ANALYSIS_SOURCES)),
     )
     return cur.fetchall()
 
@@ -420,10 +492,11 @@ def orphaned_mirrors(cur, external_source: str) -> list:
     SALE that did not happen, and a fabricated round trip is indistinguishable
     from a real one in every query downstream.
 
-    PIPELINE rows are never orphans. A pipeline verdict records an analysis that
+    PIPELINE and ONDEMAND rows are never orphans. Either records an analysis that
     genuinely happened whether or not the name was ever bought, and is graded as
     an opinion in Q2/Q3 regardless; with no lot it simply carries no cost basis
-    and drops out of Q10 on its own.
+    and drops out of Q10 on its own. The query reaches only `external_source`
+    rows, so both are excluded by construction rather than by a filter.
     """
     cur.execute(
         """

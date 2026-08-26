@@ -450,8 +450,11 @@ def run_single_ticker(ticker: str, company_name: str = None, force: bool = False
         candidate.setdefault("CompanyName", company_name)
         screen_context = _format_screen_context(candidate)
 
+    # on_demand=True: the screen did not choose this name, so its verdict is
+    # logged as ONDEMAND rather than PIPELINE. This run writes no run_universe
+    # rows, and Q1 measures approvals against exactly those rows.
     usage = analyze_ticker(run_id, ticker, company_name, screen_context, candidate, force,
-                           skip_sale_advisor, skip_buy_case)
+                           skip_sale_advisor, skip_buy_case, on_demand=True)
 
     _finalize_run(run_id, usage, "On-Demand Run")
 

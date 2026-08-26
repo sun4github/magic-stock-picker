@@ -29,16 +29,35 @@
 -- looks like skill in any rising market and like failure in any falling one.
 --
 -- ONE RULE THAT IS NOT OPTIONAL: `source`
--- verdict_log holds two different things. `source = 'PIPELINE'` rows are
--- verdicts this system reasoned its way to. Everything else is a purchase made
--- on an outside recommendation, mirrored in from the position tracker so it can
--- be measured on the same arithmetic (see sync_external_picks.py).
+-- verdict_log holds THREE different things, and every query here must decide
+-- which of them it is asking about:
 --
--- Q1-Q4 grade THIS SYSTEM and therefore all filter on source = 'PIPELINE'. Drop
--- that filter and the screen gets credit or blame for picks it never made,
--- which does not merely add noise — it silently answers a different question
--- than the one asked. Q7 is the query that deliberately puts the two side by
--- side. Any new query added here must decide which of the two it is.
+--   PIPELINE — the SCREEN chose the name and the agents analysed it. Only these
+--              have a `run_universe` control group standing behind them.
+--   ONDEMAND — the agents analysed it, but the screen never chose it: a one-off
+--              `main.py TICKER`. The judgement is the system's; the PICK is the
+--              operator's.
+--   MANUAL   — not an analysis at all. A purchase made on an outside
+--              recommendation, mirrored in from the position tracker so it can
+--              be measured on the same arithmetic (see sync_external_picks.py).
+--
+-- THE PIPELINE/ONDEMAND LINE IS THE EASY ONE TO GET WRONG, because both are this
+-- system reasoning. The distinction is the SCREEN, not the reasoning:
+--
+--   * Q1 asks "did filtering the screen beat NOT filtering it", and measures
+--     approvals against `run_universe`. A one-off run writes no universe rows,
+--     so counting its verdict there compares approvals against a universe that
+--     never contained the name — it inflates the approved side out of a
+--     denominator it was never in. Q1 is PIPELINE ONLY.
+--   * Q2/Q3/Q4 grade the JUDGEMENT — does the verdict carry information, which
+--     factors do we read well, did the critic help. A one-off analysis is a real
+--     analyst call with real factors behind it, so excluding it would throw away
+--     signal for no reason. Those read PIPELINE + ONDEMAND.
+--
+-- Everything else is a purchase and must never earn the screen credit or blame
+-- for a pick it never made — which does not merely add noise, it silently
+-- answers a different question. Q7-Q10 are the queries that deliberately put the
+-- streams side by side.
 -- ===========================================================================
 
 
@@ -115,7 +134,9 @@ SELECT v.verdict,
          WHERE o2.verdict_id = v.verdict_id AND o2.age_days >= 180
          ORDER BY o2.as_of DESC LIMIT 1
        ) o ON TRUE
- WHERE v.source = 'PIPELINE'
+ -- PIPELINE + ONDEMAND: both are analyst calls this system made and stands
+ -- behind. Only Q1 needs the screened-universe denominator that ONDEMAND lacks.
+ WHERE v.source IN ('PIPELINE', 'ONDEMAND')
  GROUP BY v.verdict, v.prompt_version
  ORDER BY v.prompt_version, v.verdict;
 
@@ -147,7 +168,10 @@ SELECT b.factor_key,
          ORDER BY o2.as_of DESC LIMIT 1
        ) o ON TRUE
  WHERE o.excess_return_pct IS NOT NULL
-   AND v.source = 'PIPELINE'
+   -- A factor articulated in a one-off analysis was read just as right or wrong
+   -- as one from a screened candidate. Dropping those would shrink the sample
+   -- this query already waits longest to fill.
+   AND v.source IN ('PIPELINE', 'ONDEMAND')
  GROUP BY b.factor_key, b.stance
 HAVING COUNT(*) >= 5          -- below this the percentage is theatre
  ORDER BY pct_read_correctly ASC, n DESC;
@@ -168,9 +192,12 @@ SELECT v.verdict_stage,
          WHERE o2.verdict_id = v.verdict_id AND o2.age_days >= 180
          ORDER BY o2.as_of DESC LIMIT 1
        ) o ON TRUE
- WHERE v.source = 'PIPELINE'
+ -- refine.py inherits the reviewed verdict's source, so a refined one-off keeps
+ -- its INDEPENDENT and POST_CRITIC rows in the same population — which is the
+ -- only way this pairing means anything.
+ WHERE v.source IN ('PIPELINE', 'ONDEMAND')
    AND v.ticker IN (SELECT ticker FROM verdict_log
-                     WHERE source = 'PIPELINE'
+                     WHERE source IN ('PIPELINE', 'ONDEMAND')
                      GROUP BY ticker HAVING COUNT(DISTINCT verdict_stage) > 1)
  GROUP BY v.verdict_stage;
 
@@ -303,7 +330,9 @@ SELECT 'external picks logged',
 -- we can measure", not "every pick that was made". The other accounts have no
 -- such gap — Ind-TOD-3920 and Jo-WROS-4473 are covered from their first trade.
 -- ---------------------------------------------------------------------------
-SELECT CASE WHEN v.source = 'PIPELINE' THEN 'Pipeline (screened + analysed)'
+SELECT CASE v.source
+            WHEN 'PIPELINE' THEN 'Pipeline (screened + analysed)'
+            WHEN 'ONDEMAND' THEN 'On-demand (you picked, we analysed)'
             ELSE 'External (chosen elsewhere)' END AS stream,
        COUNT(*)                                    AS n,
        ROUND(AVG(o.total_return_pct), 2)           AS avg_return_pct,
@@ -428,7 +457,10 @@ SELECT ext.ticker,
   FROM verdict_log ext
   JOIN verdict_log pipe
     ON pipe.ticker = ext.ticker
-   AND pipe.source = 'PIPELINE'
+   -- ONDEMAND counts as an analysis here: "we looked at this and then bought it"
+   -- is the same question whether the screen or the operator surfaced the name,
+   -- and the price drift between the two dates is the point of the query.
+   AND pipe.source IN ('PIPELINE', 'ONDEMAND')
    AND pipe.verdict_stage <> 'POST_CRITIC'   -- one row per analysis, not two
   LEFT JOIN LATERAL (
         SELECT * FROM verdict_outcome o WHERE o.verdict_id = pipe.verdict_id
@@ -479,27 +511,44 @@ SELECT to_regclass('stock_tracker.lots') IS NOT NULL AS has_lots \gset
 \if :has_lots
 
 WITH lot_pick AS (
-    -- External picks join on the natural key the mirror uses.
+    -- A lot is matched to its verdict by run_id FIRST, and only by the natural
+    -- key when it has no run_id. The two halves below are keyed that way rather
+    -- than by what the LOT calls itself, which is the trap: a name bought off a
+    -- one-off analysis is normally recorded in the tracker as MANUAL (the
+    -- operator picked it) while its verdict is ONDEMAND, and a lot bought off
+    -- the screened pipeline may be recorded either way. Keying on l.source
+    -- alone silently drops whichever combination does not line up.
+    --
+    -- POST_CRITIC is excluded throughout so a refined ticker's cost is not
+    -- counted twice.
+
+    -- 1. Linked to an analysis by run_id — PIPELINE or ONDEMAND alike. A
+    --    verdict's DATE is when the analysis ran, which is not necessarily when
+    --    the buy happened, so the run is the only sound key here.
     SELECT v.verdict_id, SUM(l.shares * l.buy_price) AS cost
       FROM stock_tracker.lots l
       JOIN verdict_log v
-        ON v.source <> 'PIPELINE'
+        ON v.run_id::text = l.run_id
        AND v.ticker = l.ticker
-       AND v.verdict_date = l.purchase_date
-     WHERE l.source <> 'PIPELINE'
+       AND v.source IN ('PIPELINE', 'ONDEMAND')
+       AND v.verdict_stage <> 'POST_CRITIC'
      GROUP BY v.verdict_id
     UNION ALL
-    -- Pipeline picks join on the run instead: a verdict's date is when the
-    -- analysis ran, which is not necessarily when the buy happened.
-    -- POST_CRITIC is excluded so a refined ticker's cost is not counted twice.
+    -- 2. No analysis behind it: the ordinary outside recommendation, joined on
+    --    the natural key its mirror was written with. Lots claimed by half 1 are
+    --    excluded so one purchase is never counted down both paths.
     SELECT v.verdict_id, SUM(l.shares * l.buy_price)
       FROM stock_tracker.lots l
       JOIN verdict_log v
-        ON v.source = 'PIPELINE'
-       AND v.run_id::text = l.run_id
+        ON v.source NOT IN ('PIPELINE', 'ONDEMAND')
        AND v.ticker = l.ticker
-       AND v.verdict_stage <> 'POST_CRITIC'
-     WHERE l.source = 'PIPELINE'
+       AND v.verdict_date = l.purchase_date
+     WHERE l.source <> 'PIPELINE'
+       AND NOT EXISTS (
+             SELECT 1 FROM verdict_log a
+              WHERE a.run_id::text = l.run_id
+                AND a.ticker = l.ticker
+                AND a.source IN ('PIPELINE', 'ONDEMAND'))
      GROUP BY v.verdict_id
 ),
 marked AS (
@@ -521,10 +570,18 @@ marked AS (
      WHERE v.benchmark_price > 0 AND o.benchmark_price > 0
 ),
 rolled AS (
-    SELECT CASE WHEN source = 'PIPELINE' THEN 'Pipeline' ELSE 'External' END AS stream,
+    -- Three streams, not two: 'On-demand' is money put into names the operator
+    -- brought to the system and the system then vetted. Folding it into
+    -- 'Pipeline' would credit the screen with picks it never surfaced; folding
+    -- it into 'External' would hide that the agents did analyse them.
+    SELECT CASE source WHEN 'PIPELINE' THEN 'Pipeline'
+                       WHEN 'ONDEMAND' THEN 'On-demand'
+                       ELSE 'External' END AS stream,
            state, cost, worth, worth_if_spy, age_days FROM marked
     UNION ALL
-    SELECT CASE WHEN source = 'PIPELINE' THEN 'Pipeline' ELSE 'External' END, 'ALL',
+    SELECT CASE source WHEN 'PIPELINE' THEN 'Pipeline'
+                       WHEN 'ONDEMAND' THEN 'On-demand'
+                       ELSE 'External' END, 'ALL',
            cost, worth, worth_if_spy, age_days FROM marked
     UNION ALL
     SELECT 'EVERYTHING', 'ALL', cost, worth, worth_if_spy, age_days FROM marked

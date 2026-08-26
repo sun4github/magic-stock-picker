@@ -2413,6 +2413,16 @@ and a pull toward self-flattery to a table whose entire purpose is to be
 unflattering when the record is. `cron/run_outcome_snapshot.py` contains no
 prompt and no model.
 
+**The screen and the reasoning are recorded separately.** `verdict_log.source` is
+`PIPELINE` when the screen surfaced the name, `ONDEMAND` when a one-off
+`main.py TICKER` analysed a name the operator brought, and `MANUAL` for a
+purchase made on an outside recommendation. Only a screening run writes
+`run_universe`, so §13.1's first question — did filtering the screen beat not
+filtering it — counts `PIPELINE` alone; the questions that grade the *judgement*
+count `ONDEMAND` too, because a one-off analysis is a real analyst call with real
+factors. Conflating the two made that first question compare 38 approvals against
+a 14-name universe.
+
 **Factors are a controlled vocabulary.** `verdict_basis.factor_key` is drawn from
 `verdict_ledger.factor_taxonomy` in `config.yaml`. "Customer concentration",
 "client concentration risk" and "top-10 customer exposure" are one factor written

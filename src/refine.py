@@ -52,7 +52,7 @@ import uuid
 from datetime import datetime, timezone
 
 from agents import sale_advisor_agent
-from persistence import _check_db
+from persistence import _check_db, get_db_connection
 from pipeline import (
     _benchmark_price,
     _extract_verdict,
@@ -765,6 +765,39 @@ def _assemble(candidate: dict, report_body: str, recon_findings: list,
 
 
 # --- The loop -------------------------------------------------------------------
+def _inherited_verdict_source(ticker: str, src_run: str) -> str:
+    """The `source` of the verdict this refinement is reviewing.
+
+    A POST_CRITIC row must carry the SAME source as the INDEPENDENT row it sits
+    beside, or the pair stops being comparable: Q4 asks whether the critic moved
+    the outcome, and it can only ask that of two rows the other queries treat
+    alike. Refining a one-off report would otherwise file the refined call as
+    PIPELINE while its own pre-critic call stayed ONDEMAND — the refined half
+    would enter Q1 (which counts screen approvals) and the control half would
+    not, which is worse than either choice applied consistently.
+
+    Falls back to PIPELINE, matching the column default, when there is nothing
+    to inherit from — a refinement of a report that predates the ledger.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT source FROM verdict_log
+             WHERE ticker = %s AND run_id::text = %s AND verdict_stage = 'INDEPENDENT'
+             ORDER BY created_at DESC LIMIT 1
+        """, (ticker, src_run))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        if row and row[0]:
+            return str(row[0]).strip().upper()
+    except Exception as e:
+        logger.warning(f"[{ticker}] Could not read the reviewed verdict's source "
+                       f"({e}); the POST_CRITIC row will default to PIPELINE.")
+    return "PIPELINE"
+
+
 def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: str = None,
                         max_budget_usd: float = None, max_rounds: int = None) -> None:
     """Review and revise one ticker's existing final report until agreement or budget.
@@ -1210,6 +1243,9 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
                 # is a review session, and letting it match the duplicate-run skip
                 # would serve a reviewed report in place of a fresh analysis.
                 analysis_key="",
+                # Inherited, never assumed: a refined one-off stays ONDEMAND so it
+                # sits in the same population as the INDEPENDENT row Q4 pairs it with.
+                source=_inherited_verdict_source(ticker, src_run),
             )
             logger.info(
                 f"[{ticker}] Ledger: logged a POST_CRITIC verdict ({verdict}) beside "

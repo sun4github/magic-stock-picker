@@ -211,6 +211,16 @@ def _due(cur, cfg: dict) -> tuple:
     # sourced pick is a multi-year hold AND arrives by backfill, often already
     # older than the pipeline window: measured against `track_for_days` alone it
     # would never be snapshotted once, and would look exactly like a quiet week.
+    #
+    # ONDEMAND falls on the LONG side of this CASE, with the external picks
+    # rather than with PIPELINE, and that is deliberate. A one-off analysis is
+    # a name the operator went looking for, so it is far likelier to be bought
+    # and held than a screened candidate is — and the two errors are not
+    # symmetric. Over-tracking an opinion nobody acted on costs one quote a
+    # week; under-tracking a position still held loses its price history at
+    # around thirteen months, permanently, and Q10 marks it at whatever the
+    # last snapshot caught. This job never joins lots (see the module
+    # docstring), so it cannot ask whether a given verdict was bought.
     cur.execute('''
         SELECT v.verdict_id, v.ticker, v.verdict_date, v.price, v.benchmark_price
           FROM verdict_log v

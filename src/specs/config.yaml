@@ -356,6 +356,23 @@ verdict_ledger:
   # position tracker by sync_external_picks.py. Must match the label used on
   # the tracker's own lots (stock_tracker.lots.source), or the sync re-enters
   # the same purchases under a second name every time it runs.
+  #
+  # verdict_log.source has three values in total, and only this one is
+  # configurable because only this one has to agree with another application:
+  #
+  #   PIPELINE  - the screen chose the name and the agents analysed it. The
+  #               only rows with a run_universe control group behind them,
+  #               which is why Q1 counts these alone.
+  #   ONDEMAND  - a one-off `main.py TICKER`. The agents analysed it, but the
+  #               SCREEN never chose it, so it has no universe row and must
+  #               stay out of Q1. Q2/Q3/Q4 still count it: the judgement is
+  #               the system's either way. Set in code, not here.
+  #   this value - not an analysis at all; a purchase made elsewhere.
+  #
+  # A lot carrying a run_id is matched to its analysis verdict by that run_id
+  # and is NEVER mirrored, whatever the lot's own source says. A name bought
+  # off a one-off run is usually recorded in the tracker as MANUAL while its
+  # verdict is ONDEMAND, and mirroring it would enter one decision twice.
   external_source: "MANUAL"
 
   # Controlled vocabulary for verdict_basis.factor_key. The analyst picks from

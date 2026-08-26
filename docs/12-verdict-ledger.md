@@ -353,10 +353,54 @@ it follows outside recommendations. Until those purchases were recorded, the
 pipeline could only be compared against the index, which flatters or damns
 everything together depending on what the market did.
 
-`verdict_log.source` closes that gap. `PIPELINE` is a verdict this system
-reasoned its way to; anything else is a purchase made elsewhere, mirrored in
-from the position tracker by
-[`src/sync_external_picks.py`](../src/sync_external_picks.py) as a `BUY` row.
+`verdict_log.source` closes that gap. It carries three values, and the middle
+one is the one that is easy to get wrong:
+
+| `source` | Means | Screen chose it? | Analysed? |
+| :--- | :--- | :---: | :---: |
+| `PIPELINE` | the screen surfaced it and the agents analysed it | yes | yes |
+| `ONDEMAND` | a one-off `main.py TICKER` — you brought the name, the agents vetted it | **no** | yes |
+| `MANUAL` | a purchase made on an outside recommendation, mirrored in from the tracker | no | no |
+
+`MANUAL` rows are written by
+[`src/sync_external_picks.py`](../src/sync_external_picks.py) as `BUY` rows.
+
+### Why `ONDEMAND` is not just `PIPELINE`
+
+Both are this system reasoning, with the same prompts and the same factors, so
+the temptation is to file them together. **The distinction is the screen, not the
+reasoning** — and it decides whether Q1 means anything.
+
+Q1 asks *did filtering the screen beat not filtering it*, and it measures the
+verdicts against `run_universe`. A one-off run **bypasses the screener entirely**
+and therefore writes no universe rows at all. Count its verdict as a screen
+approval and you are comparing approvals against a denominator that never
+contained the name.
+
+That was not a rounding error on the history this was introduced against: **24 of
+38 `PIPELINE` verdicts had come from one-off runs**, against a universe of 14
+names from the single run that had ever screened. Q1 was comparing 38 approvals
+to a 14-name basket. After reclassification it is 14 against 14.
+
+So the split is per question, and every query states which it is:
+
+- **Q1 is `PIPELINE` only.** It is the one question that needs the control group.
+- **Q2, Q3 and Q4 read `PIPELINE` + `ONDEMAND`.** They grade the *judgement* — does
+  the verdict carry information, which factors do we read well, did the critic
+  help — and a one-off analysis is a real analyst call with real factors behind
+  it. Excluding it would discard signal from the queries that are slowest to
+  reach a usable sample.
+- **Q7–Q10 split all three streams**, so money you put into names you brought
+  yourself is visible as its own line rather than hidden in either neighbour.
+
+`refine.py` **inherits** the reviewed verdict's source, so a refined one-off keeps
+its `INDEPENDENT` and `POST_CRITIC` rows in the same population — Q4 pairs them,
+and the pairing is meaningless if the two halves sit in different buckets.
+
+> **The tracker renders these same questions.** `magic-stock-tracker`'s
+> `app/scoreboard.py` reads this table directly with its own copy of the ten
+> queries. A change to what `source` means has to land in both repos, or the two
+> disagree about one database.
 
 **What a mirrored row means.** `verdict_date` is the *purchase* date and `price`
 is the *fill* price — not the date or price of the recommendation. That choice
@@ -365,11 +409,16 @@ whatever was lost between reading an idea and acting on it. `prompt_version`,
 `git_sha` and `verdict_basis` rows are all absent, because no prompt produced
 these and no factors were articulated. That is expected, not missing data.
 
-**The one rule that is not optional.** Every query that grades *this system*
-must filter `source = 'PIPELINE'`. Without it the screen collects credit and
-blame for picks it never made — which does not add noise, it silently answers a
-different question. Q1–Q4 in `ledger-queries.sql` all carry the filter; Q7–Q9
+**The one rule that is not optional.** No query that grades *this system* may
+count a `MANUAL` row. Without that exclusion the screen collects credit and blame
+for picks it never made — which does not add noise, it silently answers a
+different question. Q1–Q4 in `ledger-queries.sql` all exclude purchases; Q7–Q10
 are the queries that deliberately put the streams side by side.
+
+Which *analysis* sources each of Q1–Q4 counts is the finer question settled
+above: Q1 is `PIPELINE` alone because it needs the screened control group, while
+Q2–Q4 also count `ONDEMAND` because they grade the judgement rather than the
+screen.
 
 **Two windows, not one.** External picks arrive by *backfill*: a purchase made
 three years ago enters the ledger already older than `track_for_days` (400) and
@@ -393,12 +442,33 @@ held — and since every query here reads the **latest** snapshot, the settled
 result would be silently overridden by a hypothetical one. Marks dated after the
 sale are deleted for that reason.
 
+### How a lot is matched to a verdict: `run_id` wins
+
+A lot carrying a `run_id` was bought off an analysis this system performed, and
+that analysis **already wrote its own verdict row when it ran**. So the sync
+checks the `run_id` link *first*, and never mirrors a lot it claims — doing so
+records one decision twice, once as the opinion and once as the purchase, and
+the dollar queries then count the same cost basis twice.
+
+The link is honoured **whatever the lot calls itself**, and that is the part that
+bit. A name analysed by a one-off run is normally recorded in the tracker as
+`MANUAL`, because the operator picked it — while its verdict is `ONDEMAND`.
+Matching on `'PIPELINE'` alone missed exactly that combination, which is how a
+second `MU` row reached the ledger: one purchase, two verdict rows, $937.53
+beside $938.54.
+
+Lots with no `run_id` — the vast majority, because nothing analysed them — fall
+back to the natural key, `(ticker, purchase_date)`, as they always have. A lot
+claimed by the `run_id` rule is excluded from the natural-key path, so one sale
+is never settled twice down two routes.
+
 **The two jobs cover different populations, deliberately.** Mirroring is
-external-only, because the pipeline already writes its own verdicts. Settling
-covers **both streams**: a closed position is closed whoever picked it. Only the
-join key differs — external picks match on `(ticker, purchase_date)`, pipeline
-picks on `run_id`, the sole link from a trade back to the analysis that
-justified it. `POST_CRITIC` rows are settled too, unlike in the cost queries
+external-only, because any analysis writes its own verdict. Settling covers
+**every stream**: a closed position is closed whoever picked it. The `run_id`
+half accepts `PIPELINE` *and* `ONDEMAND` on the verdict side and ignores the
+lot's own label; keyed on `'PIPELINE'` alone, a position bought off a one-off
+analysis could never settle at all — it would be marked at market forever, which
+is the precise failure that step exists to prevent. `POST_CRITIC` rows are settled too, unlike in the cost queries
 that exclude them: both stages describe the same holding, so both must stop
 being re-priced, and each grades to its own return off its own baseline.
 

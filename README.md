@@ -972,8 +972,8 @@ psql "$DATABASE_URL" -f src/ledger-queries.sql
 | **Q9** | Names *both* streams landed on — and what deliberating cost |
 | **Q10** | **Every dollar in, against the same dollars in the index** |
 
-Q1–Q4 grade this system and all filter on `source = 'PIPELINE'`. Q7–Q9 compare the two
-streams. **Q10 is the one to run if you only run one** — see below.
+Q1–Q4 grade this system and never count a purchase. Q7–Q10 compare the streams.
+**Q10 is the one to run if you only run one** — see below.
 
 ### How to read the columns
 
@@ -1005,11 +1005,18 @@ money follows an outside recommendation, this pipeline can only ever be compared
 the index — which flatters or damns both streams together depending on what the market
 happened to do.
 
-`verdict_log.source` fixes that. `PIPELINE` is a verdict this system reasoned its way to;
-anything else is a purchase made elsewhere, recorded so it is measured on the same
-arithmetic. [`src/sync_external_picks.py`](src/sync_external_picks.py) mirrors them in
-from a position tracker (see Q5), stamping each one with the benchmark's close on the day
-of the purchase.
+`verdict_log.source` fixes that. It has three values, because "did the system analyse
+it" and "did the *screen* choose it" are different questions:
+
+| `source` | What it is | Screen chose it? | Analysed? |
+| :--- | :--- | :---: | :---: |
+| `PIPELINE` | the screen surfaced it and the agents analysed it | yes | yes |
+| `ONDEMAND` | a one-off `python main.py TICKER` — you brought the name, the agents vetted it | **no** | yes |
+| `MANUAL` | a purchase made on an outside recommendation | no | no |
+
+[`src/sync_external_picks.py`](src/sync_external_picks.py) mirrors the `MANUAL` ones in
+from a position tracker (see Q5), stamping each with the benchmark's close on the day of
+the purchase.
 
 An externally-sourced row is a `BUY` dated to the **purchase**, priced at the **fill**.
 That is a deliberate choice about which question gets answered: it grades your money,
@@ -1017,9 +1024,18 @@ including whatever was lost between reading an idea and acting on it. `prompt_ve
 `git_sha` and factor rows are all absent, because no prompt produced these and no factors
 were articulated.
 
-**The one rule that is not optional:** every query grading *this system* must filter
-`source = 'PIPELINE'`. Without it the screen collects credit and blame for picks it never
-made — which does not add noise, it silently answers a different question.
+**Why `ONDEMAND` is split out from `PIPELINE`.** A one-off run bypasses the screener, so
+it writes no `run_universe` rows — and Q1 ("did filtering the screen beat *not* filtering
+it") measures approvals against exactly those rows. Counting a one-off verdict there
+compares approvals against a basket that never held the name. When this was introduced,
+**24 of 38 `PIPELINE` verdicts turned out to be one-offs**, measured against a 14-name
+universe; Q1 was reading 38 approvals against 14 screened names. It is now 14 against 14.
+Q2/Q3/Q4 still count `ONDEMAND`, because a one-off analysis is a real analyst call with
+real factors — the screen is what it lacks, not the reasoning.
+
+**The one rule that is not optional:** no query grading *this system* may count a
+`MANUAL` row. Without that the screen collects credit and blame for picks it never made —
+which does not add noise, it silently answers a different question.
 
 #### Finished picks, and why they must be graded to their exit
 
