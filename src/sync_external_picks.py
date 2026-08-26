@@ -159,6 +159,7 @@ import json
 import logging
 import os
 import sys
+from collections import namedtuple
 from datetime import date, timedelta
 
 import psycopg2
@@ -231,6 +232,25 @@ MIRRORABLE_SOURCES = ("ONDEMAND",)  # + external_source, added at call time
 # price is skipped and reported, because the alternative is to invent the
 # number that decides whether the pick was good.
 CLOSED_STATUS = "CLOSED"
+
+# The result rows of `pending_purchases` and `newly_closed`, named rather than
+# positional. This is a bug fix, not a tidy-up.
+#
+# `newly_closed` gained a `stream` label as its FIRST column when it started
+# settling pipeline picks as well as external ones, which moved every column
+# after it one place along. Two lines in run_sync went on reading r[2] and r[5]
+# for the purchase and exit dates and silently got the TICKER and the BENCHMARK
+# PRICE instead, so a --commit run died on `str - timedelta` the moment anything
+# had actually been sold. The dry run unpacked the same rows BY NAME and looked
+# correct throughout, which is how this survived four commits: the run that
+# writes nothing is the only one that never touched the broken line.
+#
+# Named access cannot drift that way, and the * unpack below fails loudly — on
+# the dry-run path too — if either query ever gains or loses a column again.
+Pending = namedtuple("Pending", "ticker purchase_date shares buy_price cost_basis "
+                                "lot_count is_exited exit_date exit_price")
+Closure = namedtuple("Closure", "stream verdict_id ticker bought buy_price bench_then "
+                                "exit_date exit_price")
 
 
 def _config() -> dict:
@@ -405,7 +425,7 @@ def pending_purchases(cur, external_source: str) -> list:
         (list(HELD_STATUSES), CLOSED_STATUS, list(ANALYSIS_SOURCES),
          [external_source, *MIRRORABLE_SOURCES]),
     )
-    return cur.fetchall()
+    return [Pending(*r) for r in cur.fetchall()]
 
 
 def newly_closed(cur, external_source: str) -> list:
@@ -495,7 +515,7 @@ def newly_closed(cur, external_source: str) -> list:
         (list(ANALYSIS_SOURCES), [external_source, *MIRRORABLE_SOURCES],
          list(ANALYSIS_SOURCES)),
     )
-    return cur.fetchall()
+    return [Closure(*r) for r in cur.fetchall()]
 
 
 def orphaned_mirrors(cur, external_source: str) -> list:
@@ -646,6 +666,36 @@ def has_position_tracker(cur) -> bool:
     return bool(cur.fetchone()[0])
 
 
+def benchmark_window(rows, closures):
+    """(first date to fetch, last date to fetch), or None when none is needed.
+
+    Every date the benchmark has to be priced on: a purchase date for each row
+    being mirrored, an exit date for each finished pick among them, and both
+    ends of each position being settled.
+
+    READ THE ROWS BY NAME. The two lines this replaced indexed `closures` at
+    [2] and [5], which had been the purchase and exit dates until `newly_closed`
+    gained a leading `stream` column and pushed everything one place along —
+    after which they returned the TICKER and the BENCHMARK PRICE, and the run
+    died on `str - timedelta`. Only on --commit, and only once a position had
+    actually been sold: the dry run unpacks the same rows by name and never
+    touched the broken line, so it kept reporting the work it was about to fail
+    at. Named access is the fix; the crash was only ever the symptom.
+
+    NONE, NOT AN EMPTY RANGE, when there is nothing to price. Repricing a
+    corrected lot re-derives its marks from market prices already stored on
+    them, and unmirroring only deletes — neither wants a benchmark. A run with
+    only those to do has no dates at all here, and `min()` over an empty list
+    would end it before it did the work it was called for.
+    """
+    starts = [r.purchase_date for r in rows] + [c.bought for c in closures]
+    if not starts:
+        return None
+    ends = ([r.exit_date for r in rows if r.is_exited and r.exit_date]
+            + [c.exit_date for c in closures])
+    return min(starts), max(starts + ends)
+
+
 def run_sync(commit: bool, allow_mass: bool = False) -> dict:
     cfg = _config()
     preflight(commit)
@@ -685,14 +735,14 @@ def run_sync(commit: bool, allow_mass: bool = False) -> dict:
         cur.close(); conn.close()
         return {"pending": 0, "written": 0, "closed": 0}
 
-    dates = [r[1] for r in rows]
+    dates = [r.purchase_date for r in rows]
     if rows:
         logger.info("%d purchase(s) to mirror, %s to %s.", len(rows), min(dates), max(dates))
     if closures:
         logger.info("%d already-mirrored pick(s) have since been sold.", len(closures))
 
     unpriced = unpriced_exits(cur)
-    exited = [r for r in rows if r[6]]
+    exited = [r for r in rows if r.is_exited]
 
     if not commit:
         if rows:
@@ -751,16 +801,18 @@ def run_sync(commit: bool, allow_mass: bool = False) -> dict:
         return {"pending": len(rows), "written": 0, "closed": len(closures),
                 "would_unmirror": len(orphans), "would_reprice": len(stale)}
 
-    # One call covers every purchase AND exit date, however far back they go.
-    span = dates + [r[2] for r in closures]
-    last = max(dates + [r[7] for r in exited if r[7]] + [r[5] for r in closures])
-    series = fetch_eod_series(benchmark, min(span) - timedelta(days=10), last)
-    if not series:
-        logger.error("No %s history returned; excess return would be NULL for every "
-                     "row. Refusing to write a scoreboard that cannot compare to the "
-                     "market. Fix the API access and re-run.", benchmark)
-        cur.close(); conn.close()
-        raise SystemExit(1)
+    # One call covers every purchase AND exit date, however far back they go —
+    # or no call at all, when nothing on this run needs a price.
+    window = benchmark_window(rows, closures)
+    series = {}
+    if window:
+        series = fetch_eod_series(benchmark, window[0] - timedelta(days=10), window[1])
+        if not series:
+            logger.error("No %s history returned; excess return would be NULL for every "
+                         "row. Refusing to write a scoreboard that cannot compare to the "
+                         "market. Fix the API access and re-run.", benchmark)
+            cur.close(); conn.close()
+            raise SystemExit(1)
 
     profiles, written, finals, no_baseline = {}, 0, 0, []
     for (ticker, purchase_date, shares, buy_price, cost_basis,
