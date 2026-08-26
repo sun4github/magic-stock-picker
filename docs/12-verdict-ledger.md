@@ -61,7 +61,7 @@ as it does for every other table.
 | `run_universe` | candidate that cleared the screen | `db_log_run_universe` | once per run, before any agent runs |
 | `verdict_log` | fresh verdict | `db_log_verdict` | end of `analyze_ticker` |
 | `verdict_basis` | factor behind a verdict | `db_log_verdict` | same call |
-| `verdict_outcome` | weekly price snapshot | `cron/run_outcome_snapshot.py` | weekly, off-box |
+| `verdict_outcome` | daily price snapshot | `cron/run_outcome_snapshot.py` | daily cron, off-box (writes per subject every `snapshot_interval_days`, 1 by default) |
 
 **None of them carry a foreign key onto `pipeline_runs`.** Every other table in
 the schema cascades away with its run, which is right for per-run artefacts.
@@ -100,7 +100,7 @@ sequenceDiagram
     participant Run as _run_workflow
     participant Analyze as analyze_ticker
     participant DB as PostgreSQL
-    participant Cron as run_outcome_snapshot.py<br/>(weekly, Raspberry Pi)
+    participant Cron as run_outcome_snapshot.py<br/>(daily, Raspberry Pi)
 
     Screen->>Run: ranked candidate list
     Run->>DB: db_log_run_universe(run_id, all candidates)
@@ -110,7 +110,7 @@ sequenceDiagram
     Note over Analyze: basis block parsed AND stripped<br/>before recon gate / critic / storage
     Analyze->>DB: db_store_final_report (the product)
     Analyze->>DB: db_log_verdict (the bookkeeping)
-    Cron->>DB: weekly price + benchmark snapshot
+    Cron->>DB: price + benchmark snapshot (checked daily, written when due)
 ```
 
 ### The basis block, and why it is stripped
@@ -146,7 +146,7 @@ For the same reason, a legacy `HOLD`/`SELL` or an unparsed verdict is **not**
 logged at all rather than being coerced into a bucket. A wrong label is worse for
 a track record than a missing row.
 
-## The weekly snapshot job
+## The snapshot job (cron runs daily)
 
 [`src/cron/run_outcome_snapshot.py`](../src/cron/run_outcome_snapshot.py) is
 built to run **somewhere other than the machine that runs the agents** — it needs
@@ -154,8 +154,15 @@ no LLM, so any always-on box that can reach the database will do (a Raspberry Pi
 is the case this was written for).
 
 ```bash
-0 18 * * 5 /path/to/magic-stock-picker/.venv/bin/python /path/to/magic-stock-picker/src/cron/run_outcome_snapshot.py
+0 18 * * * /path/to/magic-stock-picker/.venv/bin/python /path/to/magic-stock-picker/src/cron/run_outcome_snapshot.py
 ```
+
+The cron fires every day, and `verdict_ledger.snapshot_interval_days` is set to
+match (1 by default), so every open subject gets a fresh snapshot every day —
+that's what a daily dashboard needs. The two remain independent knobs: raise
+the interval (7, for weekly) if daily granularity isn't needed and cutting FMP
+call volume matters more. Either way, running the cron daily costs nothing
+extra by itself — a subject not yet due is skipped without an FMP call.
 
 It **imports nothing from the rest of this repo.** `main.py` and `mcp_server.py`
 pull in google-adk, pandas, edgartools and the Gemini SDK; none of that is needed
@@ -223,9 +230,9 @@ echo 'FMP_API_KEY=your_key_here' >> ~/magic-stock-picker/webapp/.env
 `preflight()` checks both variables before any work starts and names the missing
 one, the files it looked in, and why the viewer would not have had it. Without
 that, a missing `DATABASE_URL` surfaces as `psycopg2.connect(None)` complaining
-about a host, at 18:00 on a Friday, in a log nobody has a reason to open — so the
-cost of a misconfiguration is not one failed run but however many weeks pass
-before somebody notices the scoreboard stopped moving.
+about a host, at 18:00, in a log nobody has a reason to open — so the cost of a
+misconfiguration is not one failed run but however long it takes before somebody
+notices the scoreboard stopped moving.
 
 **Then verify by hand before scheduling anything:**
 
@@ -236,10 +243,10 @@ cd ~/magic-stock-picker && python3 src/cron/run_outcome_snapshot.py
 An empty ledger prints `No ledger subjects due for a snapshot. No API calls
 made.` and exits 0 — that is a pass, not a failure.
 
-**Finally, the crontab** (`crontab -e`), Friday evening after the close:
+**Finally, the crontab** (`crontab -e`), daily after the close:
 
 ```
-0 18 * * 5 cd /path/to/magic-stock-picker && /usr/bin/python3 src/cron/run_outcome_snapshot.py >> /path/to/magic-stock-picker/logs/cron-stdout.log 2>&1
+0 18 * * * cd /path/to/magic-stock-picker && /usr/bin/python3 src/cron/run_outcome_snapshot.py >> /path/to/magic-stock-picker/logs/cron-stdout.log 2>&1
 ```
 
 The `cd` is belt-and-braces — the script resolves its own paths from `__file__`,
@@ -251,18 +258,23 @@ everything after that point already goes to `logs/cron.log`.
 Use `/usr/bin/python3` explicitly. Cron runs with a minimal PATH, and `python3`
 alone is the second-classic cron failure.
 
-**Weekly, not at 30/90/180/365 days.** Fixed horizons lose a datapoint
-permanently whenever a run is missed on the day a horizon falls, and over a year
-a missed run is a certainty rather than a risk. "Due" is defined against the last
-snapshot rather than against a schedule, so a job that misses a week catches up
-on its next run. The horizon marks are derived from `age_days` at read time.
+**Rolling per-subject interval, not fixed 30/90/180/365-day horizons.** Fixed
+horizons lose a datapoint permanently whenever a run is missed on the day a
+horizon falls, and over a year a missed run is a certainty rather than a risk.
+"Due" is defined against the last snapshot rather than against a schedule, so a
+job that misses an interval catches up on its next run. The horizon marks are
+derived from `age_days` at read time. `snapshot_interval_days` is set to 1 by
+default now, matching the cron's own daily cadence, so every open subject gets
+a fresh price every day — raise it (7, for weekly) if daily granularity is not
+needed and cutting FMP call volume matters more.
 
 **One quote call per symbol, deliberately.** `/stable/quote` does not batch: a
 comma-separated list returns HTTP 200 with an empty array — success-shaped, and
-it would write a whole week of nothing while logging no error. The real batch
-endpoints answer 402 Restricted on the Starter plan. Forty single calls once a
-week is nothing against the quota; a silently empty scoreboard is the one failure
-this job cannot afford, because nobody is watching it.
+it would write a whole interval of nothing while logging no error. The real
+batch endpoints answer 402 Restricted on the Starter plan. A few hundred single
+calls a day is nothing against the 300-calls-per-minute quota; a silently empty
+scoreboard is the one
+failure this job cannot afford, because nobody is watching it.
 
 ## Why a snapshot row has two parent columns
 
@@ -289,10 +301,10 @@ Both set, or neither, is rejected. An orphan snapshot would be a price with no r
 of what it is a price *of*, and there is no later repair for that — the subject it
 referred to is exactly the information that went missing.
 
-**One table rather than two.** They are written by the same weekly job in the same
-loop, and read together in the same comparison. Splitting them would mean two
-near-identical tables, two write paths to keep in step, and a UNION in every query that
-matters.
+**One table rather than two.** They are written by the same job (cron daily,
+writing per subject on its own interval) in the same loop, and read together in
+the same comparison. Splitting them would mean two near-identical tables, two
+write paths to keep in step, and a UNION in every query that matters.
 
 The split is what makes Q1 answerable at all: verdict rows are the system's **calls**,
 universe rows are the **control group**, and the comparison between them is the only
@@ -341,10 +353,54 @@ it follows outside recommendations. Until those purchases were recorded, the
 pipeline could only be compared against the index, which flatters or damns
 everything together depending on what the market did.
 
-`verdict_log.source` closes that gap. `PIPELINE` is a verdict this system
-reasoned its way to; anything else is a purchase made elsewhere, mirrored in
-from the position tracker by
-[`src/sync_external_picks.py`](../src/sync_external_picks.py) as a `BUY` row.
+`verdict_log.source` closes that gap. It carries three values, and the middle
+one is the one that is easy to get wrong:
+
+| `source` | Means | Screen chose it? | Analysed? |
+| :--- | :--- | :---: | :---: |
+| `PIPELINE` | the screen surfaced it and the agents analysed it | yes | yes |
+| `ONDEMAND` | a one-off `main.py TICKER` — you brought the name, the agents vetted it | **no** | yes |
+| `MANUAL` | a purchase made on an outside recommendation, mirrored in from the tracker | no | no |
+
+`MANUAL` rows are written by
+[`src/sync_external_picks.py`](../src/sync_external_picks.py) as `BUY` rows.
+
+### Why `ONDEMAND` is not just `PIPELINE`
+
+Both are this system reasoning, with the same prompts and the same factors, so
+the temptation is to file them together. **The distinction is the screen, not the
+reasoning** — and it decides whether Q1 means anything.
+
+Q1 asks *did filtering the screen beat not filtering it*, and it measures the
+verdicts against `run_universe`. A one-off run **bypasses the screener entirely**
+and therefore writes no universe rows at all. Count its verdict as a screen
+approval and you are comparing approvals against a denominator that never
+contained the name.
+
+That was not a rounding error on the history this was introduced against: **24 of
+38 `PIPELINE` verdicts had come from one-off runs**, against a universe of 14
+names from the single run that had ever screened. Q1 was comparing 38 approvals
+to a 14-name basket. After reclassification it is 14 against 14.
+
+So the split is per question, and every query states which it is:
+
+- **Q1 is `PIPELINE` only.** It is the one question that needs the control group.
+- **Q2, Q3 and Q4 read `PIPELINE` + `ONDEMAND`.** They grade the *judgement* — does
+  the verdict carry information, which factors do we read well, did the critic
+  help — and a one-off analysis is a real analyst call with real factors behind
+  it. Excluding it would discard signal from the queries that are slowest to
+  reach a usable sample.
+- **Q7–Q10 split all three streams**, so money you put into names you brought
+  yourself is visible as its own line rather than hidden in either neighbour.
+
+`refine.py` **inherits** the reviewed verdict's source, so a refined one-off keeps
+its `INDEPENDENT` and `POST_CRITIC` rows in the same population — Q4 pairs them,
+and the pairing is meaningless if the two halves sit in different buckets.
+
+> **The tracker renders these same questions.** `magic-stock-tracker`'s
+> `app/scoreboard.py` reads this table directly with its own copy of the ten
+> queries. A change to what `source` means has to land in both repos, or the two
+> disagree about one database.
 
 **What a mirrored row means.** `verdict_date` is the *purchase* date and `price`
 is the *fill* price — not the date or price of the recommendation. That choice
@@ -353,11 +409,16 @@ whatever was lost between reading an idea and acting on it. `prompt_version`,
 `git_sha` and `verdict_basis` rows are all absent, because no prompt produced
 these and no factors were articulated. That is expected, not missing data.
 
-**The one rule that is not optional.** Every query that grades *this system*
-must filter `source = 'PIPELINE'`. Without it the screen collects credit and
-blame for picks it never made — which does not add noise, it silently answers a
-different question. Q1–Q4 in `ledger-queries.sql` all carry the filter; Q7–Q9
+**The one rule that is not optional.** No query that grades *this system* may
+count a `MANUAL` row. Without that exclusion the screen collects credit and blame
+for picks it never made — which does not add noise, it silently answers a
+different question. Q1–Q4 in `ledger-queries.sql` all exclude purchases; Q7–Q10
 are the queries that deliberately put the streams side by side.
+
+Which *analysis* sources each of Q1–Q4 counts is the finer question settled
+above: Q1 is `PIPELINE` alone because it needs the screened control group, while
+Q2–Q4 also count `ONDEMAND` because they grade the judgement rather than the
+screen.
 
 **Two windows, not one.** External picks arrive by *backfill*: a purchase made
 three years ago enters the ledger already older than `track_for_days` (400) and
@@ -367,8 +428,8 @@ applied to them instead, and they are multi-year holds rather than annual
 rotations, so they need it anyway.
 
 **Nothing needs running at the moment of a trade.** Record purchases and sales in
-the tracker whenever convenient; `sync_external_picks.py --commit` runs on the
-same weekly schedule as the snapshot job and immediately before it, and picks up
+the tracker whenever convenient; `sync_external_picks.py --commit` runs daily,
+on the same schedule as the snapshot job and immediately before it, and picks up
 both. Order matters — the sync is what tells the snapshot which subjects exist
 and which have finished.
 
@@ -381,12 +442,33 @@ held — and since every query here reads the **latest** snapshot, the settled
 result would be silently overridden by a hypothetical one. Marks dated after the
 sale are deleted for that reason.
 
+### How a lot is matched to a verdict: `run_id` wins
+
+A lot carrying a `run_id` was bought off an analysis this system performed, and
+that analysis **already wrote its own verdict row when it ran**. So the sync
+checks the `run_id` link *first*, and never mirrors a lot it claims — doing so
+records one decision twice, once as the opinion and once as the purchase, and
+the dollar queries then count the same cost basis twice.
+
+The link is honoured **whatever the lot calls itself**, and that is the part that
+bit. A name analysed by a one-off run is normally recorded in the tracker as
+`MANUAL`, because the operator picked it — while its verdict is `ONDEMAND`.
+Matching on `'PIPELINE'` alone missed exactly that combination, which is how a
+second `MU` row reached the ledger: one purchase, two verdict rows, $937.53
+beside $938.54.
+
+Lots with no `run_id` — the vast majority, because nothing analysed them — fall
+back to the natural key, `(ticker, purchase_date)`, as they always have. A lot
+claimed by the `run_id` rule is excluded from the natural-key path, so one sale
+is never settled twice down two routes.
+
 **The two jobs cover different populations, deliberately.** Mirroring is
-external-only, because the pipeline already writes its own verdicts. Settling
-covers **both streams**: a closed position is closed whoever picked it. Only the
-join key differs — external picks match on `(ticker, purchase_date)`, pipeline
-picks on `run_id`, the sole link from a trade back to the analysis that
-justified it. `POST_CRITIC` rows are settled too, unlike in the cost queries
+external-only, because any analysis writes its own verdict. Settling covers
+**every stream**: a closed position is closed whoever picked it. The `run_id`
+half accepts `PIPELINE` *and* `ONDEMAND` on the verdict side and ignores the
+lot's own label; keyed on `'PIPELINE'` alone, a position bought off a one-off
+analysis could never settle at all — it would be marked at market forever, which
+is the precise failure that step exists to prevent. `POST_CRITIC` rows are settled too, unlike in the cost queries
 that exclude them: both stages describe the same holding, so both must stop
 being re-priced, and each grades to its own return off its own baseline.
 
@@ -468,7 +550,7 @@ reconstructed basis hanging off them.
 | Benchmark quote fails | warning; verdict logged with NULL baseline | excess return for that verdict |
 | Ledger write raises | warning; run continues | one ledger row |
 | Symbol stops quoting (delisted) | warning; other symbols still snapshot | that subject's later history |
-| Snapshot job misses a week | next run catches up | nothing |
+| Snapshot job misses a run | next run catches up | nothing |
 | No `stock_tracker.lots` table | sync logs it and exits 0 | nothing; this repo tracks no positions |
 | No benchmark history on a purchase date | warning; row written with NULL baseline | excess return for that pick |
 

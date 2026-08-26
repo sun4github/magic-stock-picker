@@ -291,6 +291,14 @@ exactly the weeks when an event trigger's answer changes.
   *Price*. When it fails it returns None, and None means *ask the model*.
 - **Names whose latest verdict has moved off Watch are dropped.** Their triggers
   test a case the pipeline has already abandoned.
+- **Coverage is "open buy cases," not "every Watch report."** The sweep starts
+  from stored `BUY_CASE` rows, then keeps only the ones whose ticker's latest
+  verdict is still Watch — it never looks at `final_reports` directly. A Watch
+  verdict reached with buy-case generation skipped (e.g. Phase E disabled for
+  that run) has no `BUY_CASE` row and is invisible to the sweep, silently, with
+  no warning logged. If a Watch name isn't showing up in `logs/buy_check_sweep.log`,
+  check whether it has a buy case at all before assuming its triggers are just
+  far from firing.
 - **`max_agent_checks_per_sweep` (default 8)** stops a market-wide drop turning
   one scheduled job into an unbounded bill. Escalations are ordered
   closest-to-trigger first, so the ceiling drops the least urgent; the rest are

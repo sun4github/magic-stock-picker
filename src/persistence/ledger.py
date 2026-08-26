@@ -123,9 +123,28 @@ def db_log_verdict(run_id: str, ticker: str, verdict: str, basis_json: str,
                    industry: str = "", magic_rank: int = 0,
                    benchmark_symbol: str = "", benchmark_price: float = 0.0,
                    prompt_version: str = "", git_sha: str = "",
-                   analysis_key: str = "") -> str:
+                   analysis_key: str = "", source: str = "PIPELINE") -> str:
     """
     Record one FRESH verdict plus the factors behind it. Returns the verdict_id.
+
+    `source` says WHERE THE PICK CAME FROM, which is not the same as who
+    analysed it:
+
+      * PIPELINE — the screen chose this name and the agents analysed it. Only
+        these have a `run_universe` control group behind them, which is why Q1
+        ("did filtering the screen beat not filtering it") counts these alone.
+      * ONDEMAND — the agents analysed it, but the SCREEN never chose it: a
+        one-off `main.py TICKER`. The judgement is the system's and is graded
+        as such in Q2/Q3/Q4, but the name came from the operator, so counting
+        it in Q1 would compare approvals against a universe that never
+        contained it.
+      * anything else (MANUAL) — not an analysis at all: a purchase made on an
+        outside recommendation, mirrored in from the position tracker by
+        sync_external_picks.py.
+
+    The PIPELINE/ONDEMAND split is the one that is easy to get wrong, because
+    both are this system reasoning. The distinction is the SCREEN, not the
+    reasoning.
 
     Only ever called on the fresh-analysis path. The reuse path
     (db_copy_ticker_outputs) must not reach here: copying a prior report into a
@@ -158,13 +177,15 @@ def db_log_verdict(run_id: str, ticker: str, verdict: str, basis_json: str,
 
         conn = get_db_connection()
         cur = conn.cursor()
+        source = (source or "PIPELINE").strip().upper() or "PIPELINE"
         cur.execute('''
             INSERT INTO verdict_log (
                 run_id, ticker, company_name, verdict_date, verdict, verdict_stage,
                 price, market_cap, shares_outstanding, sector, industry, magic_rank,
-                benchmark_symbol, benchmark_price, prompt_version, git_sha, analysis_key
+                benchmark_symbol, benchmark_price, prompt_version, git_sha, analysis_key,
+                source
             ) VALUES (%s, %s, %s, CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s)
             RETURNING verdict_id
         ''', (
             run_id or None, ticker, company_name or None, verdict,
@@ -174,6 +195,7 @@ def db_log_verdict(run_id: str, ticker: str, verdict: str, basis_json: str,
             int(magic_rank) if magic_rank else None,
             (benchmark_symbol or "").strip().upper() or None, _num(benchmark_price),
             prompt_version or None, git_sha or None, analysis_key or None,
+            source,
         ))
         verdict_id = cur.fetchone()[0]
 
@@ -209,8 +231,8 @@ def db_log_verdict(run_id: str, ticker: str, verdict: str, basis_json: str,
         conn.commit()
         cur.close()
         conn.close()
-        logger.info(f"[{ticker}] Ledger: logged {verdict} ({verdict_stage}) "
-                    f"with {stored} factor(s).")
+        logger.info(f"[{ticker}] Ledger: logged {verdict} ({verdict_stage}, "
+                    f"source={source}) with {stored} factor(s).")
         return str(verdict_id)
     except Exception as e:
         logger.error(f"Error logging verdict for {ticker}: {e}")

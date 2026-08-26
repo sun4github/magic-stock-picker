@@ -2413,6 +2413,16 @@ and a pull toward self-flattery to a table whose entire purpose is to be
 unflattering when the record is. `cron/run_outcome_snapshot.py` contains no
 prompt and no model.
 
+**The screen and the reasoning are recorded separately.** `verdict_log.source` is
+`PIPELINE` when the screen surfaced the name, `ONDEMAND` when a one-off
+`main.py TICKER` analysed a name the operator brought, and `MANUAL` for a
+purchase made on an outside recommendation. Only a screening run writes
+`run_universe`, so §13.1's first question — did filtering the screen beat not
+filtering it — counts `PIPELINE` alone; the questions that grade the *judgement*
+count `ONDEMAND` too, because a one-off analysis is a real analyst call with real
+factors. Conflating the two made that first question compare 38 approvals against
+a 14-name universe.
+
 **Factors are a controlled vocabulary.** `verdict_basis.factor_key` is drawn from
 `verdict_ledger.factor_taxonomy` in `config.yaml`. "Customer concentration",
 "client concentration risk" and "top-10 customer exposure" are one factor written
@@ -2447,9 +2457,12 @@ underneath it cannot be recovered afterwards.
 
 ### 13.5 Deployment
 
-The weekly snapshot job runs on the Raspberry Pi that already hosts
+The snapshot job's cron runs daily on the Raspberry Pi that already hosts
 `magic-stock-tracker`'s daily sell check, not on the machine that runs the
-agents. It has no LLM, so it needs none of the agent stack: its dependencies are
+agents. `snapshot_interval_days` (1 by default, so every open subject gets a
+fresh price each day; see §13 above) is a separate config knob for how often
+any one subject actually gets re-quoted, and can be raised (7, for weekly) if
+daily granularity isn't needed. It has no LLM, so it needs none of the agent stack: its dependencies are
 `requests`, `psycopg2-binary`, `python-dotenv` and `pyyaml`
 (`requirements-cron.txt`), and its environment is `DATABASE_URL` and
 `FMP_API_KEY`. It imports nothing from this repo on purpose — see the module

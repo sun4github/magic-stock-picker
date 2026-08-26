@@ -21,9 +21,11 @@ REM  machine, where the agent stack is installed.
 REM
 REM  The ledger snapshot job (src/cron/run_outcome_snapshot.py) is NOT scheduled
 REM  here. It has no LLM in it, and it belongs on the Raspberry Pi alongside
-REM  magic-stock-tracker's daily check. Its crontab line is:
+REM  magic-stock-tracker's daily check. It now runs daily (not weekly - a
+REM  per-subject snapshot is still spaced out by config, this just shrinks the
+REM  catch-up window on a missed run). Its crontab line is:
 REM
-REM      0 18 * * 5 /path/to/magic-stock-picker/.venv/bin/python \
+REM      0 18 * * * /path/to/magic-stock-picker/.venv/bin/python \
 REM          /path/to/magic-stock-picker/src/cron/run_outcome_snapshot.py
 REM
 REM  WHEN IT RUNS

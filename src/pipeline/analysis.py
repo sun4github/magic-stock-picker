@@ -67,7 +67,8 @@ logger = logging.getLogger("InvestmentAgentPipeline")
 
 def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: str = "",
                    candidate: dict = None, force: bool = False,
-                   skip_sale_advisor: bool = False, skip_buy_case: bool = False) -> dict:
+                   skip_sale_advisor: bool = False, skip_buy_case: bool = False,
+                   on_demand: bool = False) -> dict:
     """Run the Phase-B agent sequence for one ticker and persist its
     outputs and final report. Returns the ticker's token-usage dict (zero usage
     if the pipeline failed).
@@ -81,6 +82,15 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     Formula Metrics' section of the final report -- kept separate from the LLM
     prompt so those figures are always present and correct even if the analyst
     agent's own writeup omits or misstates them.
+
+    `on_demand` marks a ticker the SCREEN never chose — a one-off
+    `main.py TICKER`. It changes nothing about the analysis; it only sets
+    `verdict_log.source` to ONDEMAND instead of PIPELINE, which keeps the name
+    out of Q1's "did filtering the screen beat not filtering it" comparison.
+    Such a run writes no `run_universe` rows, so counting its verdict as a
+    screen approval would measure approvals against a universe that never
+    contained the name. Q2/Q3/Q4 still grade it: the judgement is the system's
+    either way.
 
     Assumes the parent pipeline_runs row for `run_id` already exists (the
     agent_outputs/final_reports tables have a FK onto it).
@@ -283,6 +293,7 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
                 prompt_version=_prompt_version(),
                 git_sha=_git_sha(),
                 analysis_key=analysis_key or "",
+                source="ONDEMAND" if on_demand else "PIPELINE",
             )
         except Exception as e:
             logger.warning(f"[{ticker}] Verdict ledger write failed ({e}); the "

@@ -324,11 +324,16 @@ verdict_ledger:
   # change, so it is stored per-row (verdict_log.benchmark_symbol) as well.
   benchmark_symbol: "SPY"
 
-  # How often the outcome job re-quotes every open subject. Weekly rather than
-  # at fixed 30/90/180/365 horizons: a cron run missed on a horizon date would
-  # lose that datapoint permanently, and over a year a missed run is a certainty.
-  # The horizon marks are derived from age_days at read time instead.
-  snapshot_interval_days: 7
+  # How often the outcome job re-quotes any given subject. The cron itself also
+  # runs daily now (see the crontab in cron/run_outcome_snapshot.py), so this is
+  # set to match it -- every open subject gets a fresh snapshot each day, which
+  # is what feeds a daily dashboard. Raise it (7 for weekly, say) if daily
+  # granularity isn't needed and cutting FMP call volume matters more. Whatever
+  # it's set to, a rolling interval beats fixed 30/90/180/365-day horizons: a
+  # subject missed on a horizon date would lose that datapoint permanently, and
+  # over a year a missed one is a certainty. The horizon marks are derived from
+  # age_days at read time instead.
+  snapshot_interval_days: 1
   # Stop snapshotting a subject after this long. One year is the holding period
   # the strategy actually uses (see magic-stock-tracker's rotation rules), so a
   # verdict older than this has already been acted on one way or the other.
@@ -351,6 +356,23 @@ verdict_ledger:
   # position tracker by sync_external_picks.py. Must match the label used on
   # the tracker's own lots (stock_tracker.lots.source), or the sync re-enters
   # the same purchases under a second name every time it runs.
+  #
+  # verdict_log.source has three values in total, and only this one is
+  # configurable because only this one has to agree with another application:
+  #
+  #   PIPELINE  - the screen chose the name and the agents analysed it. The
+  #               only rows with a run_universe control group behind them,
+  #               which is why Q1 counts these alone.
+  #   ONDEMAND  - a one-off `main.py TICKER`. The agents analysed it, but the
+  #               SCREEN never chose it, so it has no universe row and must
+  #               stay out of Q1. Q2/Q3/Q4 still count it: the judgement is
+  #               the system's either way. Set in code, not here.
+  #   this value - not an analysis at all; a purchase made elsewhere.
+  #
+  # A lot carrying a run_id is matched to its analysis verdict by that run_id
+  # and is NEVER mirrored, whatever the lot's own source says. A name bought
+  # off a one-off run is usually recorded in the tracker as MANUAL while its
+  # verdict is ONDEMAND, and mirroring it would enter one decision twice.
   external_source: "MANUAL"
 
   # Controlled vocabulary for verdict_basis.factor_key. The analyst picks from
@@ -606,7 +628,7 @@ rate_limits:
 
 screening_parameters:
   min_market_cap: 100000000  # $100 Million minimum
-  universe_limit: 2500        # Max companies to pull from the FMP screener universe (raise to capture more mid/small caps)
+  universe_limit: 5000        # Max companies to pull from the FMP screener universe (raise to capture more mid/small caps)
 
   # --- Greenblatt's step-by-step screen ---------------------------------------
   # "The Little Book That Still Beats the Market", step-by-step appendix. These are
@@ -617,9 +639,9 @@ screening_parameters:
   #
   # Set any of these to null to disable that gate.
 
-  # Step 1: "screen for ROA of at least 25%".
-  min_roa: 0.25
-  # Which ROA the 25% hurdle is measured against:
+  # Step 1: "screen for ROA of at least 20%".
+  min_roa: 0.20
+  # Which ROA the 20% hurdle is measured against:
   #   "ebit"       - EBIT / Total Assets. Pre-tax, pre-interest: the same numerator
   #                  as ROC and Earnings Yield, so the whole pipeline stays on one
   #                  basis and ROA vs ROC is an apples-to-apples comparison of
