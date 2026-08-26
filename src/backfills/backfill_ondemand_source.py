@@ -83,6 +83,21 @@ def double_counted_mirrors(cur) -> list:
     The mirror is identified positively — no prompt_version, no git_sha, no
     factors — rather than by elimination, so a real analysis can never be caught
     by this even if it somehow shared a date with a purchase.
+
+    TWO SHAPES, one rule
+    --------------------
+    a. The lot carries a run_id naming the analysis. Exact, and how MU was found.
+    b. The lot carries no run_id, but an ONDEMAND analysis sits on the SAME
+       TICKER AND THE SAME DATE. The tracker has no 'ONDEMAND' lot source — a
+       lot is only ever MANUAL or PIPELINE — so a name analysed on demand and
+       bought that day is a MANUAL lot beside an ONDEMAND verdict, with nothing
+       but the date linking them. That is how BAC was found: analysed WATCH at
+       64.51 and bought at 64.69 on 2026-08-17.
+
+    THE DATE MUST MATCH EXACTLY, and that is the whole safety margin. Relaxed to
+    "same ticker", this would delete a 2017 AMZN purchase because AMZN was
+    analysed in 2026 — 3,431 days later. Seventeen ticker pairs in this ledger
+    are in exactly that position and every one of them must be left alone.
     """
     cur.execute("""
         SELECT m.verdict_id, m.ticker, m.verdict_date, m.price, m.source,
@@ -93,12 +108,17 @@ def double_counted_mirrors(cur) -> list:
           JOIN stock_tracker.lots l
             ON l.ticker = m.ticker
            AND l.purchase_date = m.verdict_date
-           AND l.run_id IS NOT NULL
+           AND l.source <> 'PIPELINE'
           JOIN verdict_log a
-            ON a.run_id::text = l.run_id
-           AND a.ticker = l.ticker
+            ON a.ticker = l.ticker
            AND a.source = ANY(%s)
            AND a.verdict_stage = 'INDEPENDENT'
+           AND (
+                 -- (a) linked by run_id
+                 (l.run_id IS NOT NULL AND a.run_id::text = l.run_id)
+                 -- (b) no run_id, but a one-off analysis on the very same day
+                 OR (a.source = 'ONDEMAND' AND a.verdict_date = l.purchase_date)
+               )
          WHERE m.source <> ALL(%s)
            AND m.prompt_version IS NULL
            AND m.git_sha IS NULL
@@ -142,9 +162,10 @@ def main() -> int:
             print(f"    {vdate}  {ticker:<6} mirror {src} @ {float(price):.2f} "
                   f"({marks} mark(s)) duplicates {asrc} @ {float(aprice):.2f}")
         if mirrors:
-            print("\n    The lot carries the analysis run_id, so the purchase is already "
-                  "\n    represented by the analysis verdict. Keeping both would count one "
-                  "\n    decision twice, and its cost basis twice in Q10.")
+            print("\n    The lot is linked to that analysis -- by run_id, or by having been "
+                  "\n    bought on the very same day it was analysed -- so the purchase is "
+                  "\n    already represented by the analysis verdict. Keeping both records one "
+                  "\n    decision twice, and attaches its cost basis twice in Q10.")
     else:
         print("\n2. No stock_tracker.lots table here, so no mirrors to check.")
 

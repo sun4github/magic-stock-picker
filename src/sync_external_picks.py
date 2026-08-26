@@ -209,6 +209,22 @@ HELD_STATUSES = ("OPEN", "TARGET_REACHED")
 # becomes two verdict rows: the analysis AND a mirror of the same decision.
 ANALYSIS_SOURCES = ("PIPELINE", "ONDEMAND")
 
+# THE TRACKER HAS NO 'ONDEMAND' LOT SOURCE. A lot is only ever MANUAL or
+# PIPELINE, because the tracker records who chose the name, not which command
+# analysed it. So a name analysed by a one-off run and then bought is a MANUAL
+# lot pointing at an ONDEMAND verdict, and matching has to be relaxed on the
+# verdict side to see it:
+#
+#   * with a run_id  -> match the analysis on the run. Exact, and preferred.
+#   * without one    -> match on (ticker, purchase_date), accepting a MANUAL or
+#                       an ONDEMAND verdict. That is how BAC — analysed and
+#                       bought the same day, entered without a run_id — is
+#                       recognised as one decision rather than two.
+#
+# The date must match EXACTLY. Relaxing to "same ticker" would marry a 2017 AMZN
+# purchase to a 2026 AMZN analysis 3,431 days later and call them one decision.
+MIRRORABLE_SOURCES = ("ONDEMAND",)  # + external_source, added at call time
+
 # A CLOSED lot is mirrored too, but ONLY when it carries a sale_price. Measured
 # to today's price a sold position reports a return nobody earned; measured to
 # its exit it is a finished, gradeable pick. A lot closed without a recorded
@@ -373,17 +389,21 @@ def pending_purchases(cur, external_source: str) -> list:
                   WHERE v.run_id::text = l.run_id
                     AND v.ticker = l.ticker
                     AND v.source = ANY(%s))
-           -- Fallback match: the ordinary external purchase, keyed on the natural
-           -- key the mirror itself uses.
+           -- Fallback match on the natural key, accepting an ONDEMAND verdict as
+           -- well as an existing mirror. A one-off analysis bought the same day
+           -- IS the ledger row for that purchase; writing a mirror beside it
+           -- records the decision twice. The date must match exactly — see
+           -- MIRRORABLE_SOURCES.
            AND NOT EXISTS (
                  SELECT 1 FROM verdict_log v
-                  WHERE v.source = %s
+                  WHERE v.source = ANY(%s)
                     AND v.ticker = l.ticker
                     AND v.verdict_date = l.purchase_date)
          GROUP BY l.ticker, l.purchase_date
          ORDER BY l.purchase_date, l.ticker
         """,
-        (list(HELD_STATUSES), CLOSED_STATUS, list(ANALYSIS_SOURCES), external_source),
+        (list(HELD_STATUSES), CLOSED_STATUS, list(ANALYSIS_SOURCES),
+         [external_source, *MIRRORABLE_SOURCES]),
     )
     return cur.fetchall()
 
@@ -447,7 +467,10 @@ def newly_closed(cur, external_source: str) -> list:
                   WHERE a.run_id::text = l.run_id
                     AND a.ticker = l.ticker
                     AND a.source = ANY(%s))
-         WHERE v.source = %s
+         -- ONDEMAND as well as the mirror source: a lot bought off a one-off
+         -- analysis and entered WITHOUT a run_id is matched here, and if this
+         -- half only saw mirrors that position could never gain an exit_date.
+         WHERE v.source = ANY(%s)
            AND v.exit_date IS NULL
          GROUP BY v.verdict_id, v.ticker, v.verdict_date, v.price, v.benchmark_price
         HAVING BOOL_AND(l.status::text = 'CLOSED' AND l.sale_price IS NOT NULL)
@@ -469,7 +492,8 @@ def newly_closed(cur, external_source: str) -> list:
 
          ORDER BY 7
         """,
-        (list(ANALYSIS_SOURCES), external_source, list(ANALYSIS_SOURCES)),
+        (list(ANALYSIS_SOURCES), [external_source, *MIRRORABLE_SOURCES],
+         list(ANALYSIS_SOURCES)),
     )
     return cur.fetchall()
 
