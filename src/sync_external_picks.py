@@ -566,10 +566,18 @@ def stale_mirrors(cur, external_source: str) -> list:
            AND l.source <> 'PIPELINE'
          WHERE v.source = %s
          GROUP BY v.verdict_id, v.ticker, v.verdict_date, v.price
-        -- Rounded to the cent the ledger stores, so float noise in a weighted
-        -- average does not present itself as a correction every single run.
-        HAVING ROUND(SUM(l.shares * l.buy_price) / NULLIF(SUM(l.shares), 0), 2)
-               IS DISTINCT FROM ROUND(v.price, 2)
+        -- Compared as a DIFFERENCE against half a cent, not as two rounded
+        -- values. Rounding both and comparing looks equivalent and is not: it is
+        -- discontinuous at the .xx5 boundary, so two prices 0.0000162 apart can
+        -- round to 249.62 and 249.63 and report a correction forever.
+        --
+        -- That is not hypothetical, and it does not self-heal. Repricing writes
+        -- the lot's value into a NUMERIC(14,4) column, which stores 249.6250
+        -- again, which rounds up again — so every committed run rewrote the
+        -- price and re-derived every mark on that row, for no change. CIEN sat
+        -- in exactly that loop.
+        HAVING ABS(SUM(l.shares * l.buy_price) / NULLIF(SUM(l.shares), 0) - v.price)
+               >= 0.005
          ORDER BY v.verdict_date
         """,
         (external_source,),
