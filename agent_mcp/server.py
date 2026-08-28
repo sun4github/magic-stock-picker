@@ -1173,7 +1173,6 @@ def check_ticker_screen_gates(ticker: str) -> dict:
     # The gate-check reuses the pipeline's own screener logic, which needs pandas -
     # deliberately NOT installed in this thin operator env. Shell out to the full
     # interpreter (MSP_PYTHON or this one) and read the JSON it prints.
-    import shlex
     import subprocess
     import json as _json
     command = [jobs._interpreter(), str(SRC_DIR / "main.py"), "--gate-check", ticker]
@@ -1192,7 +1191,6 @@ def check_ticker_screen_gates(ticker: str) -> dict:
                 "stderr": (proc.stderr or "").strip()[-500:]}
     # The pipeline logger may write to stdout on some hosts, so don't assume the
     # JSON is the last line. Scan for the line that is a complete JSON object.
-    import json as _json
     result = None
     for line in reversed((proc.stdout or "").splitlines()):
         line = line.strip()
