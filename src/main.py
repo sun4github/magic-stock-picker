@@ -43,6 +43,7 @@ from google.genai import types
 from mcp_server import (
     run_magic_formula_screener,
     compute_ticker_magic_metrics,
+    check_ticker_screen_gates,
     fetch_sec_10k_data,
     fmp_metrics_extractor,
     fmp_company_profile,
@@ -405,6 +406,23 @@ def run_from_csv(csv_path: str = None, force: bool = False,
     _run_phase_b(top_candidates, f"CSV '{csv_path}'", force, skip_sale_advisor, skip_buy_case)
 
 
+def run_gate_check(ticker: str):
+    """Check a single ticker against the screen's eligibility gates. No analysis,
+    no money, no DB writes — just PASS/FAIL against the same gates the screener
+    applies, with the exact rejecting gate on a failure.
+
+    Prints the result as JSON (the operator MCP tool shells out and reads stdout).
+    Reuses `check_ticker_screen_gates` from the agents' toolbelt so this can never
+    disagree with the full screen's own logic.
+    """
+    ticker = ticker.strip().upper()
+    logger.info(f"Checking {ticker} against screen eligibility gates...")
+    result = json.loads(check_ticker_screen_gates(ticker))
+    # Print as clean JSON for the caller (operator MCP tool) to parse.
+    print(json.dumps(result, indent=2))
+    return result
+
+
 def run_single_ticker(ticker: str, company_name: str = None, force: bool = False,
                       skip_sale_advisor: bool = False, skip_buy_case: bool = False):
     """On-demand Phase B: run the skeptical analysis for a single arbitrary
@@ -748,6 +766,10 @@ if __name__ == "__main__":
         help="Test whether TICKER's buy conditions are now met, and advise Buy/Wait (no full analysis)",
     )
     parser.add_argument(
+        "--gate-check", action="store_true",
+        help="Check whether TICKER passes the screen's eligibility gates (ROA/PEG etc). No analysis, no cost; prints JSON",
+    )
+    parser.add_argument(
         "--run", metavar="RUN_ID", default=None,
         help="With --sell-check / --buy-check: evaluate against a SPECIFIC run's SALE_CASE (the run you purchased under) or BUY_CASE, instead of the latest",
     )
@@ -793,7 +815,7 @@ if __name__ == "__main__":
         conflicting = [
             name for name, given in (
                 ("--from-csv", args.from_csv), ("--sell-check", args.sell_check),
-                ("--buy-check", args.buy_check),
+                ("--buy-check", args.buy_check), ("--gate-check", args.gate_check),
                 ("--skip-sale-advisor", args.skip_sale_advisor),
                 ("--skip-buy-case", args.skip_buy_case), ("--force", args.force),
                 ("TICKER", args.ticker),
@@ -819,6 +841,12 @@ if __name__ == "__main__":
         if args.skip_buy_case:
             parser.error("--skip-buy-case is not valid with --buy-check (it runs no Phase E)")
         run_buy_check(args.ticker, args.company, args.run)
+    elif args.gate_check:
+        if not args.ticker:
+            parser.error("--gate-check requires a TICKER (e.g. python main.py --gate-check CROX)")
+        if args.skip_sale_advisor or args.skip_buy_case or args.run:
+            parser.error("--gate-check runs no Phase B/C/E; cannot combine with --skip-*, --run, --force")
+        run_gate_check(args.ticker)
     elif args.from_csv:
         run_from_csv(args.from_csv, args.force, args.skip_sale_advisor, args.skip_buy_case)
     elif args.ticker:

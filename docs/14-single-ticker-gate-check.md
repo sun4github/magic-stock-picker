@@ -1,9 +1,15 @@
 # Code Walkthrough — `check_ticker_screen_gates`
 
-**Branch:** `feature/single-ticker-screener-check`
+**Branches:**
+- `feature/single-ticker-screener-check` — the core function (agents' toolbelt)
+- `feature/operator-gate-check` — exposes it on the operator MCP server
+
 **Files changed:**
-- `src/data/screener.py` — new MCP tool `check_ticker_screen_gates` (+ 3 imports)
-- `src/data/__init__.py` — export the new tool
+- `src/data/screener.py` — new MCP tool `check_ticker_screen_gates` (+ 3 imports)  *(agents' layer)*
+- `src/data/__init__.py` — export the new tool  *(agents' layer)*
+- `src/mcp_server.py` — re-export the function  *(agents' layer)*
+- `src/main.py` — new `--gate-check TICKER` CLI mode  *(bridge)*
+- `agent_mcp/server.py` — operator MCP tool that shells out to the CLI  *(operator layer)*
 
 ## What this tool does
 
@@ -129,6 +135,12 @@ Live (against the MCP server, after deploy):
 ```
 Expected: `FAIL` / `ratio` / `roa_below_min` (DY's EBIT ROA ≈ 12.3% < 20%).
 
+CLI (needs the full interpreter with pandas):
+```bash
+python src/main.py --gate-check MO     # → PASS with metrics
+python src/main.py --gate-check DY     # → FAIL, Gate=ratio, Reason=roa_below_min
+```
+
 ## Deploying
 
 1. Merge/pull this branch on the Windows host (`E:\repos\magic-stock-picker`).
@@ -136,3 +148,32 @@ Expected: `FAIL` / `ratio` / `roa_below_min` (DY's EBIT ROA ≈ 12.3% < 20%).
    Startup-folder launcher) — new `@mcp.tool()` registrations only appear after
    a restart.
 3. Verify with `tools/snapshot_tool_surface.py` (the full server's tool count goes 33 → 34).
+
+## Operator-server exposure (branch `feature/operator-gate-check`)
+
+The core `check_ticker_screen_gates` function lives in the **agents' toolbelt**
+(`src/data/screener.py`), which the operator server at port 8765 does NOT expose
+— it has a separate registry (`agent_mcp/server.py`) and a deliberately thin
+environment (no pandas/google-adk). To make the gate-check callable by external
+clients (an agent like OpenClaw dialling 8765), this branch adds:
+
+1. **`src/main.py --gate-check TICKER`** — a CLI mode that calls the core function
+   and prints the result as JSON. It goes through `main.py` because that is the
+   pipeline entry point the operator layer already drives; `main.py` imports the
+   full agent stack (it already does, for every other mode).
+2. **`agent_mcp/server.py` → `check_ticker_screen_gates(ticker)`** — an operator
+   MCP tool that shells out to the CLI synchronously (the check is a few FMP
+   calls, seconds, no LLM, no money) and parses the JSON. It uses
+   `jobs._interpreter()` / `MSP_PYTHON` so it runs under the heavy interpreter
+   that has pandas, not the thin operator env.
+3. **`src/mcp_server.py`** — re-exports the function so `main.py` can import it.
+
+**Why subprocess and not a direct import in the operator tool:** the operator
+server deliberately avoids importing the pipeline (no pandas in
+`agent_mcp/requirements.txt`), and the codebase's stated rule is that the
+operator layer reaches the pipeline only via subprocess (see `docs/13-mcp-server.md`).
+
+**Verify the operator tool is registered** (after deploy + restart):
+```bash
+# tools/list should now show 22 tools including check_ticker_screen_gates
+```
