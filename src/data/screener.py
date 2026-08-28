@@ -29,6 +29,9 @@ from magic_formula_starter_screener import (
     attach_growth_metrics,
     fmp_get,
     FMPError,
+    _universe_exclusion_reason,
+    ratio_gate_reason,
+    growth_gate_reason,
 )
 
 
@@ -172,5 +175,129 @@ def compute_ticker_magic_metrics(ticker: str) -> str:
             "IntangiblesShareOfAssets_Pct": f"{round(intang_share * 100, 1)}%" if intang_share is not None else None,
             "BalanceSheetDate": metrics.get("BalanceSheetDate"),
         })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+@mcp.tool()
+def check_ticker_screen_gates(ticker: str) -> str:
+    """
+    Check whether a SINGLE ticker passes the Magic Formula screen's eligibility
+    gates, without running the full universe screen. Returns a verdict of PASS or
+    FAIL with the exact gate that rejected it (or None if it passes).
+
+    This is the on-demand single-ticker counterpart to the whole-universe screen:
+    it applies the SAME gates in the SAME order the screener does —
+      1. universe exclusion (sector / industry / ADR / fund-ETF),
+      2. Greenblatt's ROA and P/E cuts,
+      3. Lynch's PEG / growth cuts.
+    So a ticker that passes here is one the full screen would have kept, and a
+    ticker that fails reports the precise reason (e.g. "roa_below_min").
+
+    Use this to pre-screen a candidate before spending on a full analysis, or to
+    explain why a name did not make the rankings. Returns JSON with the verdict,
+    the failing gate (if any), and the underlying metrics.
+    """
+    api_key = os.getenv("FMP_API_KEY")
+    if not api_key:
+        return json.dumps({"error": "FMP_API_KEY not configured"})
+    try:
+        # 1. Universe exclusion — needs the company profile (sector/industry/country).
+        time.sleep(0.20)
+        prof = fmp_get(
+            "https://financialmodelingprep.com/stable/profile",
+            params={"symbol": ticker, "apikey": api_key},
+            context=f"{ticker} profile",
+        )
+        row = prof[0] if isinstance(prof, list) and prof else prof
+        if not isinstance(row, dict) or not row.get("symbol"):
+            return json.dumps({"error": f"No profile found for {ticker}"})
+        company = {
+            "symbol": row.get("symbol"),
+            "companyName": row.get("companyName"),
+            "sector": row.get("sector"),
+            "industry": row.get("industry"),
+            "country": row.get("country"),
+            "isEtf": row.get("isEtf"),
+            "isFund": row.get("isFund"),
+        }
+        universe_reason = _universe_exclusion_reason(company)
+        if universe_reason:
+            return json.dumps({
+                "Symbol": ticker,
+                "CompanyName": row.get("companyName", ticker),
+                "Verdict": "FAIL",
+                "Gate": "universe_exclusion",
+                "Reason": universe_reason,
+                "Message": f"Rejected before financials: {universe_reason}.",
+            })
+
+        # 2. Live market cap (Starter plan: market-capitalization endpoint).
+        time.sleep(0.20)
+        mc = fmp_get(
+            "https://financialmodelingprep.com/stable/market-capitalization",
+            params={"symbol": ticker, "apikey": api_key},
+            context=f"{ticker} market-cap",
+        )
+        live_cap = mc[0].get("marketCap", 0) if isinstance(mc, list) and mc else 0
+
+        # 3. Magic Formula metrics (ROC, EY, ROA, P/E).
+        metrics = compute_company_metrics_detailed(ticker, live_cap, api_key)
+        if not metrics.get("ok"):
+            return json.dumps({
+                "Symbol": ticker,
+                "CompanyName": row.get("companyName", ticker),
+                "Verdict": "FAIL",
+                "Gate": "metrics_unavailable",
+                "Reason": metrics.get("reason"),
+                "Message": metrics.get("message"),
+            })
+
+        # 4. Greenblatt's ROA / P/E gates.
+        ratio_reason = ratio_gate_reason(metrics)
+        if ratio_reason:
+            return json.dumps({
+                "Symbol": ticker,
+                "CompanyName": row.get("companyName", ticker),
+                "Verdict": "FAIL",
+                "Gate": "ratio",
+                "Reason": ratio_reason,
+                "Message": f"Rejected by Greenblatt's ROA/P/E gate: {ratio_reason}.",
+                "ROA_Pct": metrics.get("ROA"),
+                "PE_Ratio": metrics.get("PE"),
+            })
+
+        # 5. Lynch's PEG / growth gates (costs one extra request, same as the screen).
+        attach_growth_metrics(ticker, metrics, api_key)
+        growth_reason = growth_gate_reason(metrics)
+        if growth_reason:
+            return json.dumps({
+                "Symbol": ticker,
+                "CompanyName": row.get("companyName", ticker),
+                "Verdict": "FAIL",
+                "Gate": "growth",
+                "Reason": growth_reason,
+                "Message": f"Rejected by Lynch's PEG/growth gate: {growth_reason}.",
+                "EPSGrowth": metrics.get("EPSGrowth"),
+                "PEG": metrics.get("PEG"),
+            })
+
+        # Passed every gate.
+        return json.dumps({
+            "Symbol": ticker,
+            "CompanyName": row.get("companyName", ticker),
+            "Verdict": "PASS",
+            "Gate": None,
+            "Reason": None,
+            "Message": "Passes all Magic Formula screen gates.",
+            "ROA_Pct": metrics.get("ROA"),
+            "PE_Ratio": metrics.get("PE"),
+            "EPSGrowth": metrics.get("EPSGrowth"),
+            "PEG": metrics.get("PEG"),
+            "ROC_Pct": metrics.get("ROC"),
+            "EarningsYield_Pct": metrics.get("EarningsYield"),
+        })
+    except FMPError as e:
+        return json.dumps({"error": f"Could not check {ticker}: {e}"})
     except Exception as e:
         return json.dumps({"error": str(e)})
