@@ -27,10 +27,15 @@ from .fundamentals import (
     fmp_quarterly_trends,
 )
 from .news import fmp_stock_news, web_search_tool
-from .screener import compute_ticker_magic_metrics, run_magic_formula_screener
+from .screener import (
+    check_ticker_screen_gates,
+    compute_ticker_magic_metrics,
+    run_magic_formula_screener,
+)
 from .sec import fetch_sec_10k_data
 
 __all__ = [
+    "check_ticker_screen_gates",
     "compute_ticker_magic_metrics",
     "fetch_sec_10k_data",
     "fmp_company_profile",
