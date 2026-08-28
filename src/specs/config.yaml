@@ -334,23 +334,13 @@ verdict_ledger:
   # over a year a missed one is a certainty. The horizon marks are derived from
   # age_days at read time instead.
   snapshot_interval_days: 1
-  # Stop snapshotting a subject after this long. One year is the holding period
-  # the strategy actually uses (see magic-stock-tracker's rotation rules), so a
-  # verdict older than this has already been acted on one way or the other.
+  # Verdicts are NOT age-capped: an open position (verdict_log.exit_date IS
+  # NULL) is re-quoted forever, so it stays on the MST scoreboard no matter how
+  # old the pick is. Sold/closed picks are excluded via exit_date and never
+  # re-priced. The only age window left is for the universe control group
+  # below. A daily quote per open ticker is free within the FMP subscription,
+  # so tracking open positions forever costs nothing meaningful.
   track_for_days: 400
-
-  # The same limit for externally-sourced picks (verdict_log.source <>
-  # 'PIPELINE'), which needs to be much larger for two reasons.
-  #
-  # These are multi-year holds, not annual rotations, so 400 days would stop
-  # measuring a position still being held. Worse, they are entered by BACKFILL:
-  # a purchase made three years ago arrives in the ledger already older than
-  # track_for_days and would never be snapshotted even once — silently, since
-  # "no subjects due" is indistinguishable from a quiet week in the log.
-  #
-  # Six years covers the history on hand with room to spare. The cost of raising
-  # it is one quote per subject per week.
-  external_track_for_days: 2200
 
   # Value written to verdict_log.source for purchases mirrored in from the
   # position tracker by sync_external_picks.py. Must match the label used on
