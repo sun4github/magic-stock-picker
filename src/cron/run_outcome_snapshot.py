@@ -135,7 +135,6 @@ _DEFAULTS = {
     "benchmark_symbol": "SPY",
     "snapshot_interval_days": 1,
     "track_for_days": 400,
-    "external_track_for_days": 2200,
 }
 
 
@@ -197,30 +196,33 @@ def fetch_quotes(symbols: list) -> dict:
 def _due(cur, cfg: dict) -> tuple:
     """Rows needing a snapshot today: (verdict subjects, universe subjects).
 
-    "Due" means the subject is inside its tracking window and has no snapshot
-    within `snapshot_interval_days`. Expressed against the LAST snapshot rather
-    than against a schedule, so a job that misses a run catches up on its next
-    one instead of silently leaving a gap.
+    A verdict is due when it is still OPEN (exit_date is NULL) and has no
+    snapshot within `snapshot_interval_days` — open verdicts are priced forever,
+    with no age cutoff. A universe row is due when it is inside its tracking
+    window and has no recent snapshot. Expressed against the LAST snapshot
+    rather than against a schedule, so a job that misses a run catches up on its
+    next one instead of silently leaving a gap.
     """
     interval = int(cfg.get("snapshot_interval_days", 1))
     track_for = int(cfg.get("track_for_days", 400))
-    external_track_for = int(cfg.get("external_track_for_days", 2200))
 
-    # The tracking window is per-source. A pipeline verdict is spent after about
-    # a year — that is the holding period the strategy uses. An externally
-    # sourced pick is a multi-year hold AND arrives by backfill, often already
-    # older than the pipeline window: measured against `track_for_days` alone it
-    # would never be snapshotted once, and would look exactly like a quiet week.
+    # Every OPEN verdict is tracked forever, regardless of how old it is or how
+    # it entered the ledger (PIPELINE, ONDEMAND or mirrored MANUAL). The ledger
+    # is meant to be a comprehensive picture of a portfolio's picks, and a
+    # position still being held years after the verdict is exactly one that
+    # must keep being priced — under-tracking it would quietly drop a held
+    # position's price history (and Q10 would mark it at whatever the last
+    # snapshot caught). The only thing that ends a verdict's snapshotting is
+    # the position being SOLD (exit_date set), which settles the result.
     #
-    # ONDEMAND falls on the LONG side of this CASE, with the external picks
-    # rather than with PIPELINE, and that is deliberate. A one-off analysis is
-    # a name the operator went looking for, so it is far likelier to be bought
-    # and held than a screened candidate is — and the two errors are not
-    # symmetric. Over-tracking an opinion nobody acted on costs one quote a
-    # week; under-tracking a position still held loses its price history at
-    # around thirteen months, permanently, and Q10 marks it at whatever the
-    # last snapshot caught. This job never joins lots (see the module
-    # docstring), so it cannot ask whether a given verdict was bought.
+    # There is deliberately no verdict_age window here anymore. The old
+    # per-source cutoff (400 days for PIPELINE, 2200 for everything else)
+    # silently excluded old-but-still-open picks — a 2017 buy backfilled years
+    # later fell outside both windows and was never snapshotted once, so it
+    # never reached verdict_outcome and never appeared on the MST scoreboard.
+    # Cost is not a reason to keep such a window: a quote on the FMP Starter
+    # plan is free within the subscription, so a daily re-quote of every open
+    # ticker is negligible even measured over years.
     cur.execute('''
         SELECT v.verdict_id, v.ticker, v.verdict_date, v.price, v.benchmark_price
           FROM verdict_log v
@@ -228,14 +230,14 @@ def _due(cur, cfg: dict) -> tuple:
            -- A sold position is finished. Re-pricing it every week would keep
            -- crediting or blaming the pick for a market it was no longer in,
            -- and would overwrite a settled result with a hypothetical one.
+           -- This is the ONLY thing that stops an open verdict being priced:
+           -- age is irrelevant, because an open position is priced forever.
            AND v.exit_date IS NULL
-           AND v.verdict_date > CURRENT_DATE - (
-                 CASE WHEN v.source = 'PIPELINE' THEN %s ELSE %s END)
            AND NOT EXISTS (
                  SELECT 1 FROM verdict_outcome o
                   WHERE o.verdict_id = v.verdict_id
                     AND o.as_of > CURRENT_DATE - %s)
-    ''', (track_for, external_track_for, interval))
+    ''', (interval,))
     verdicts = cur.fetchall()
 
     # Universe rows are the control group: names the screen surfaced, tracked
