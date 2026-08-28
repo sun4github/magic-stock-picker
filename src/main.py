@@ -418,8 +418,9 @@ def run_gate_check(ticker: str):
     ticker = ticker.strip().upper()
     logger.info(f"Checking {ticker} against screen eligibility gates...")
     result = json.loads(check_ticker_screen_gates(ticker))
-    # Print as clean JSON for the caller (operator MCP tool) to parse.
-    print(json.dumps(result, indent=2))
+    # Print as a SINGLE line of compact JSON for the caller (operator MCP tool) to
+    # parse. The logger writes to stderr, so stdout carries only this line.
+    print(json.dumps(result, separators=(",", ":")))
     return result
 
 

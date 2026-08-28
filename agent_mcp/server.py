@@ -1190,10 +1190,22 @@ def check_ticker_screen_gates(ticker: str) -> dict:
     if proc.returncode != 0:
         return {"error": f"Gate check for {ticker} failed",
                 "stderr": (proc.stderr or "").strip()[-500:]}
-    try:
-        result = _json.loads(proc.stdout.strip().split("\n")[-1])
-    except (ValueError, IndexError) as e:
-        return {"error": f"Could not parse gate-check output for {ticker}", "detail": str(e)}
+    # The pipeline logger may write to stdout on some hosts, so don't assume the
+    # JSON is the last line. Scan for the line that is a complete JSON object.
+    import json as _json
+    result = None
+    for line in reversed((proc.stdout or "").splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            result = _json.loads(line)
+            break
+        except ValueError:
+            continue
+    if result is None:
+        return {"error": f"Could not parse gate-check output for {ticker}",
+                "stdout": (proc.stdout or "").strip()[-500:]}
     if isinstance(result, dict) and result.get("error"):
         return result
     return result
