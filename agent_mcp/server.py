@@ -1153,6 +1153,52 @@ def get_screen_config() -> dict:
     return library.get_screen_config()
 
 
+@mcp.tool()
+def check_ticker_screen_gates(ticker: str) -> dict:
+    """Check whether ONE ticker passes the screen's eligibility gates. Free, immediate.
+
+    Tests a single ticker against the same gates the full screen applies - universe
+    exclusion (sector/industry/ADR/fund), Greenblatt's ROA and P/E cuts, and Lynch's
+    PEG/growth test - without running the whole-universe screen (~20-30 min). Returns
+    PASS/FAIL with the exact rejecting gate on a failure, or the computed metrics on
+    a pass.
+
+    Use this to pre-screen a candidate before spending on a full analysis, or to
+    explain why a name did not make the rankings.
+
+    Args:
+        ticker: The stock symbol to check (e.g. "DY", "MO").
+    """
+    ticker = _ticker(ticker)
+    # The gate-check reuses the pipeline's own screener logic, which needs pandas -
+    # deliberately NOT installed in this thin operator env. Shell out to the full
+    # interpreter (MSP_PYTHON or this one) and read the JSON it prints.
+    import shlex
+    import subprocess
+    import json as _json
+    command = [jobs._interpreter(), str(SRC_DIR / "main.py"), "--gate-check", ticker]
+    try:
+        proc = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=str(SRC_DIR),
+        )
+    except subprocess.TimeoutExpired:
+        return {"error": f"Gate check for {ticker} timed out."}
+    if proc.returncode != 0:
+        return {"error": f"Gate check for {ticker} failed",
+                "stderr": (proc.stderr or "").strip()[-500:]}
+    try:
+        result = _json.loads(proc.stdout.strip().split("\n")[-1])
+    except (ValueError, IndexError) as e:
+        return {"error": f"Could not parse gate-check output for {ticker}", "detail": str(e)}
+    if isinstance(result, dict) and result.get("error"):
+        return result
+    return result
+
+
 # ==========================================================================
 # Transport
 # ==========================================================================

@@ -22,6 +22,7 @@ that follow are the plain-Python surface.
 from mcp_app import logger, mcp  # noqa: F401  (`mcp` is the server; `mcp.run()` below)
 
 from data import (  # noqa: F401  (re-exported: callers import these from mcp_server)
+    check_ticker_screen_gates,
     compute_ticker_magic_metrics,
     fetch_sec_10k_data,
     fmp_company_profile,
