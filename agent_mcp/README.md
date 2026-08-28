@@ -416,20 +416,28 @@ a server that crashes does not lose your $13 run.
 `--stateless` is safe: pass it and a restart never strands a client holding a session
 id the server has forgotten.
 
-### Running it manually — start here
+## Running the server
 
-**The simplest thing that works, and the one to reach for first.** Open a terminal,
-run one command, leave it open. No scheduled task, no Startup folder, no elevation —
-none of which is needed for a server you are happy to start yourself.
+There are three ways to run it, from simplest to most permanent. Pick the one that
+matches how long you need it up:
+
+| Way | Command | Survives closing the window? |
+| :--- | :--- | :--- |
+| **Foreground** (start here) | `python -m agent_mcp.server --transport http --host 0.0.0.0 --port 8765` | **No** — Ctrl+C stops it |
+| **Background service** (Windows) | `python tools/mcp_service.py start` | **Yes** |
+| **Auto-start at boot** (Windows) | `python tools/mcp_service.py install` | **Yes** — starts at every logon |
+
+### 1. Foreground — the simplest way
+
+Open a terminal, run one command, leave it open. No scheduled task, no Startup folder,
+no elevation — none of which is needed for a server you are happy to start yourself.
 
 ```bash
 python -m agent_mcp.server --transport http --host 0.0.0.0 --port 8765
 ```
 
-It runs in the foreground and logs to that window. **Ctrl+C stops it.** From the
-repository root, and nothing else to configure — the token is read from `.env`.
-
-You should see:
+Run it from the repository root; nothing else to configure — the token is read from
+`.env`. You should see:
 
 ```
 magic-stock-picker MCP server on http://0.0.0.0:8765/mcp
@@ -442,33 +450,15 @@ Check it from another terminal, or a browser:
 
 ```bash
 curl http://localhost:8765/health
-```
-
-```
-{"status":"ok","server":"magic-stock-picker"}
+# {"status":"ok","server":"magic-stock-picker"}
 ```
 
 Bind `127.0.0.1` instead of `0.0.0.0` if the client is on this same machine; the
 server then refuses connections from the network entirely and needs no firewall rule.
 
-### The three ways to run it, and what closing the window does
-
-| | Command | Logs | Survives closing the window? |
-| :--- | :--- | :--- | :--- |
-| **Foreground** | `python -m agent_mcp.server --transport http --host 0.0.0.0 --port 8765` | in the window, live | **No** |
-| **Minimized** | `start "" /min python -m agent_mcp.server --transport http --host 0.0.0.0 --port 8765 --stateless` | in its own minimized window | No — closing *that* window stops it |
-| **Background (hidden)** | `python tools/mcp_service.py start` | `logs\mcp_server.log` | **Yes** |
-
-On `start /min`, the empty `""` is the window **title**. `start` treats a lone quoted
-argument as a title, so leaving it out makes it swallow the first part of your
-command — the classic footgun with this builtin.
-
-On Linux the equivalent of the third row is `nohup python -m agent_mcp.server
---transport http --host 0.0.0.0 --stateless >> logs/mcp_server.log 2>&1 &`.
-
-**What closing the window actually does.** Windows sends `CTRL_CLOSE_EVENT` to every
-process attached to that console; they get roughly five seconds, then they are killed.
-The server is attached, so it dies. Two consequences that are easy to get backwards:
+**What closing the window does.** Windows sends `CTRL_CLOSE_EVENT` to every process
+attached to that console; they get roughly five seconds, then they are killed. The
+server is attached, so it dies. Two consequences that are easy to get backwards:
 
 - **The server dying does not stop a run in flight.** Analyses are launched
   *detached* — no console of their own to lose — so a pipeline started through a tool
@@ -477,53 +467,70 @@ The server is attached, so it dies. Two consequences that are easy to get backwa
   the exit code died with the server, so that job reads `ORPHANED` afterwards rather
   than `SUCCEEDED`. The report is on disk either way; `job_log` shows how it ended.
 
-**A queued job is the exception, and it is worth knowing.** A job still waiting for
-its turn has no process yet, so there is nothing detached to survive. It stays
-`QUEUED` on disk and is picked up the next time the server starts — which the server
-does automatically at startup, logging `Resumed queued job …`. So nothing is lost, but
-nothing progresses either while the server is down.
+**A queued job is the exception.** A job still waiting for its turn has no process yet,
+so there is nothing detached to survive. It stays `QUEUED` on disk and is picked up the
+next time the server starts — which the server does automatically at startup, logging
+`Resumed queued job …`. So nothing is lost, but nothing progresses either while the
+server is down.
 
-### Starting it automatically (optional, and the fiddly part)
+### 2. Background service on Windows — `mcp_service.py`
 
-Everything below is convenience. If manual start suits you, skip it — nothing here
-changes what the server does.
+For a server that keeps running after you close the terminal, use the bundled service
+tool. It is the **reliable, shell-independent** way to manage the server on Windows —
+it finds the listening process itself, so the same commands work whether you type them
+in `cmd.exe` or PowerShell.
 
-Be warned that this is where the friction is on Windows: **an ordinary user may
-create a `WEEKLY` scheduled task but not an `ONLOGON` or `ONSTART` one.** Both are
-refused with a bare `ERROR: Access is denied` through `schtasks` and PowerShell's
-`Register-ScheduledTask` alike. That is precisely why
-`tools\setup_weekly_jobs.cmd` installs the buy-check sweep without elevation and a
-long-running server cannot be installed the same way.
+```bash
+python tools/mcp_service.py status     # is it up? what port? does it start at logon?
+python tools/mcp_service.py start      # start it in the background (hidden)
+python tools/mcp_service.py stop       # stop it
+python tools/mcp_service.py restart    # stop, then start again
+python tools/mcp_service.py install    # make it start at every logon
+python tools/mcp_service.py remove     # undo install
+```
 
-So there are two routes, and `tools\setup_mcp_server.cmd` picks whichever it can:
+`status` tells you everything at a glance:
 
-| | Elevated prompt | Ordinary prompt |
-| :--- | :--- | :--- |
-| Installs | a boot-start scheduled task | a Startup-folder launcher |
-| Starts | before anyone logs in | when you log in |
-| Manage with | `schtasks` | `python tools/mcp_service.py …` |
+```
+Port 8765:      listening (PID 1234)
+/health:        {"status": "ok", "server": "magic-stock-picker"}
+Runs at logon:  yes - C:\Users\you\...\Startup\MagicStockPicker-MCP.vbs
+Server log:     C:\path\to\magic-stock-picker\logs\mcp_server.log
+```
 
-### As a Windows service — the scripted way
+The server runs hidden and writes its output to `logs/mcp_server.log` — a hidden
+process with nowhere to write its diagnostics is a process you cannot debug.
+
+Useful options:
+
+```bash
+python tools/mcp_service.py start --port 9000     # a different port
+python tools/mcp_service.py install --port 9000   # install on a different port
+```
+
+### 3. Starting it automatically at Windows boot
+
+`python tools/mcp_service.py install` writes a launcher into your **Startup folder**,
+so the server starts every time you log in. This is the route that needs **no
+Administrator prompt** — an ordinary user can write to their own Startup folder.
+
+> **Why not a scheduled task?** Windows lets an ordinary user create a `WEEKLY` task
+> but refuses `ONLOGON` and `ONSTART` ones with a bare `ERROR: Access is denied`.
+> The Startup folder has no such restriction and gives the same practical result on a
+> workstation you log into.
+
+If you need the server up **before anyone logs in** (an unattended reboot), you must
+run the setup from an **Administrator** prompt so it can register a boot-start
+scheduled task:
 
 ```bat
 tools\setup_mcp_server.cmd
 ```
 
-Run it once, from anywhere. Same conventions as `tools/setup_weekly_jobs.cmd`: it
-derives the repo root from its own location, finds an interpreter (rejecting the
-Microsoft Store stub), smoke-tests that the dependencies import, and only then
-registers anything.
-
-It also handles the token: if `.env` has no `MSP_MCP_TOKEN` it generates one and
-appends it, and if there already is one it leaves it alone — so re-running never
-invalidates a client that is already configured. At the end it prints the OpenClaw
-config with the token filled in and this machine's IPv4 addresses to choose from.
-
-Pass a port as the first argument if 8765 is taken: `tools\setup_mcp_server.cmd 9000`.
-
-The registered task starts at boot, runs as you (so it reads the same `.env`), has
-its execution time limit removed — the default would kill a long-running server after
-three days — and restarts up to three times if it stops.
+This `.cmd` is the fiddly, elevated route — it registers a `MagicStockPicker-MCP`
+task that starts at boot, runs as you (so it reads the same `.env`), has its execution
+time limit removed, and restarts up to three times if it stops. Manage it with
+`schtasks`:
 
 ```bat
 schtasks /Run    /TN "MagicStockPicker-MCP"     REM start it now
@@ -531,6 +538,13 @@ schtasks /Query  /TN "MagicStockPicker-MCP" /V /FO LIST
 schtasks /End    /TN "MagicStockPicker-MCP"     REM stop
 schtasks /Delete /TN "MagicStockPicker-MCP" /F  REM remove
 ```
+
+> **Prefer `mcp_service.py`.** The `.cmd` route is the one that breaks — its quoting
+> and elevation handling are fragile, and it is only needed for the rare case of a
+> machine that reboots unattended. For a normal workstation, `install` + `start` from
+> `mcp_service.py` is simpler and more reliable.
+
+### Opening the port for a remote client
 
 If the client is on another machine, open the port once, from an **Administrator**
 prompt (`netsh advfirewall` needs elevation):
