@@ -66,6 +66,7 @@ agent picks the tool; these are here to show what the surface is good for.
 | *"What can the stock picker do?"* | `describe_capabilities` — the map, including what each operation costs |
 | *"Analyse NVDA and email me the reports"* | `start_ticker_analysis(ticker="NVDA", email_report=True, confirm=True)` — ~$0.40, 2–5 min, reports arrive as attachments |
 | *"What did the last screen turn up?"* | `get_rankings` — free, instant, no run needed |
+| *"Will DY clear the screen's gates?"* | `check_ticker_screen_gates(ticker="DY")` — free, instant, PASS/FAIL with the rejecting gate |
 | *"Read me the verdict on CROX"* | `read_report(ticker="CROX", kind="final")` |
 | *"Is there a buy case for MRVL yet?"* | `read_report(ticker="MRVL", kind="buy_case")` |
 | *"Has anything on my watchlist triggered?"* | `start_buy_check_sweep(dry_run=True)` first — free — then `confirm=True` |
@@ -196,10 +197,17 @@ One wrinkle: a report reused from inside the 24-hour reuse window is not rewritt
 so there is nothing new to mail and the job says so. Pass `force=True` to regenerate
 and send it.
 
-**Read-only** — `list_reports`, `read_report`, `get_rankings`, `get_screen_config`.
-Immediate, free, no subprocess. These matter more than they look: a client reaching
-this server over the network shares no filesystem with it, and without them could
-start a run and never read what the run produced.
+**Read-only** — `list_reports`, `read_report`, `get_rankings`, `get_screen_config`,
+`check_ticker_screen_gates`. Immediate, free, no subprocess. These matter more than
+they look: a client reaching this server over the network shares no filesystem with
+it, and without them could start a run and never read what the run produced.
+
+`check_ticker_screen_gates(ticker)` is the one that saves money: it tests a single
+name against the same eligibility gates the full screen applies (universe exclusion,
+Greenblatt's ROA/P/E cuts, Lynch's PEG/growth test) and returns PASS/FAIL with the
+exact rejecting gate — without running the ~20–30 min whole-universe screen. Use it
+to pre-screen a candidate before spending on a full analysis, or to explain why a
+name did not make the rankings.
 
 ## What it deliberately does not expose
 
@@ -686,7 +694,7 @@ What stays available after that exclusion:
 | `start_critic_review`, `start_buy_case`, `start_sale_advisory` | |
 | `start_sell_check`, `start_buy_check`, `start_buy_check_sweep` | |
 | `start_ledger_snapshot`, `start_growth_persistence_study` (free) | |
-| all four `job_*` and all four read-only tools | |
+| all four `job_*` and all five read-only tools | |
 
 So the agent can still screen for free, analyse a single name for cents, run the
 checks and sweeps, and read everything — it just cannot commit the two double-digit
@@ -698,7 +706,7 @@ should be able to discuss the research but never start anything:
 ```json
 "toolFilter": {
   "include": ["describe_capabilities", "list_reports", "read_report",
-              "get_rankings", "get_screen_config",
+              "get_rankings", "get_screen_config", "check_ticker_screen_gates",
               "job_status", "job_log", "job_list"],
   "exclude": []
 }
