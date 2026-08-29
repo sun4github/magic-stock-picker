@@ -15,7 +15,7 @@ Reads `screening_parameters:` from `src/specs/config.yaml` into module-level
 constants (`MIN_MARKET_CAP`, `UNIVERSE_LIMIT`, `MIN_ROA`, `ROA_BASIS`,
 `MIN_PE`, `RECENT_EARNINGS_DAYS`, `MIN_EPS_GROWTH`, `MAX_PEG`,
 `EPS_GROWTH_YEARS`, `EPS_GROWTH_METHOD`, `MAX_GROWTH_FOR_PEG`,
-`MIN_BASE_NET_MARGIN`, `EXCLUDED_SECTORS`,
+`MIN_BASE_NET_MARGIN`, `MAX_PCT_FROM_52W_HIGH`, `EXCLUDED_SECTORS`,
 `EXCLUDED_INDUSTRIES`, `EXCLUDE_ADR`, `ALLOWED_COUNTRIES`). Any gate threshold
 can be set to `null` in `config.yaml` to disable that gate entirely — see the
 checks at each gate site below.
@@ -46,7 +46,10 @@ flowchart TD
     G2 -->|roa_below_min| Drop2[dropped]
     G2 -->|pe_below_min| Drop3[dropped]
     G2 -->|passes or missing data| Keep["kept (missing ratio ≠ failure)"]
-    Keep --> Growth["attach_growth_metrics()\n1 annual call, survivors only"]
+    Keep --> Quote["1 /quote call\n(survivors only)"]
+    Quote --> G2b{"price_gate_reason()\n:740"}
+    G2b -->|near_52w_high| Drop2b[dropped]
+    G2b -->|passes or missing data| Growth["attach_growth_metrics()\n1 annual call, survivors only"]
     Growth --> G4{"growth_gate_reason()"}
     G4 -->|no_eps_growth / base_year_breakeven /\npeg_above_max / not computable| Drop5[dropped]
     G4 -->|survives| G3{"fetch_recent_earnings_symbols()\n:253, survivors only"}
@@ -72,10 +75,26 @@ flowchart TD
    below the floor — loss-makers have no P/E and are already excluded by the
    negative-EBIT check inside `compute_company_metrics_detailed`. Missing
    ratios never cause a drop (a provider gap ≠ a business failing the test).
-3. **EPS growth > 0, base window ≥ `min_base_net_margin`, and PEG ≤ `max_peg`** —
+3. **Not within `max_pct_from_52w_high` of the 52-week high** —
+   `price_gate_reason` (`:740-762`), called from `main()`'s loop **only when gate
+   2 passed**, because the 52-week high/low are **not** in the FMP screener
+   universe response — they come from a per-symbol `/stable/quote` call, which is
+   spent only on ratio-gate survivors (and still before the growth call below, so
+   a company rejected for being near its high never costs the annual statement
+   request). A HARD entry gate: a stock trading within `max_pct_from_52w_high`
+   (default 10%) of its 52-week high is a poor *entry* even when it is a good,
+   cheap, growing business — the PLMR/WLDN/ICHR/MXL pattern (all bought near the
+   high, sold at a loss near the bottom). Missing data is **not** a rejection
+   (same rule as the ROA/P/E gates): a company with no `yearHigh`/`price` is
+   kept, because dropping it would penalise a provider gap rather than anything
+   about the business. The 52-week range and the distance from the high are
+   carried into the CSV for every survivor (`YearHigh`, `YearLow`,
+   `PctFrom52wHigh`, `PctAbove52wLow`).
+4. **EPS growth > 0, base window ≥ `min_base_net_margin`, and PEG ≤ `max_peg`** —
    `growth_gate_reason`, fed by `attach_growth_metrics` which is called from
-   `main()`'s loop **only when gate 2 passed**, because it costs a third API call
-   (`/stable/income-statement`, annual). Peter Lynch's test, not Greenblatt's —
+   `main()`'s loop **only when gates 2 and 3 passed**, because it costs a fourth
+   API call (`/stable/income-statement`, annual). Peter Lynch's test, not
+   Greenblatt's —
    see §10 of [`agent_architecture.md`](../src/specs/agent_architecture.md) for
    the full rationale, the 189-company study behind each threshold, and the
    verification tables. Four behaviours differ from every other gate here:
@@ -95,7 +114,7 @@ flowchart TD
    - `compute_peg` divides by the growth rate in **percentage points** — a P/E of
      20 on 20% growth is a PEG of 1.0, not 100 — and returns `None` rather than a
      negative number, which would sort as the cheapest thing on the list.
-4. **No earnings in the last N days** — `fetch_recent_earnings_symbols`
+5. **No earnings in the last N days** — `fetch_recent_earnings_symbols`
    (`:253-349`), run once over all survivors (`main()` `:1017-1034`). Prefers
    one bulk `/stable/earnings-calendar` call; falls back to per-symbol
    `/stable/earnings` only if that endpoint is unavailable, and only for the
@@ -153,7 +172,7 @@ companies that cleared the ratio gates:
 
 ## Ranking & output, `main()`, `:936-1171`
 
-1. Fetch universe → per-company metrics → gates 1–3 (above), printing gate
+1. Fetch universe → per-company metrics → gates 1–4 (above), printing gate
    drop counts as it goes.
 2. **Data-basis integrity check** (`:1054-1066`): warns if ≥5% of the surviving
    universe fell back to `Annual` EBIT instead of `TTM` — a signal that FMP

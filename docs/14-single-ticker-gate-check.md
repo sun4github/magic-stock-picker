@@ -39,7 +39,8 @@ The tool applies the gates in exactly the order `main()` in
 | :--- | :--- | :--- | :--- |
 | 1 | Universe exclusion (sector / industry / ADR / fund-ETF) | `_universe_exclusion_reason()` | 1 profile call |
 | 2 | Greenblatt's ROA & P/E cuts | `ratio_gate_reason()` | 2 statement calls (income + balance) |
-| 3 | Lynch's PEG / growth cuts | `growth_gate_reason()` | 1 extra call (EPS history) |
+| 3 | 52-week-high proximity | `price_gate_reason()` | 1 quote call |
+| 4 | Lynch's PEG / growth cuts | `growth_gate_reason()` | 1 extra call (EPS history) |
 
 ### Step 1 — Universe exclusion
 

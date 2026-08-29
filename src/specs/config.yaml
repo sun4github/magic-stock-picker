@@ -642,6 +642,14 @@ screening_parameters:
   # Both are computed and written to the CSV either way; this only picks the gate.
   roa_basis: "ebit"
 
+  # Step 1b: reject candidates trading within this fraction of their 52-week high.
+  # A HARD gate, not a soft flag: a stock sitting at its 52-week high is a poor
+  # ENTRY even when it is a good, cheap, growing business (the PLMR/WLDN/ICHR/MXL
+  # pattern — all bought near the high, sold at a loss near the bottom). The
+  # 52-week high/low come straight from the FMP screener universe response, so this
+  # costs no extra API call. Set to null to disable.
+  max_pct_from_52w_high: 0.10
+
   # Step 2: "eliminate all companies that have P/E ratios less than 5".
   # NOTE the direction: a P/E BELOW 5 is an earnings yield ABOVE 1/5 (20%). Greenblatt
   # drops these not because they are expensive but because a P/E that low is usually a

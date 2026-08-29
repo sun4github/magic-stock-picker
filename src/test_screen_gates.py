@@ -172,6 +172,40 @@ def run():
         print(f"{'PASS' if ok else 'FAIL'}  {name:<48} {str(got):<20} "
               f"{'' if ok else f'(expected {expected})'}")
 
+    # --- 52-week-high proximity gate -------------------------------------------
+    # A HARD gate: reject a stock trading within MAX_PCT_FROM_52W_HIGH of its
+    # 52-week high, even though it is a good, cheap, growing business. Missing data
+    # is NOT a rejection (same rule as the ROA/P/E gates).
+    print(f"\n--- 52-week-high gate (within {s.MAX_PCT_FROM_52W_HIGH:.0%} of high) ---")
+    original_max = s.MAX_PCT_FROM_52W_HIGH
+    try:
+        s.MAX_PCT_FROM_52W_HIGH = 0.10
+        price_cases = [
+            # (name, company, expected)
+            ("at the high -> reject", _company(price=100.0, yearHigh=100.0, yearLow=50.0), "near_52w_high"),
+            ("within 10% -> reject", _company(price=92.0, yearHigh=100.0, yearLow=50.0), "near_52w_high"),
+            ("exactly 10% below -> reject (>= boundary)", _company(price=90.0, yearHigh=100.0, yearLow=50.0), "near_52w_high"),
+            ("just past 10% -> pass", _company(price=89.0, yearHigh=100.0, yearLow=50.0), None),
+            ("well below -> pass", _company(price=60.0, yearHigh=100.0, yearLow=50.0), None),
+            ("missing yearHigh -> pass (no data)", _company(price=95.0, yearHigh=None, yearLow=50.0), None),
+            ("missing price -> pass (no data)", _company(price=None, yearHigh=100.0, yearLow=50.0), None),
+        ]
+        for name, company, expected in price_cases:
+            got = s.price_gate_reason(company)
+            ok = got == expected
+            failures += [] if ok else [name]
+            print(f"{'PASS' if ok else 'FAIL'}  {name:<48} {str(got):<20} "
+                  f"{'' if ok else f'(expected {expected})'}")
+
+        # Disabled gate must never reject.
+        s.MAX_PCT_FROM_52W_HIGH = None
+        got = s.price_gate_reason(_company(price=100.0, yearHigh=100.0, yearLow=50.0))
+        ok = got is None
+        failures += [] if ok else ["disabled gate"]
+        print(f"{'PASS' if ok else 'FAIL'}  {'disabled (None) -> never rejects':<48} {str(got):<20}")
+    finally:
+        s.MAX_PCT_FROM_52W_HIGH = original_max
+
     # The basis switch must actually change which figure is tested. A company at 30%
     # pretax but 20% after tax passes on "ebit" and fails on "net_income"; if both
     # answers agree, the config knob is being ignored.
