@@ -52,6 +52,11 @@ ROA_BASIS = (screening_params.get("roa_basis") or "ebit").lower()
 MIN_PE = screening_params.get("min_pe", 5.0)
 RECENT_EARNINGS_DAYS = screening_params.get("exclude_recent_earnings_days", 7)
 
+# Step 1b: reject candidates trading within this fraction of their 52-week high.
+# A HARD gate (see config.yaml). The 52-week high/low come from the FMP screener
+# universe response, so this costs no extra API call. Set to null to disable.
+MAX_PCT_FROM_52W_HIGH = screening_params.get("max_pct_from_52w_high", 0.10)
+
 # How many candidates Phase B would analyse if there were enough of them. Used ONLY
 # to decide whether the "short list" notice at the end of a run is worth printing —
 # the screener never truncates to it, and Phase B treats it as a ceiling rather than
@@ -732,6 +737,32 @@ def selected_roa(metrics):
     return metrics.get("ROA")
 
 
+def price_gate_reason(company):
+    """Why a company fails the 52-week-high proximity gate, or None if it passes.
+
+    Step 1b of the screen. A HARD gate: a stock trading within
+    MAX_PCT_FROM_52W_HIGH of its 52-week high is a poor ENTRY even when it is a
+    good, cheap, growing business — the PLMR/WLDN/ICHR/MXL pattern (all bought near
+    the high, sold at a loss near the bottom).
+
+    Unlike the ROA / P/E gates, this runs on the UNIVERSE row (not the metrics
+    dict) because the 52-week high/low come straight from the FMP screener
+    response — no extra API call. Missing data is NOT a rejection (same rule as
+    the ROA / P/E gates): a company with no yearHigh/price is kept, because
+    dropping it would penalise a provider gap rather than anything about the
+    business.
+    """
+    if MAX_PCT_FROM_52W_HIGH is None:
+        return None
+    high = company.get("yearHigh")
+    price = company.get("price")
+    if not high or not price:
+        return None
+    if price >= high * (1 - MAX_PCT_FROM_52W_HIGH):
+        return "near_52w_high"
+    return None
+
+
 def ratio_gate_reason(metrics):
     """Why a company fails Greenblatt's ROA / P/E gates, or None if it passes.
 
@@ -1089,9 +1120,24 @@ def main():
             metrics = None
 
         if metrics:
-            # Steps 1 & 2 of Greenblatt's screen. Dropped BEFORE ranking so a rejected
-            # company cannot shift the percentile ranks of the ones that survive.
+            # Steps 1 & 2 of Greenblatt's screen. Dropped BEFORE ranking so a
+            # rejected company cannot shift the percentile ranks of the ones
+            # that survive.
             gate = ratio_gate_reason(metrics)
+            if not gate:
+                # Step 1b: 52-week-high proximity gate. The 52-week high/low are NOT
+                # in the screener universe response, so this costs one `quote` call
+                # per ratio-gate survivor — still far cheaper than the growth call
+                # below, so it runs here (before it) and a company rejected for being
+                # near its high never costs the growth request.
+                quote = fmp_get(
+                    "https://financialmodelingprep.com/stable/quote",
+                    params={"symbol": symbol, "apikey": API_KEY},
+                    context=f"{symbol} quote",
+                )
+                qrow = quote[0] if isinstance(quote, list) and quote else {}
+                company = {**company, "yearHigh": qrow.get("yearHigh"), "yearLow": qrow.get("yearLow")}
+                gate = price_gate_reason(company)
             if not gate:
                 # Lynch's growth test costs one extra request per company, so it runs
                 # only on what survives the free-to-check gates above — ~5% of the
@@ -1102,6 +1148,10 @@ def main():
                 gate_counts[gate] = gate_counts.get(gate, 0) + 1
             else:
                 metrics["Price"] = company.get("price", 0) or 0
+                # Carry the 52-week range through so the CSV can show how far each
+                # survivor sits from its 52-week high (see the output columns).
+                metrics["YearHigh"] = company.get("yearHigh") or 0
+                metrics["YearLow"] = company.get("yearLow") or 0
                 results.append(metrics)
 
         # Pause to easily stay within Starter Limit (300 calls/min = ~5 calls/sec)
@@ -1117,6 +1167,11 @@ def main():
             f"below {MIN_ROA:.0%} ({roa_label} / total assets), "
             f"{gate_counts.get('pe_below_min', 0)} dropped for a P/E below {MIN_PE:g}."
         )
+        if MAX_PCT_FROM_52W_HIGH is not None:
+            print(
+                f"52-week-high gate: {gate_counts.get('near_52w_high', 0)} dropped for "
+                f"trading within {MAX_PCT_FROM_52W_HIGH:.0%} of their 52-week high."
+            )
         # The growth gate is reported separately, and split by reason, because it is
         # the one gate that drops companies for MISSING data as well as for failing
         # the test. A provider outage would show up here as a large
@@ -1237,11 +1292,35 @@ def main():
     )
     df["PEG_Ratio"] = df["PEG"].round(2)
 
+    # 52-week range and how far each survivor sits from its 52-week high. The gate
+    # rejects anything within MAX_PCT_FROM_52W_HIGH of the high, so every row here
+    # is at least that far below it; the column shows exactly how far. PctFrom52wHigh
+    # is negative (price below the high); PctAbove52wLow is positive. A survivor with
+    # no yearHigh/yearLow (the gate keeps it on missing data) leaves the pct blank
+    # rather than dividing by zero.
+    df["PctFrom52wHigh"] = df.apply(
+        lambda r: (round(r["Price"] / r["YearHigh"] - 1, 4))
+        if r["YearHigh"] else None, axis=1
+    )
+    df["PctAbove52wLow"] = df.apply(
+        lambda r: (round(r["Price"] / r["YearLow"] - 1, 4))
+        if r["YearLow"] else None, axis=1
+    )
+    df["PctFrom52wHigh_Pct"] = (df["PctFrom52wHigh"] * 100).round(2).map(
+        lambda v: f"{v}%" if pd.notna(v) else ""
+    )
+    df["PctAbove52wLow_Pct"] = (df["PctAbove52wLow"] * 100).round(2).map(
+        lambda v: f"{v}%" if pd.notna(v) else ""
+    )
+
     output_df = df[[
         "Final_Rank", "Symbol", "CompanyName", "Live_Price",
         "LiveMarketCap", "ROC_Pct", "EY_Pct", "EBIT_Basis",
         "Composite_Score", "MagicFormula_Score",
         "ROC_Rank", "EY_Rank", "PEG_Rank",
+        # 52-week range and distance from the high (see price_gate_reason).
+        "YearHigh", "YearLow", "PctFrom52wHigh", "PctFrom52wHigh_Pct",
+        "PctAbove52wLow", "PctAbove52wLow_Pct",
         # Greenblatt's step-by-step gate figures (see ratio_gate_reason).
         "ROA_Pct", "ROA_NetIncome_Pct", "PE_Ratio", "NetIncome",
         # Lynch's PEG test (see growth_gate_reason): the growth rate, the ratio it
