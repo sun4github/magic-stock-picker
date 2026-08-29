@@ -31,6 +31,7 @@ from magic_formula_starter_screener import (
     FMPError,
     _universe_exclusion_reason,
     ratio_gate_reason,
+    price_gate_reason,
     growth_gate_reason,
 )
 
@@ -190,7 +191,9 @@ def check_ticker_screen_gates(ticker: str) -> str:
     it applies the SAME gates in the SAME order the screener does —
       1. universe exclusion (sector / industry / ADR / fund-ETF),
       2. Greenblatt's ROA and P/E cuts,
-      3. Lynch's PEG / growth cuts.
+      3. the 52-week-high proximity gate (not within max_pct_from_52w_high of the
+         high),
+      4. Lynch's PEG / growth cuts.
     So a ticker that passes here is one the full screen would have kept, and a
     ticker that fails reports the precise reason (e.g. "roa_below_min").
 
@@ -265,6 +268,34 @@ def check_ticker_screen_gates(ticker: str) -> str:
                 "Message": f"Rejected by Greenblatt's ROA/P/E gate: {ratio_reason}.",
                 "ROA_Pct": metrics.get("ROA"),
                 "PE_Ratio": metrics.get("PE"),
+            })
+
+        # 4b. 52-week-high proximity gate (same order as the full screen: after the
+        # ROA/P/E gates, before the growth gate). The 52-week high/low are not in the
+        # screener universe response, so this costs one /quote call — same as the
+        # full screen, which spends it on ratio-gate survivors only.
+        quote = fmp_get(
+            "https://financialmodelingprep.com/stable/quote",
+            params={"symbol": ticker, "apikey": api_key},
+            context=f"{ticker} quote",
+        )
+        qrow = quote[0] if isinstance(quote, list) and quote else {}
+        price_reason = price_gate_reason({
+            "price": qrow.get("price"),
+            "yearHigh": qrow.get("yearHigh"),
+            "yearLow": qrow.get("yearLow"),
+        })
+        if price_reason:
+            return json.dumps({
+                "Symbol": ticker,
+                "CompanyName": row.get("companyName", ticker),
+                "Verdict": "FAIL",
+                "Gate": "price",
+                "Reason": price_reason,
+                "Message": f"Rejected by the 52-week-high proximity gate: {price_reason}.",
+                "Price": qrow.get("price"),
+                "YearHigh": qrow.get("yearHigh"),
+                "YearLow": qrow.get("yearLow"),
             })
 
         # 5. Lynch's PEG / growth gates (costs one extra request, same as the screen).

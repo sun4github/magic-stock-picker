@@ -52,9 +52,12 @@ Buy or Wait. All four are covered under [Running](#running).
 **Phase A — Screener.** Scans the FMP stock universe, applies Greenblatt's
 step-by-step eligibility gates — no financials, utilities, funds/REITs or foreign
 (ADR) issuers; **Return on Assets ≥ 25%**; **P/E ≥ 5**; nothing that announced
-earnings in the **last 7 days** — plus one gate that is *not* Greenblatt's:
+earnings in the **last 7 days** — plus two gates that are *not* Greenblatt's:
 **earnings per share must actually be growing, off a base period that was genuinely
-profitable, at a PEG ratio of 1.5 or lower**. It then ranks the survivors on three
+profitable, at a PEG ratio of 1.5 or lower** (Peter Lynch's test), and **the stock
+must not be trading within 10% of its 52-week high** (an entry gate from the user's
+buy discipline — the PLMR/WLDN/ICHR/MXL pattern of buying near the high and selling
+at a loss near the bottom). It then ranks the survivors on three
 measures — Return on Capital, Earnings Yield, and 1/PEG — producing a ranked
 candidate list (also written to a CSV for reuse).
 
