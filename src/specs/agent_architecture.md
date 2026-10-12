@@ -538,6 +538,14 @@ here because his two ratios say nothing about growth. It is documented in full i
 **§10**, it is the only gate that feeds the ranking as well as the list, and it is
 the only one whose thresholds were set by measurement rather than by the book (§10.I).
 
+Gate 3 below (**52-week-high proximity**) is also *not* Greenblatt's — it is an
+**entry** gate added from the user's own buy discipline (the PLMR/WLDN/ICHR/MXL
+pattern: all bought near the 52-week high, sold at a loss near the bottom). It is a
+HARD gate, not a soft flag: a stock at its 52-week high is a poor *entry* even when
+it is a good, cheap, growing business. It runs after the ROA/P/E gates (it needs a
+per-symbol `/quote` call for the 52-week high/low, which are not in the screener
+universe response) and before the growth gate.
+
 **Return on Assets is not Return on Capital.** They share a numerator (EBIT) and
 differ entirely in the denominator:
 
@@ -562,7 +570,9 @@ flowchart TD
     G2 -->|below| Drop2[["dropped"]]
     G2 -->|survives| G3{"3. P/E >= min_pe\n(5 default; loss-makers exempt)"}
     G3 -->|below| Drop3[["dropped"]]
-    G3 -->|survives| G5{"4. EPS growth > 0\nAND base margin >= 3%\nAND PEG <= 1.5\n(§10; costs 1 extra call)"}
+    G3 -->|survives| G3b{"3b. Not within max_pct_from_52w_high\nof the 52-week high (10% default)\n1 /quote call, survivors only"}
+    G3b -->|near the high| Drop3b[["dropped"]]
+    G3b -->|survives| G5{"4. EPS growth > 0\nAND base margin >= 3%\nAND PEG <= 1.5\n(§10; costs 1 extra call)"}
     G5 -->|"flat/shrinking,\nbreakeven base,\nPEG too high,\nor not computable"| Drop5[["dropped"]]
     G5 -->|survives| G4{"5. Earnings in last\nexclude_recent_earnings_days?"}
     G4 -->|"reported recently"| Drop4[["dropped"]]
@@ -594,6 +604,17 @@ flowchart TD
    one-off event (an asset sale, a settlement) inflated a single year's earnings, so
    the "bargain" will not repeat. Loss-makers have **no** P/E and are not caught by
    this gate — they are already gone via the negative-EBIT check.
+3b. **Not within `max_pct_from_52w_high` of the 52-week high** (`price_gate_reason`) —
+   a HARD *entry* gate, not Greenblatt's. A stock trading within 10% (default) of its
+   52-week high is a poor entry even when it is a good, cheap, growing business — the
+   PLMR/WLDN/ICHR/MXL pattern (all bought near the high, sold at a loss near the
+   bottom). The 52-week high/low are **not** in the FMP screener universe response, so
+   this costs one `/stable/quote` call per ratio-gate survivor — still cheaper than
+   the growth call below, so it runs before it and a company rejected for being near
+   its high never costs the annual statement request. Missing data is **not** a
+   rejection (same rule as the ROA/P/E gates). The 52-week range and distance from
+   the high are carried into the CSV for every survivor (`YearHigh`, `YearLow`,
+   `PctFrom52wHigh`, `PctAbove52wLow`).
 4. **EPS growth above zero, a base window above 3% net margin, and PEG ≤ 1.5**
    (`growth_gate_reason`) — **not Greenblatt's**; Peter Lynch's test, added because
    gates 2 and 3 are blind to a shrinking business. Costs one extra request per
