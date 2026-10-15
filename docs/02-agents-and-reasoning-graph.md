@@ -25,7 +25,7 @@ session-state keys (`output_key` on write, `{key_name}` templating on read).
 There is **no** SEC/metrics/search "agent" — that data is fetched by direct
 Python function calls (`fetch_sec_10k_data`, `fmp_metrics_extractor`,
 `fmp_quarterly_trends` in `mcp_server.py`) with zero LLM tokens spent, called
-directly from `analyze_ticker` (`pipeline/analysis.py:68-340`) before any agent runs.
+directly from `analyze_ticker` (`pipeline/analysis.py:71-363`) before any agent runs.
 
 ## Which tools each agent can call, and where those tools reach
 

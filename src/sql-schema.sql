@@ -246,6 +246,19 @@ CREATE TABLE verdict_log (
     -- able to run without one (see ledger-queries.sql Q5).
     exit_date DATE,
     exit_price NUMERIC(14, 4),
+    -- The entry gate (src/momentum.py): a mechanical reading of the price chart
+    -- when the verdict was written. Stored BESIDE `verdict`, never instead of it:
+    -- the verdict grades the business, these grade the moment, and only with both
+    -- can a review tell a wrong call on the company from a wrong call on the entry.
+    --   entry_gate  CLEAR | EXTENDED | FALLING_KNIFE | UNKNOWN
+    --   entry_call  BUY_NOW | WAIT_PULLBACK | WAIT_TREND | CHECK_CHART (BUY rows only)
+    -- NULL throughout = no reading taken (gate disabled, or a row from before it).
+    entry_gate VARCHAR(16),
+    entry_call VARCHAR(16),
+    pct_vs_50dma NUMERIC(10, 2),
+    pct_vs_200dma NUMERIC(10, 2),
+    dma200_slope_pct NUMERIC(10, 2),
+    range_position NUMERIC(6, 1),
     -- Point-in-time snapshot. Duplicated from run_universe rather than joined
     -- to it because an on-demand single-ticker run has no universe row at all,
     -- and because a verdict must stay gradeable if its run is ever deleted.
@@ -429,3 +442,20 @@ CREATE UNIQUE INDEX idx_verdict_outcome_v_dedup ON verdict_outcome(verdict_id, a
     WHERE verdict_id IS NOT NULL;
 CREATE UNIQUE INDEX idx_verdict_outcome_u_dedup ON verdict_outcome(universe_id, as_of)
     WHERE universe_id IS NOT NULL;
+-- 11. Entry-Gate Watch State (the sweep's second pass)
+--
+-- Operational state, like table 10. A Buy verdict whose entry gate said to wait
+-- (WAIT_PULLBACK / WAIT_TREND / CHECK_CHART) has no buy case, so the first pass
+-- never sees it. The second pass re-reads the chart weekly and alerts ONCE when
+-- the gate clears. Keyed by verdict, not ticker: a later verdict on the same
+-- name is a new question with its own answer.
+CREATE TABLE entry_gate_watch_state (
+    verdict_id UUID PRIMARY KEY,
+    ticker VARCHAR(10) NOT NULL,
+    entry_call VARCHAR(16),          -- what the verdict was told when written
+    last_checked_on DATE,
+    last_gate VARCHAR(16),           -- this week's chart state
+    last_price NUMERIC(14, 4),
+    cleared_on DATE,                 -- set when the clearance was announced
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);

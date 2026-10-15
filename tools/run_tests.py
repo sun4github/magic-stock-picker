@@ -24,6 +24,7 @@ TESTS = [
     "test_screen_gates",
     "test_buy_check_sweep",
     "test_external_sync",
+    "test_momentum_gate",
 ]
 
 # Suites that live outside src/ and run from somewhere else. Held separately because

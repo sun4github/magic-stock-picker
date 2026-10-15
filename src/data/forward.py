@@ -117,6 +117,27 @@ def fmp_price_snapshot(ticker: str) -> str:
     return json.dumps(out, separators=(",", ":"))
 
 
+def fmp_price_history(ticker: str, sessions: int = 220) -> list:
+    """Daily closes for the last `sessions` trading days, OLDEST FIRST, or [].
+
+    Deliberately NOT an MCP tool. It feeds the entry gate (`momentum.py`), which is
+    computed in Python and printed beside the verdict; no agent reasons from it, and
+    registering it would put a chart in front of the bear/bull/analyst chain, which
+    is meant to judge the business, not the trend.
+    """
+    # ~1.45 calendar days per trading day, plus slack for holidays.
+    start = datetime.now().date().toordinal() - int(sessions * 1.5) - 10
+    data = _stable_get("historical-price-eod/light", f"{ticker} price history",
+                       symbol=ticker,
+                       **{"from": datetime.fromordinal(start).date().isoformat()})
+    if not isinstance(data, list):
+        return []
+    rows = sorted((str(r.get("date"))[:10], r.get("price")) for r in data
+                  if r.get("date") and isinstance(r.get("price"), (int, float))
+                  and r["price"] > 0)
+    return [float(p) for _, p in rows][-sessions:]
+
+
 # FMP's Starter plan serves `analyst-estimates` for ANNUAL periods only — the
 # quarterly variant answers 402. That is enough for a forward P/E, which is
 # conventionally quoted on a fiscal year, but it means no quarter-by-quarter

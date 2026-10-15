@@ -435,6 +435,53 @@ deciding whether it still holds.
 Both renderings fail open — a missing quote produces a section that says so, and says
 that the filing-derived ratios are unaffected, rather than a blank or a guess.
 
+### E3. The entry gate — a timing call beside the verdict, never instead of it
+
+**The gap.** The verdict judges the business and has never looked at the chart. So a
+`Buy` was routinely followed by a manual "not yet", taken outside the system, where
+nothing recorded it. The backtest that motivated this
+(`tools/backtest_momentum_gate.py`, 2026-10-14): of 18 analysis `Buy` verdicts, the 4
+the gate reads as EXTENDED (CROX, WEX, B, AMNF) all trailed SPY, with a mean excess
+return of −11.3%, against −4.3% for the 14 CLEAR. Three of the four were ONDEMAND
+runs, which the screen's `max_pct_from_52w_high` gate (§H) never sees. The CLEAR
+`Buy` verdicts lost too, so the gate explains part of the shortfall, not all of it.
+
+**The rules** (`src/momentum.py`, thresholds in `config.yaml` `momentum_gate`). This
+step is deterministic: one `fmp_price_history` call, no model, no tokens.
+
+| Chart state | Rule | Entry call on a `Buy` |
+| :--- | :--- | :--- |
+| FALLING_KNIFE | more than `knife_pct` (20%) below a 200-day average that fell over the last `slope_sessions` (20) | WAIT_TREND, which clears at 80% of the 200-day or when it stops falling |
+| EXTENDED | more than `extended_pct` (20%) above the 50-day average, or at or above `max_range_pct` (90%) of the 52-week range | WAIT_PULLBACK, which clears below the lower of the two limits |
+| CLEAR | neither | BUY_NOW |
+| UNKNOWN | no quote, or deep below the 200-day with too little history to read its slope | CHECK_CHART. Missing data is never treated as clear |
+
+The knife is checked first, so a sharp bounce inside a downtrend reads as a knife and
+not as extended. Only a `Buy` gets an entry call: a `Watch` already has its entry
+conditions in the buy case (§12), and an `Avoid` should not be given any. The chart
+state is still recorded for every verdict.
+
+**Why beside, not instead.** Demoting the verdict would put two kinds of mistake into
+one column, and the question the gate exists to answer ("wrong about the company, or
+wrong about the entry?") could never be asked of the ledger again. So
+`verdict_log.verdict` keeps grading the analyst. `entry_gate`, `entry_call` and the
+four chart figures sit beside it and are graded against the same later prices.
+Nothing in the scoreboard queries changes. The trade-off: a reader who skims only the
+verdict can miss the entry call. The `## Entry Timing` block is therefore placed
+directly under `## Price`, before any of the analysis.
+
+**Why the agents never see it.** The screen finds companies that have been falling,
+which is why they are cheap. A bear/bull/analyst chain that weighed the trend would
+learn to avoid exactly what the screen is for. The reading is taken from the same
+quote as the price table (so the averages cannot disagree), is not an MCP tool, is
+not injected into any prompt, and leaves `_prompt_version` unchanged.
+
+**Where it runs.** `analyze_ticker` and `refine.py` (re-read at review time against
+the refined verdict, like the price). A reused report keeps the reading it was
+written with. The reuse window is `reuse.max_age_hours` (24h), and the section carries
+its own as-of stamp. Not yet in the weekly buy-check sweep. That is the natural next
+consumer, because the sweep is where a purchase is actually decided.
+
 ### F. Two return-on-capital figures, always reported together
 
 Greenblatt's ROC divides EBIT by **net working capital + net fixed assets**,

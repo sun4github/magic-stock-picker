@@ -141,3 +141,58 @@ def send_unreadable_trigger_alert(ticker: str, weeks: int, cost_per_check: float
     # not an event.
     _send_pushover(title, message, priority=-1)
     _send_email(title, message)
+
+
+# Pushover truncates a message at 1,024 characters and a title at 250. The email
+# carries the full summary; the push carries a short form that fits, and says so
+# when it had to be cut.
+PUSHOVER_MAX_MESSAGE = 1024
+
+
+def _fit_push(message: str) -> str:
+    if len(message) <= PUSHOVER_MAX_MESSAGE:
+        return message
+    tail = "\n… (cut short; the email has the full summary)"
+    return message[:PUSHOVER_MAX_MESSAGE - len(tail)].rstrip() + tail
+
+
+def send_entry_cleared_alert(ticker: str, price: float, verdict_date, entry_call: str,
+                             reading: str) -> None:
+    """Tell the reader a Buy whose entry gate said to wait has now cleared.
+
+    Sent ONCE per verdict. The verdict itself was always a Buy; what changed is
+    the chart — the price is no longer stretched above its trend, or no longer
+    sliding below a falling one. That is worth a prompt, and like a fired buy
+    trigger it can un-clear before it is read, hence the same priority.
+    """
+    title = f"Entry gate cleared: {ticker} at ${price:.2f}"
+    message = "\n".join([
+        f"{ticker} was rated BUY on {verdict_date}, with the entry call "
+        f"{entry_call.replace('_', ' ').lower()}.",
+        f"This week's chart reads CLEAR at ${price:.2f}: {reading}.",
+        "",
+        "The business verdict has not been re-checked. If it is more than a few "
+        "weeks old, consider re-running the analysis before buying:",
+        f"    python main.py {ticker}",
+    ])
+    _send_pushover(title, _fit_push(message), priority=1)
+    _send_email(title, message)
+
+
+def send_sweep_summary(title: str, message: str, push_message: str = None,
+                       priority: int = -1) -> dict:
+    """The weekly summary, sent every sweep whether or not anything fired.
+
+    Sent even when the answer is "nothing to do", on purpose: a silent week looked
+    exactly like a broken sweep, and the reader had no way to tell them apart. The
+    individual BUY and entry-cleared alerts still go out on their own, at higher
+    priority; this is the record that the job ran and what it saw.
+
+    Returns which channels accepted it, so the caller can log a delivery failure
+    rather than assume one.
+    """
+    return {
+        "pushover": _send_pushover(title, _fit_push(push_message or message),
+                                   priority=priority),
+        "email": _send_email(title, message),
+    }

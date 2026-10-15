@@ -428,3 +428,47 @@ Feature: Magic Formula & Skeptical Stock Analysis Agent Workflow
     And the recommendation, the date, the price at the time and the reason for checking are recorded with it
     And the local report file holds only the most recent check, so the stored history is the only record of when a trigger first fired
     And a check that is stored is one the ledger can eventually grade, which the local file could never be
+
+  # ---------------------------------------------------------------------------
+  # The entry gate. A mechanical reading of the price chart, printed beside the
+  # verdict and logged beside it. It never changes the verdict. See
+  # agent_architecture.md §2.E3 and src/momentum.py.
+  # ---------------------------------------------------------------------------
+
+  Scenario: Say whether now is the moment to buy, separately from whether the business is worth buying
+    Given the analyst has reached a verdict for a ticker
+    When the report is stored
+    Then an "Entry Timing" section directly under the price shows the verdict unchanged beside an entry call
+    And the entry call is "wait for a pullback" when the price is more than 20% above its 50-day average or in the top 10% of its 52-week range
+    And it is "wait for the trend to turn" when the price is more than 20% below a 200-day average that is still falling
+    And it is "buy now" otherwise
+    And the section names the price at which the gate clears
+    Because a good business bought after a run-up, or while still falling, is a different mistake from a bad business, and the record has to be able to tell them apart
+
+  Scenario: Never let the chart rewrite the verdict
+    Given the entry gate reads a Buy as extended or falling
+    When the verdict is logged
+    Then the ledger keeps the analyst's verdict as written
+    And the chart state, the entry call and the four chart figures are logged in their own columns beside it
+    And only a Buy is given an entry call, because a Watch takes its entry conditions from the buy case and an Avoid should not be given any
+
+  Scenario: Never treat a chart that could not be read as a clear one
+    Given the quote is missing, or the price is far below its 200-day average with too little history to tell whether that average is falling
+    When the entry gate reads the chart
+    Then the state is UNKNOWN and a Buy is told to check the chart first
+    And no agent ever sees the reading, so the prompt version and every cached analysis are unaffected
+
+  Scenario: Report on every weekly sweep, even when nothing fired
+    Given the weekly buy sweep has finished, or has failed
+    When it reports
+    Then a summary titled "Magic Stock Picker - Weekly Buy Sweep" is sent by email and by Pushover
+    And it lists what needs action, every Watch name escalated with the agent's answer and its chart reading, the names closest to their triggers, every Buy waiting on its entry gate, and any problems
+    And a week with nothing to act on says so, in a quiet push, rather than staying silent
+    Because a silent week and a broken job looked identical, and the reader could not tell them apart
+
+  Scenario: Watch the Buys the entry gate said to wait on
+    Given a Buy verdict was told to wait for a pullback or for the trend to turn
+    And it is no more than 90 days old
+    When the weekly sweep re-reads its chart and the chart now reads clear
+    Then the reader is alerted once for that verdict, and never again for it
+    And no model is called, because the chart reading is arithmetic

@@ -4,6 +4,7 @@ Four modules, split by what they answer to:
 
     figures.py         normalising a candidate row into displayable figures
     price.py           the live quote and the '## Price' block
+    entry.py           the entry gate's chart reading and the '## Entry Timing' block
     sections.py        the reader-facing sections and the agent-facing figure block
     reconciliation.py  the gate that checks agent prose against those figures
 
@@ -25,6 +26,7 @@ from .figures import (
     _present,
     _verified_figures,
 )
+from .entry import ENTRY_HEADING, _entry_reading, _format_entry_section
 from .price import _format_price_section, _price_snapshot
 from .provenance import _with_run_header
 from .reconciliation import (
@@ -72,8 +74,11 @@ __all__ = [
     "_RECONCILIATION_HEADING",
     "_THRESHOLD_PROXIMITY",
     "_amount_for_label",
+    "ENTRY_HEADING",
+    "_entry_reading",
     "_eps_window_phrase",
     "_finding_basis",
+    "_format_entry_section",
     "_format_magic_formula_section",
     "_format_price_section",
     "_format_reconciliation_section",

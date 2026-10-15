@@ -117,7 +117,7 @@ This is the function every Phase B/C run eventually calls. Per ticker:
 `run_pipeline` (`pipeline/execution.py:138-156`) is the synchronous wrapper (`asyncio.run`)
 that `analyze_ticker` calls; it adds one gentle inter-ticker sleep afterward.
 
-## 4. Per-ticker orchestration, `pipeline/analysis.py:68-340` (`analyze_ticker`)
+## 4. Per-ticker orchestration, `pipeline/analysis.py:71-363` (`analyze_ticker`)
 
 The single function every execution mode funnels through for Phase B/C. In order:
 
@@ -162,7 +162,7 @@ The single function every execution mode funnels through for Phase B/C. In order
 flowchart TD
     A["run_orchestrator()\nmain.py:313"] -->|"Phase A: run_magic_formula_screener()"| B["_run_phase_b()\nmain.py:253"]
     C["run_from_csv(path)\nmain.py:384"] -->|"read CSV, sort by Final_Rank"| B
-    D["run_single_ticker(ticker)\nmain.py:408"] -->|"compute_ticker_magic_metrics()"| E["analyze_ticker()\npipeline/analysis.py:68"]
+    D["run_single_ticker(ticker)\nmain.py:408"] -->|"compute_ticker_magic_metrics()"| E["analyze_ticker()\npipeline/analysis.py:71"]
     B -->|"for each candidate"| E
     F["run_screen_only()\nmain.py:330"] -->|"screener only, no DB writes"| G[("CSV file")]
     H["run_sell_check(ticker)\nmain.py:465"] -->|"db_get_sale_case + _run_sell_check"| I["sell_check_agent\nreports/TICKER_Sell_Check.md"]
