@@ -318,7 +318,7 @@ the guard that exists to stop exactly this kind of spending.
   every session reserves it and a session ending on `Buy` or `Avoid` simply does not
   spend it. `max_budget_usd` went 2.25 → 2.45 to absorb the reservation rather than
   letting it quietly buy fewer review rounds.
-- `_Estimator` (`refine.py:239`) keeps **per-role** estimates (the critic makes tool calls, the
+- `_Estimator` (`refine.py:242`) keeps **per-role** estimates (the critic makes tool calls, the
   reviser does not), seeded from config and then replaced by what each role
   actually cost × `estimate_headroom`. A zero measurement is ignored — a turn that
   failed before billing is not a cheap round.
@@ -369,7 +369,7 @@ must be anchored to `VERIFIED_FIGURES` with the current value quoted beside it, 
 figure the critic corrected can leave a threshold calibrated against a number the
 pipeline itself now says was wrong.
 
-`_refresh_sale_advisory` (`refine.py:477`) handles it by outcome, so the cost is only
+`_refresh_sale_advisory` (`refine.py:480`) handles it by outcome, so the cost is only
 paid when it buys something:
 
 | Outcome | What happens | Cost |
@@ -464,10 +464,10 @@ The refined report is assembled the same way `analyze_ticker` assembles a fresh
 one — deterministic `## Magic Formula Metrics`, the analyst's prose, reconciliation
 warnings — plus one section the pipeline never writes:
 
-- **Agreed** (`_agreed_banner`, `refine.py:317`)**:** a short `## Independent Critic Review` note giving the round count
+- **Agreed** (`_agreed_banner`, `refine.py:320`)**:** a short `## Independent Critic Review` note giving the round count
   and review cost, and stating plainly that agreement means neither agent could
   find a fault in the argument, **not** that the call is right.
-- **Not agreed** (`_not_agreed_banner`, `refine.py:367`)**:** the same heading carrying a blunt "**The independent critic has
+- **Not agreed** (`_not_agreed_banner`, `refine.py:370`)**:** the same heading carrying a blunt "**The independent critic has
   NOT agreed this report**", the count of blocking and material objections still
   standing, the stopping reason, and **a list of those standing objections** — title
   and one-line summary each. The full review is not reproduced; it is stored as the

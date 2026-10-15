@@ -285,6 +285,15 @@ def main_snapshot(path):
             out.write(f"--- {pname}\n")
             out.write(main._format_price_section(price, "ZZZZ") + "\n")
 
+        section(out, "_format_entry_section")
+        import momentum
+        for vname in ("BUY", "WATCH", "AVOID"):
+            for pname, price in (("full", PRICE), ("partial", PARTIAL_PRICE),
+                                 ("empty", {})):
+                out.write(f"--- {vname} / {pname}\n")
+                out.write(main._format_entry_section(
+                    vname, momentum.momentum_state(price, [])) + "\n")
+
         section(out, "_format_magic_formula_section")
         for name, cand in CANDIDATES:
             out.write(f"--- {name}\n")

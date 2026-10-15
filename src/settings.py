@@ -111,3 +111,9 @@ class BudgetExceeded(Exception):
 _reuse = config.get("reuse", {}) or {}
 REUSE_ENABLED = bool(_reuse.get("enabled", True))
 REUSE_MAX_AGE_HOURS = int(_reuse.get("max_age_hours", 24))
+
+# --- Entry gate (momentum.py) --------------------------------------------------
+# The thresholds are passed to `momentum.momentum_state`, which fills anything
+# missing from its own DEFAULTS.
+MOMENTUM = config.get("momentum_gate", {}) or {}
+MOMENTUM_ENABLED = bool(MOMENTUM.get("enabled", False))

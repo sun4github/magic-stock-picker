@@ -492,6 +492,52 @@ buy_check_sweep:
   # is ignored.
   warn_after_unreadable_sweeps: 3
 
+  # Send a summary every sweep, by email and Pushover, whether or not anything
+  # fired. Before this, a quiet week and a broken sweep looked identical: the
+  # job had run for weeks without anyone being able to tell. BUY and
+  # entry-cleared alerts still go out separately at higher priority; the
+  # summary is the weekly proof of life and the list of what was looked at.
+  # Pushover gets a short form (its limit is 1,024 characters) at quiet
+  # priority unless something needs action. A failed sweep sends one too.
+  weekly_summary: true
+
+  # List a buy case under "To tidy up" in the summary once the buy-check agent
+  # has recommended regenerating it (`python buy_case.py TICKER`) in this many
+  # checks IN A ROW. The agent is told to say so when a trigger is overtaken by
+  # events; before this, nothing acted on it and FICO was re-checked for six
+  # weeks against a target its own checks had called obsolete. Two, not one: a
+  # single soft "consider regenerating" is common and usually not worth a chore.
+  flag_stale_case_after_checks: 2
+
+  # The second pass: BUY verdicts whose entry gate (momentum_gate below) said to
+  # wait. Re-read weekly for free, and alerted ONCE when the chart clears. A Buy
+  # older than this is dropped from the pass: by then it is the business verdict
+  # that needs re-checking (`python main.py TICKER`), not just the chart.
+  entry_gate_max_wait_days: 90
+
+# The entry gate (src/momentum.py): a mechanical reading of the price chart,
+# printed BESIDE the verdict as an "Entry" call and never in place of it.
+#
+# The verdict grades the business; this grades the moment. They are stored in
+# separate ledger columns (verdict vs entry_gate/entry_call) so an audit can tell
+# "wrong about the company" from "wrong about the entry" — which a demoted verdict
+# would erase. Only a BUY gets an entry call; a Watch has its buy case.
+#
+# Deterministic: one FMP end-of-day history call per ticker, no model, no tokens,
+# and nothing an agent reads — so `_prompt_version` does not move.
+#
+# Backtest (tools/backtest_momentum_gate.py, 2026-10-14, 18 BUYs): the 4 the gate
+# reads as EXTENDED all trailed SPY (mean excess -11.3%) against -4.3% for the 14
+# CLEAR. Three of the four were ONDEMAND runs, which the screen's
+# max_pct_from_52w_high gate never sees. A small sample from one market regime;
+# re-run the backtest before tightening anything.
+momentum_gate:
+  enabled: true
+  extended_pct: 20.0        # EXTENDED above this % over the 50-day average...
+  max_range_pct: 90.0       # ...or at/above this position in the 52-week range (0-100)
+  knife_pct: 20.0           # FALLING_KNIFE this % below the 200-day average...
+  slope_sessions: 20        # ...when that average fell over this many sessions
+
 tools:
   web_search:
     default_engine: "tavily"

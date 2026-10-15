@@ -30,6 +30,7 @@ from data import (  # noqa: F401  (re-exported: callers import these from mcp_se
     fmp_forward_estimates,
     fmp_metrics_extractor,
     fmp_pending_ma_filings,
+    fmp_price_history,
     fmp_price_snapshot,
     fmp_quarterly_trends,
     fmp_revenue_segments,

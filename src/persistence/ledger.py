@@ -115,6 +115,12 @@ def db_log_run_universe(run_id: str, rows_json: str) -> str:
         return f"Error logging run universe: {str(e)}"
 
 
+def _chart(v):
+    """A chart figure for the ledger, or None. Unlike `_num`, a missing reading
+    stays NULL: 0.0 is a real distance from an average, not 'not measured'."""
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
 @mcp.tool()
 def db_log_verdict(run_id: str, ticker: str, verdict: str, basis_json: str,
                    company_name: str = "", verdict_stage: str = "INDEPENDENT",
@@ -123,7 +129,10 @@ def db_log_verdict(run_id: str, ticker: str, verdict: str, basis_json: str,
                    industry: str = "", magic_rank: int = 0,
                    benchmark_symbol: str = "", benchmark_price: float = 0.0,
                    prompt_version: str = "", git_sha: str = "",
-                   analysis_key: str = "", source: str = "PIPELINE") -> str:
+                   analysis_key: str = "", source: str = "PIPELINE",
+                   entry_gate: str = None, entry_call: str = None,
+                   pct_vs_50dma: float = None, pct_vs_200dma: float = None,
+                   dma200_slope_pct: float = None, range_position: float = None) -> str:
     """
     Record one FRESH verdict plus the factors behind it. Returns the verdict_id.
 
@@ -159,6 +168,12 @@ def db_log_verdict(run_id: str, ticker: str, verdict: str, basis_json: str,
     as given (prefixed OTHER_ by the caller) for periodic review rather than
     rejected, because losing an observation is worse than an untidy key.
 
+    The `entry_*` / chart columns record the entry gate (`momentum.py`): where the
+    price stood when the verdict was written, read by fixed rules. They sit BESIDE
+    `verdict` and never change it — the verdict grades the business, these grade
+    the moment, and an audit needs both to tell the two kinds of mistake apart.
+    NULL means no reading was taken (the gate disabled, or a row from before it).
+
     Observations are NOT embedded here. The column exists and Phase 1 does not
     use it — base rates aggregate on factor_key, not on vector similarity — and
     embedding ~6 factors per ticker would roughly double the run's embedding
@@ -183,9 +198,10 @@ def db_log_verdict(run_id: str, ticker: str, verdict: str, basis_json: str,
                 run_id, ticker, company_name, verdict_date, verdict, verdict_stage,
                 price, market_cap, shares_outstanding, sector, industry, magic_rank,
                 benchmark_symbol, benchmark_price, prompt_version, git_sha, analysis_key,
-                source
+                source, entry_gate, entry_call, pct_vs_50dma, pct_vs_200dma,
+                dma200_slope_pct, range_position
             ) VALUES (%s, %s, %s, CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s, %s,
-                      %s, %s, %s, %s, %s, %s)
+                      %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING verdict_id
         ''', (
             run_id or None, ticker, company_name or None, verdict,
@@ -195,7 +211,9 @@ def db_log_verdict(run_id: str, ticker: str, verdict: str, basis_json: str,
             int(magic_rank) if magic_rank else None,
             (benchmark_symbol or "").strip().upper() or None, _num(benchmark_price),
             prompt_version or None, git_sha or None, analysis_key or None,
-            source,
+            source, entry_gate or None, entry_call or None,
+            _chart(pct_vs_50dma), _chart(pct_vs_200dma),
+            _chart(dma200_slope_pct), _chart(range_position),
         ))
         verdict_id = cur.fetchone()[0]
 

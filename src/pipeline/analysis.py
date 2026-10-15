@@ -16,6 +16,7 @@ import os
 import time
 from datetime import datetime
 
+import momentum
 from magic_formula_starter_screener import OUTPUT_FILENAME
 from mcp_server import (
     compute_ticker_magic_metrics,
@@ -32,6 +33,8 @@ from mcp_server import (
 )
 from persistence import _check_db
 from report import (
+    _entry_reading,
+    _format_entry_section,
     _format_magic_formula_section,
     _format_price_section,
     _format_reconciliation_section,
@@ -148,6 +151,10 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     # VERIFIED_FIGURES, and (on a Watch) the buy case's triggers — see `_price_snapshot`.
     price = _price_snapshot(ticker)
     verified_figures = _format_verified_figures(candidate, price)
+    # The entry gate's chart reading, from that same quote plus one history call.
+    # Read by no agent: it is printed beside the verdict once there is one, and
+    # never changes it.
+    entry = _entry_reading(ticker, price)
 
     # The reconciliation gate can only check figures it has ground truth for. A
     # rankings CSV written before those columns existed yields a candidate with no
@@ -249,12 +256,16 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     # below don't affect the '## Final Verdict' split), then persist the report
     # with the deterministic Magic Formula Metrics section + run header prepended.
     verdict = _extract_verdict(report_text)
-    # Price first, then the ratios derived from it, then the analyst's prose. The
-    # order is the argument: what it costs, how that was turned into the screen's
-    # figures, then what to make of it.
+    if entry:
+        logger.info(f"[{ticker}] Entry gate: {momentum.summary_line(verdict, entry)}")
+    entry_section = _format_entry_section(verdict, entry)
+    # Price first, then whether now is the moment to pay it, then the ratios derived
+    # from it, then the analyst's prose. The order is the argument: what it costs,
+    # how that was turned into the screen's figures, then what to make of it.
     report_with_metrics = (
         f"{_format_price_section(price, ticker)}\n"
-        f"{_format_magic_formula_section(candidate)}\n{report_text}"
+        + (f"{entry_section}\n" if entry_section else "")
+        + f"{_format_magic_formula_section(candidate)}\n{report_text}"
         f"{_format_reconciliation_section(recon_findings)}"
     )
     report_stored = _with_run_header(report_with_metrics, run_id, ticker)
@@ -294,6 +305,7 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
                 git_sha=_git_sha(),
                 analysis_key=analysis_key or "",
                 source="ONDEMAND" if on_demand else "PIPELINE",
+                **momentum.ledger_fields(verdict, entry),
             )
         except Exception as e:
             logger.warning(f"[{ticker}] Verdict ledger write failed ({e}); the "

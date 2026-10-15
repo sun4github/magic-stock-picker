@@ -288,6 +288,12 @@ def initialize_database():
         cur.execute("ALTER TABLE verdict_log ADD COLUMN IF NOT EXISTS exit_date DATE")
         cur.execute("ALTER TABLE verdict_log ADD COLUMN IF NOT EXISTS "
                     "exit_price NUMERIC(14, 4)")
+        # The entry gate (momentum.py): the chart as it stood when the verdict was
+        # written. Beside `verdict`, never instead of it. NULL = no reading taken.
+        for col_def in ("entry_gate VARCHAR(16)", "entry_call VARCHAR(16)",
+                        "pct_vs_50dma NUMERIC(10, 2)", "pct_vs_200dma NUMERIC(10, 2)",
+                        "dma200_slope_pct NUMERIC(10, 2)", "range_position NUMERIC(6, 1)"):
+            cur.execute(f"ALTER TABLE verdict_log ADD COLUMN IF NOT EXISTS {col_def}")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_verdict_log_ticker_date "
                     "ON verdict_log(ticker, verdict_date DESC)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_verdict_log_date "
@@ -377,6 +383,24 @@ def initialize_database():
         for col_def in ["unreadable_streak INTEGER NOT NULL DEFAULT 0",
                         "unreadable_alerted_on DATE"]:
             cur.execute(f"ALTER TABLE buy_check_sweep_state ADD COLUMN IF NOT EXISTS {col_def}")
+
+        # Operational state for the sweep's second pass: Buy verdicts whose entry
+        # gate said to wait. Keyed by the VERDICT, not the ticker, because the
+        # alert is "this verdict's wait is over" — a later verdict on the same
+        # ticker is a new question with its own answer. `cleared_on` is what stops
+        # the clearance being announced every week. See sql-schema.sql table 11.
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS entry_gate_watch_state (
+                verdict_id UUID PRIMARY KEY,
+                ticker VARCHAR(10) NOT NULL,
+                entry_call VARCHAR(16),
+                last_checked_on DATE,
+                last_gate VARCHAR(16),
+                last_price NUMERIC(14, 4),
+                cleared_on DATE,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
 
         # Backfill ticker_runs from any pre-existing final_reports so the UI shows
         # historical runs. company_name is unknown for old rows (left NULL).

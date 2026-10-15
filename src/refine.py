@@ -51,6 +51,7 @@ import json
 import uuid
 from datetime import datetime, timezone
 
+import momentum
 from agents import sale_advisor_agent
 from persistence import _check_db, get_db_connection
 from pipeline import (
@@ -62,6 +63,8 @@ from pipeline import (
 )
 from report import (
     _RECONCILIATION_HEADING,
+    _entry_reading,
+    _format_entry_section,
     _format_magic_formula_section,
     _format_price_section,
     _format_reconciliation_section,
@@ -739,7 +742,7 @@ def _demote_headings(markdown: str, levels: int = 2) -> str:
 
 def _assemble(candidate: dict, report_body: str, recon_findings: list,
               critic_section: str, final_review: str, agreed: bool,
-              price: dict = None, ticker: str = "") -> str:
+              price: dict = None, ticker: str = "", entry_section: str = "") -> str:
     """Deterministic sections + the analyst's prose + the critic's standing.
 
     The price section is re-rendered from a quote taken at REVIEW time, not copied
@@ -747,10 +750,12 @@ def _assemble(candidate: dict, report_body: str, recon_findings: list,
     the figures and for the same reason: a refined report is a document about today,
     and the price at the top of it should be the one the critic's objections were
     weighed against — not the one from the run being reviewed, which may be days old.
+    The entry section follows the same rule, and is read against the REFINED verdict.
     """
     parts = [
         _format_price_section(price or {}, ticker),
         "",
+    ] + ([entry_section, ""] if entry_section else []) + [
         _format_magic_formula_section(candidate),
         "",
         report_body,
@@ -855,6 +860,9 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     # verdict lands on Watch) sets its triggers against that one too.
     price = _price_snapshot(ticker)
     verified_figures = _format_verified_figures(candidate, price)
+    # The entry gate's chart reading, from that same quote. No agent reads it; it
+    # is printed beside the refined verdict and logged beside it in the ledger.
+    entry = _entry_reading(ticker, price)
     screen_context = (
         _format_screen_context(candidate) if candidate.get("ROC_Pct")
         else ("Magic Formula ROC / Earnings Yield could not be recomputed for this "
@@ -1154,7 +1162,7 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
     )
     report_stored = _with_run_header(
         _assemble(candidate, report_body, recon_findings, critic_section, final_review,
-                  agreed, price, ticker),
+                  agreed, price, ticker, _format_entry_section(verdict, entry)),
         refine_run_id, ticker,
     )
 
@@ -1246,6 +1254,7 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
                 # Inherited, never assumed: a refined one-off stays ONDEMAND so it
                 # sits in the same population as the INDEPENDENT row Q4 pairs it with.
                 source=_inherited_verdict_source(ticker, src_run),
+                **momentum.ledger_fields(verdict, entry),
             )
             logger.info(
                 f"[{ticker}] Ledger: logged a POST_CRITIC verdict ({verdict}) beside "

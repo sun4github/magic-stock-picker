@@ -35,7 +35,7 @@ A "candidate" dict (one company's Magic Formula figures) reaches
 - `_normalize_candidate(candidate)` (`report/figures.py:53`) derives the missing
   `_Pct` fields from the raw ratio columns per `_RATIO_TO_PCT_FIELD`
   (`report/figures.py:41`), called as the **first line** of `analyze_ticker`
-  (`pipeline/analysis.py:68`) before anything else reads the dict. Without this, the
+  (`pipeline/analysis.py:71`) before anything else reads the dict. Without this, the
   goodwill-inclusive ROIC companion silently disappeared from every batch
   run — see the docstring for the incident this fixed.
 
@@ -88,7 +88,7 @@ fabricated figure.
 
 ## 3. Reconciliation gate, `report/reconciliation.py:1-394`
 
-Runs **after** the agents finish (`analyze_ticker`, `pipeline/analysis.py:68-340`),
+Runs **after** the agents finish (`analyze_ticker`, `pipeline/analysis.py:71-363`),
 scanning bear/bull/final/sale prose for dollar amounts presented as current
 total debt, market cap, or enterprise value, and flagging any that deviate
 from the verified figure beyond a per-field tolerance
@@ -193,7 +193,7 @@ flowchart LR
   lands on `Watch`, which is a property of the analysis rather than of the flag, so
   the variants differ only in what was **asked for**. Returns
   `""` (disabling reuse) when the balance-sheet date is unknown.
-- Reuse is checked at the top of `analyze_ticker` (`pipeline/analysis.py:68-340`),
+- Reuse is checked at the top of `analyze_ticker` (`pipeline/analysis.py:71-363`),
   before any billed work — a hit costs one DB read plus a row copy, a miss
   costs nothing extra. `reuse.enabled`/`reuse.max_age_hours` in `config.yaml`;
   `--force` bypasses the check entirely regardless of config.
