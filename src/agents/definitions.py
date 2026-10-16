@@ -46,8 +46,9 @@ from prompt_loader import load_mandate, load_prompt
 #         bull_agent  (prompts/bull.md) -> state['bull_data']
 #                     (runs after bear so it can refute it)
 #         analyst_agent (neutral judge) reads {bear_data}/{bull_data} -> final_report
-# ticker, company_name, sec_data, metrics_data, screen_context are seeded before
-# the graph runs; each agent templates the keys it references.
+# ticker, company_name, sec_data, metrics_data, screen_context,
+# analysis_purpose are seeded before the graph runs; each agent templates
+# the keys it references.
 APP_NAME = "skeptical_decomposer"
 
 # Shared prompt fragment: the same recency mandate is given to bear, bull, and

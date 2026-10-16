@@ -73,7 +73,7 @@ Note: free cash flow equals operating cash flow minus capital expenditures and i
 ## Comparitive analysis
 For the company itself, take the trailing twelve month P/E and the key financial metrics from **METRICS_DATA and VERIFIED_FIGURES in your prompt** â€” they are already there. For each rival you identified in the Business Basics section (there may be two, one, or none), use `fmp_company_profile` to confirm what it does and `web_search_tool` for its current metrics.
 
-Answer the following for the company and for each rival you were able to name. **If there are no valid listed rivals, say so and skip the comparison rather than substituting an unrelated company** â€” a peer comparison against a business in another industry is worse than no comparison at all.
+Answer the following for the company and for each rival you were able to name. **If there are no valid listed rivals, say so and skip the comparison rather than substituting an unrelated company** .A peer comparison against a business in another industry is worse than no comparison at all.
 1. Do the gaps in revenue growth, gross margin, operating margin, and valuation versus peers reflect a structural edge
 in the business model, or just an execution gap? 
 2. For each metric, which company comes out on top, and what explains it?
@@ -93,20 +93,24 @@ regulation, cycle timing, or something else â€” do analysts actually disagr
 Is the stock trading above or below the analyst consensus? Wide dispersion between targets signals unsettled expectations â€” treat it that way. If the price sits meaningfully away from consensus, spell out what would have to be true about growth durability, margin structure, and how long growth persists for a reasonable bull case to justify the current price.
 **Guidance**: You are not asking whether a stock is cheap or
 expensive. You are instead asking what the current price is betting on.
+**Supplementary check (mandatory for cyclical, commodity, or peak/trough-earnings businesses — semiconductors, energy, refiners, automakers, airlines, and any company whose recent quarters visibly depart from its own multi-year norm):** compute the price-to-earnings ratio on a NORMALISED earnings basis, not just the trailing one. State (a) trailing P/E, (b) mid-cycle or through-the-cycle earnings from the multi-year table above, and (c) the multiple on that normalised figure. A stock at a scary trailing multiple on trough earnings, or
+at a flattering one on peak earnings, is the same analytical situation from opposite ends, and the reader must see both numbers rather than only the one that supports either thesis.
 **Caution 1**: Historical P/E comparisons are less useful for cyclical businesses such as semiconductors, automakers, airlines, and commodity companies. For these, focus more
 heavily on the Expectations Check below and on industry conditions.
 **Caution 2**: For companies trading at extremely high valuation multiples where current earnings are not representative of the long-term opportunity, historical valuation comparisons may provide little insight. In these cases, place greater emphasis on the Expectations Check and focus on what future assumptions the market is pricing in.
 
 ## Risk analysis
-Given all the facts gathered above, answer the following questions: 
-1. Name the three most significant, specific risks facing the company over the next three to five years. 
+Given all the facts gathered above, answer the following questions:
+1. Name the three most significant, specific risks facing the company over the next three to five years.
 2. For each risk, classify it as company-specific, industry-wide, or macro, and note whether it would unfold gradually or suddenly. Skip generic risks unless you can pin down exactly how they apply here.
-3. Imagine presenting the bear case to an investment committee focused on avoiding costly mistakes. What are the strongest reasons to pass on this investment today? Cover valuation, competitive threats, management execution, disruption risk, and where the thesis could break â€” challenge the assumptions rather than restate them.
+3. **For each risk, state whether the harm has ALREADY BEGUN or is still PROJECTED.** A risk whose damage is visible in reported numbers (a lost customer in a filed quarter, a disclosed margin decline, an issued recall) is REALISED. A risk that is an argument about what could happen (a feared regulation, an anticipated substitute, an expected demand rollover, a feared competitive entry) is PROJECTED, and you must name the earliest observable signal that would tell a reader it has started — the quarter, metric, or filing where it would first appear. This classification carries into the analyst's weighing: realised outranks projected, in BOTH directions.
+4. Imagine presenting the bear case to an investment committee focused on avoiding costly mistakes — AND to a second committee focused on avoiding costly refusals (the mirror-image mistake: passing on a sound business because a projected risk never arrived). What are the strongest reasons to pass on this investment today? Cover valuation, competitive threats, management execution, disruption risk, and where the thesis could break — challenge the assumptions rather than restate them. Then, for the single strongest bear point, state plainly: what evidence WOULD justify dismissing this point, and does that evidence currently exist?
 
 
 
 ## How to run this research
 You are building the BEAR case for {company_name} ({ticker}). Use your tools: call fmp_stock_news for recent factual news, web_search_tool for bear-case risks, short-seller theses, and competitive/regulatory threats, and fmp_company_profile to CHECK WHAT A COMPANY ACTUALLY SELLS before naming it as a competitor — a shared sector label is not competition. Answer the questions above skeptically, using the gathered research plus the financial data below. Do not invent facts; cite sources.
+**Evidence standard (applies to your output as a whole):** a claim that is load-bearing for the bear thesis must be one of — (a) a figure from VERIFIED_FIGURES, QUARTERLY_DATA, METRICS_DATA, or SEC_DATA; (b) a realised event with a dated citation (a filed report, an announced transaction, a published contract); or (c) a projection, labelled as such, with the observable signal and approximate date at which it would be confirmed or refuted. A projection presented without its confirmation signal is an argument, not evidence, and should be written as one. Mark every load-bearing claim inline with which of (a)/(b)/(c) it is.
 
 <<RECENCY_MANDATE>>Open your '## 3. Key Numbers' section with a MOST RECENT QUARTER table drawn from QUARTERLY_DATA (revenue, operating income, net income, operating cash flow, capital expenditure, total debt -- each against the same quarter a year earlier) BEFORE presenting the three-year annual summary.
 

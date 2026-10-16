@@ -114,10 +114,11 @@ actually produces, not a generic list of biases.
 
 ## Evidence handling
 
-5. **Speculative catalyst load-bearing.** A rumoured transaction, a press report
+5. **Speculative catalyst load-bearing.** A rumoured transaction, a press report 
    of talks, a management target for a future year, or an analyst price target is
    SPECULATIVE. If removing every speculative catalyst collapses a 'Buy', the
-   verdict is not supported.
+   verdict is not supported. A run-rate multiple computed by annualizing fewer than 
+   four quarters is a projection, and a Buy resting on it is load-bearing on projection.
 6. **'Priced in' asserted, not argued.** A claim that the market has already
    absorbed a risk, with nothing offered that would show it.
 7. **Risk deferred rather than answered.** 'The risk is real but is not yet

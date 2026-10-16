@@ -105,6 +105,26 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
                     user_id="orchestrator", session_id=session_id, new_message=message
                 ):
                     _add_event_usage(agent_usage, event)
+                 # An agent turn that ends without producing its output_key is a
+                # FAILURE, not a result. Observed 2026-10-15 on SITM/AXTI: the
+                # analyst 'succeeded', left session state without a
+                # final_report, the sale advisor then ran blind, and the run was
+                # recorded COMPLETED with no report. Treated here exactly like a
+                # rate limit: retry this agent, and raise when the retries are
+                # spent, so the run FAILS visibly instead of drifting into
+                # downstream agents with empty inputs.
+                state_now = await session_service.get_session(
+                    app_name=APP_NAME, user_id="orchestrator", session_id=session_id
+                )
+                output_key = getattr(agent, "output_key", None)
+                produced = bool(state_now and state_now.state and
+                                (state_now.state.get(output_key) or "").strip()) \
+                    if output_key else True
+                if not produced:
+                    raise ValueError(
+                        f"{agent.name} completed without producing '{output_key}' "
+                        f"(empty output on attempt {attempt + 1}/{MAX_AGENT_RETRIES})"
+                    )
                 break
             except Exception as e:
                 if _is_rate_limit_error(e) and attempt < MAX_AGENT_RETRIES - 1:

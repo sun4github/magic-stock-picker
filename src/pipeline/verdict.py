@@ -31,20 +31,35 @@ _SRC_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # --- 3. PHASE B: PER-TICKER ANALYSIS (shared by full + on-demand runs) ---
-def _extract_verdict(report_text: str) -> str:
+def _extract_verdict(report_text: str, strict: bool = True) -> str:
     """Extract BUY/WATCH/AVOID from the report's '## Final Verdict' section.
 
     Anchors on the explicit 'Verdict: X' declaration rather than a naive
     substring search — the justification prose often mentions the word 'buy'
     when weighing the bull case, which would misclassify the verdict.
-    """
+
+    With strict=True (the default), a report that never declares a verdict
+    raises instead of being recorded. The previous fallback returned 'WATCH'
+    for an unparseable section, which recorded a fabricated verdict in the
+    ledger: a re-run of an Avoid that failed to persist its verdict line then
+    appeared in the DB as a fresh Watch — an apparent upgrade the prompts never
+    made. Callers that genuinely want the legacy guess pass strict=False."""
     section = report_text.split("## Final Verdict")[-1]
     m = re.search(r"verdict[^A-Za-z]{0,12}(buy|watch|avoid)", section, re.IGNORECASE)
     if m:
         return m.group(1).upper()
     lowered = section.lower()
     positions = {w: lowered.find(w) for w in ("buy", "watch", "avoid") if lowered.find(w) != -1}
-    return min(positions, key=positions.get).upper() if positions else "WATCH"
+    if positions:
+        return min(positions, key=positions.get).upper()
+    if strict:
+        raise ValueError(
+            "No verdict declaration found in '## Final Verdict' section — a "
+            "report without an explicit 'Verdict: Buy/Watch/Avoid' line is a "
+            "broken report, not a Watch. Refusing to record a fabricated verdict."
+        )
+    return "WATCH"
+
 
 
 # Matches the '## Verdict Basis' section and everything after it. Anchored to the
