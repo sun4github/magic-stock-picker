@@ -68,13 +68,44 @@ from .verdict import (
 logger = logging.getLogger("InvestmentAgentPipeline")
 
 
+class TickerAnalysisFailed(Exception):
+    """A single ticker's analysis ended without a persisted verdict: an agent
+    produced nothing, the pipeline raised, no final report came back, or the
+    report declared no verdict. The caller decides what it means for the parent
+    run: an on-demand run is FAILED; a batch skips the ticker, carries on, and is
+    marked PARTIAL (or FAILED if every ticker failed).
+
+    `usage` carries what the ticker was billed before it failed, so the caller can
+    still count it against the budget guard. It is zero when the pipeline itself
+    raised, because that path has never returned the partial figures."""
+
+    def __init__(self, message: str, usage: dict = None):
+        super().__init__(message)
+        self.usage = usage if usage is not None else _new_usage()
+
+
+# Seeded into the analyst's `{analysis_purpose}` for a one-off run. A PIPELINE run
+# seeds the empty string, which the analyst prompt reads as "the screen chose this
+# name". Shared with refine.py so a refined one-off is judged by the same standard.
+ON_DEMAND_PURPOSE = (
+    "ON-DEMAND — the screen did NOT select this candidate. It is being "
+    "analyzed at a user's request for reasons outside the Magic Formula "
+    "screen (e.g. a recommendation, momentum, growth, or turnaround). "
+    "Judge this candidate on the thesis that brought it here; treat the "
+    "screen figures as one input, not the bar."
+)
+
+
+def _analysis_purpose(on_demand: bool) -> str:
+    return ON_DEMAND_PURPOSE if on_demand else ""
+
+
 def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: str = "",
                    candidate: dict = None, force: bool = False,
                    skip_sale_advisor: bool = False, skip_buy_case: bool = False,
                    on_demand: bool = False) -> dict:
     """Run the Phase-B agent sequence for one ticker and persist its
-    outputs and final report. Returns the ticker's token-usage dict (zero usage
-    if the pipeline failed).
+    outputs and final report. Returns the ticker's token-usage dict.
 
     `screen_context` carries the Magic Formula bull signal (rank / ROC / earnings
     yield) so the verdict can weigh it against the bear case. Empty for tickers
@@ -87,13 +118,20 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     agent's own writeup omits or misstates them.
 
     `on_demand` marks a ticker the SCREEN never chose — a one-off
-    `main.py TICKER`. It changes nothing about the analysis; it only sets
+    `main.py TICKER`. It tells the analyst to judge the candidate on the thesis
+    that brought it here rather than against the screen's bar, and it sets
     `verdict_log.source` to ONDEMAND instead of PIPELINE, which keeps the name
     out of Q1's "did filtering the screen beat not filtering it" comparison.
     Such a run writes no `run_universe` rows, so counting its verdict as a
     screen approval would measure approvals against a universe that never
     contained the name. Q2/Q3/Q4 still grade it: the judgement is the system's
     either way.
+
+    Raises `TickerAnalysisFailed` when the ticker ends without a persisted verdict
+    (see the class). Nothing is recorded as a verdict in that case: a broken run
+    must not be indistinguishable from a real 'Watch'.
+
+    `on_demand` also selects the analyst's judging standard (`{analysis_purpose}`).
 
     Assumes the parent pipeline_runs row for `run_id` already exists (the
     agent_outputs/final_reports tables have a FK onto it).
@@ -176,10 +214,11 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
         state, usage = run_pipeline(
             run_id, ticker, company_name, sec_data, metrics_data, screen_context,
             quarterly_data, verified_figures, skip_sale_advisor,
+            analysis_purpose=_analysis_purpose(on_demand),
         )
     except Exception as e:
         logger.error(f"[{ticker}] Skipping after pipeline failure: {e}")
-        return _new_usage()
+        raise TickerAnalysisFailed(f"{ticker}: pipeline failure: {e}") from e
 
     _log_usage(ticker, usage)
 
@@ -220,7 +259,9 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     if not report_text:
         logger.error(f"[{ticker}] No final report produced; skipping report persistence.")
         _collect_embedding_usage(usage)
-        return usage
+        raise TickerAnalysisFailed(
+            f"{ticker}: agent graph completed but produced no final report.", usage
+        )
 
     # Reconciliation gate. Check the model-written sections against the figures the
     # pipeline read from the filings itself. This runs AFTER generation rather than
@@ -255,7 +296,12 @@ def analyze_ticker(run_id: str, ticker: str, company_name: str, screen_context: 
     # Extract the verdict from the original text (banner/metrics section prepended
     # below don't affect the '## Final Verdict' split), then persist the report
     # with the deterministic Magic Formula Metrics section + run header prepended.
-    verdict = _extract_verdict(report_text)
+    try:
+        verdict = _extract_verdict(report_text)
+    except ValueError as e:
+        logger.error(f"[{ticker}] {e}")
+        _collect_embedding_usage(usage)
+        raise TickerAnalysisFailed(f"{ticker}: report declared no verdict.", usage) from e
     if entry:
         logger.info(f"[{ticker}] Entry gate: {momentum.summary_line(verdict, entry)}")
     entry_section = _format_entry_section(verdict, entry)

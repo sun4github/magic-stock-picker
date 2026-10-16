@@ -61,7 +61,6 @@ def _extract_verdict(report_text: str, strict: bool = True) -> str:
     return "WATCH"
 
 
-
 # Matches the '## Verdict Basis' section and everything after it. Anchored to the
 # heading rather than to the fence so a model that emits stray prose around the
 # block still gets the whole tail removed from the reader-facing report.

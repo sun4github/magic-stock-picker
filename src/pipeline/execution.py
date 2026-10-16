@@ -43,7 +43,8 @@ logger = logging.getLogger("InvestmentAgentPipeline")
 async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
                               sec_data: str, metrics_data: str, screen_context: str,
                               quarterly_data: str = "", verified_figures: str = "",
-                              skip_sale_advisor: bool = False):
+                              skip_sale_advisor: bool = False,
+                              analysis_purpose: str = ""):
     """Run the analysis graph for one ticker. Returns (state, usage).
 
     The four roles are run as SEPARATE runners over ONE shared session rather than
@@ -63,6 +64,9 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
     # signal; verified_figures carries the deterministic balance-sheet ground truth
     # every agent is forbidden to contradict. All are read by the agents via
     # {sec_data}/{metrics_data}/{quarterly_data}/{screen_context}/{verified_figures}.
+    # analysis_purpose tells the analyst which judging standard applies (empty =
+    # PIPELINE, the screen chose the name). It is ALWAYS seeded, because the
+    # analyst prompt templates it and ADK raises KeyError on an absent key.
     await session_service.create_session(
         app_name=APP_NAME,
         user_id="orchestrator",
@@ -75,6 +79,7 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
             "quarterly_data": quarterly_data,
             "verified_figures": verified_figures,
             "screen_context": screen_context,
+            "analysis_purpose": analysis_purpose or "",
         },
     )
 
@@ -105,7 +110,7 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
                     user_id="orchestrator", session_id=session_id, new_message=message
                 ):
                     _add_event_usage(agent_usage, event)
-                 # An agent turn that ends without producing its output_key is a
+                # An agent turn that ends without producing its output_key is a
                 # FAILURE, not a result. Observed 2026-10-15 on SITM/AXTI: the
                 # analyst 'succeeded', left session state without a
                 # final_report, the sale advisor then ran blind, and the run was
@@ -158,7 +163,7 @@ async def _run_pipeline_async(run_id: str, ticker: str, company_name: str,
 def run_pipeline(run_id: str, ticker: str, company_name: str, sec_data: str,
                  metrics_data: str, screen_context: str,
                  quarterly_data: str = "", verified_figures: str = "",
-                 skip_sale_advisor: bool = False):
+                 skip_sale_advisor: bool = False, analysis_purpose: str = ""):
     """Synchronous wrapper around the Phase-B graph. Returns (state, usage).
 
     Rate-limit retries happen INSIDE `_run_pipeline_async`, per agent — there is
@@ -170,7 +175,7 @@ def run_pipeline(run_id: str, ticker: str, company_name: str, sec_data: str,
     """
     state, usage = asyncio.run(_run_pipeline_async(
         run_id, ticker, company_name, sec_data, metrics_data, screen_context,
-        quarterly_data, verified_figures, skip_sale_advisor,
+        quarterly_data, verified_figures, skip_sale_advisor, analysis_purpose,
     ))
     time.sleep(INTER_CALL_DELAY_SECONDS)  # gentle throttle between tickers
     return state, usage

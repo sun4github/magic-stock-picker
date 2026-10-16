@@ -61,6 +61,7 @@ from pipeline import (
     _prompt_version,
     _split_verdict_basis,
 )
+from pipeline.analysis import ON_DEMAND_PURPOSE
 from report import (
     _RECONCILIATION_HEADING,
     _entry_reading,
@@ -940,6 +941,11 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
         _finalize_run(refine_run_id, usage, "Refinement Run", status="BUDGET_EXCEEDED")
         return
 
+    # The reviser is the analyst, so it needs the same judging standard the original
+    # run used: a refined one-off is judged on its own thesis, not against the screen.
+    analysis_purpose = (
+        ON_DEMAND_PURPOSE if _inherited_verdict_source(ticker, src_run) == "ONDEMAND" else ""
+    )
     report_body = strip_generated_sections(source["markdown_report"])
     analyst_response = ""
     final_review = ""
@@ -956,6 +962,7 @@ def run_refinement_loop(ticker: str, company_name: str = None, source_run_id: st
             "report_vintage": report_vintage,
             "screen_context": screen_context,
             "verified_figures": verified_figures,
+            "analysis_purpose": analysis_purpose,
             "quarterly_data": quarterly_data,
             "bear_data": bear_data,
             "bull_data": bull_data,

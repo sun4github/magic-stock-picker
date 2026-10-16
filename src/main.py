@@ -209,6 +209,7 @@ from pipeline import (  # noqa: F401  (re-exported for `main._name` callers)
 # `refine`, `buy_case`, `buy_case_agent` and `sale_advisory` call it as
 # `main._check_db`.
 from persistence import _check_db  # noqa: F401  (re-exported)
+from pipeline.analysis import TickerAnalysisFailed  # noqa: F401  (re-exported)
 
 
 # The report itself — every deterministic section, the VERIFIED_FIGURES block the
@@ -289,6 +290,7 @@ def _run_phase_b(top_candidates: list, source_label: str, force: bool = False,
     run_usage = _new_usage()
     completed = 0
     halted = None
+    failed = []
     for idx, candidate in enumerate(top_candidates):
         ticker = candidate.get("Symbol")
         company_name = candidate.get("CompanyName")
@@ -300,9 +302,16 @@ def _run_phase_b(top_candidates: list, source_label: str, force: bool = False,
             break
         logger.info(f"--- Processing {idx+1}/{len(top_candidates)}: {ticker} ({company_name}) ---")
         screen_context = _format_screen_context(candidate)
-        _merge_usage(run_usage,
-                     analyze_ticker(run_id, ticker, company_name, screen_context, candidate,
-                                    force, skip_sale_advisor, skip_buy_case))
+        # A ticker that fails is skipped, not fatal: a 30-name batch should not die
+        # on name #7. What it must not do is leave the run looking COMPLETED.
+        try:
+            _merge_usage(run_usage,
+                         analyze_ticker(run_id, ticker, company_name, screen_context, candidate,
+                                        force, skip_sale_advisor, skip_buy_case))
+        except TickerAnalysisFailed as e:
+            _merge_usage(run_usage, e.usage)
+            failed.append(ticker)
+            logger.error(f"BATCH: {e} Skipping {ticker}; the run will not be marked COMPLETED.")
         completed += 1
 
     if halted:
@@ -310,8 +319,15 @@ def _run_phase_b(top_candidates: list, source_label: str, force: bool = False,
             f"Stopped after {completed}/{len(top_candidates)} tickers. Everything "
             f"analyzed so far is saved under run {run_id}."
         )
-    _finalize_run(run_id, run_usage, "Workflow Run",
-                  status="BUDGET_EXCEEDED" if halted else "COMPLETED")
+    if failed:
+        logger.error(f"{len(failed)}/{completed} ticker(s) produced no verdict: {', '.join(failed)}.")
+    if halted:
+        status = "BUDGET_EXCEEDED"
+    elif failed:
+        status = "FAILED" if len(failed) == completed else "PARTIAL"
+    else:
+        status = "COMPLETED"
+    _finalize_run(run_id, run_usage, "Workflow Run", status=status)
 
 
 def run_orchestrator(force: bool = False, skip_sale_advisor: bool = False,
@@ -475,8 +491,13 @@ def run_single_ticker(ticker: str, company_name: str = None, force: bool = False
     # on_demand=True: the screen did not choose this name, so its verdict is
     # logged as ONDEMAND rather than PIPELINE. This run writes no run_universe
     # rows, and Q1 measures approvals against exactly those rows.
-    usage = analyze_ticker(run_id, ticker, company_name, screen_context, candidate, force,
-                           skip_sale_advisor, skip_buy_case, on_demand=True)
+    try:
+        usage = analyze_ticker(run_id, ticker, company_name, screen_context, candidate, force,
+                               skip_sale_advisor, skip_buy_case, on_demand=True)
+    except TickerAnalysisFailed as e:
+        logger.error(f"{e}")
+        _finalize_run(run_id, e.usage, "On-Demand Run", status="FAILED")
+        return
 
     _finalize_run(run_id, usage, "On-Demand Run")
 

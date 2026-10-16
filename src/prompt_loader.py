@@ -62,7 +62,7 @@ KNOWN_STATE_KEYS = frozenset({
     # handed forward between agents via output_key
     "bear_data", "bull_data", "final_report", "sale_data",
     # seeded by the standalone check flows
-    "sale_conditions", "buy_conditions", "analysis_purpose"
+    "sale_conditions", "buy_conditions", "analysis_purpose",
 })
 
 _PLACEHOLDER = re.compile(r"{+[^{}]*}+")
