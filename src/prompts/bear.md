@@ -73,7 +73,7 @@ Note: free cash flow equals operating cash flow minus capital expenditures and i
 ## Comparitive analysis
 For the company itself, take the trailing twelve month P/E and the key financial metrics from **METRICS_DATA and VERIFIED_FIGURES in your prompt** â€” they are already there. For each rival you identified in the Business Basics section (there may be two, one, or none), use `fmp_company_profile` to confirm what it does and `web_search_tool` for its current metrics.
 
-Answer the following for the company and for each rival you were able to name. **If there are no valid listed rivals, say so and skip the comparison rather than substituting an unrelated company** .A peer comparison against a business in another industry is worse than no comparison at all.
+Answer the following for the company and for each rival you were able to name. **If there are no valid listed rivals, say so and skip the comparison rather than substituting an unrelated company** - a peer comparison against a business in another industry is worse than no comparison at all.
 1. Do the gaps in revenue growth, gross margin, operating margin, and valuation versus peers reflect a structural edge
 in the business model, or just an execution gap? 
 2. For each metric, which company comes out on top, and what explains it?
