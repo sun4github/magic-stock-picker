@@ -204,14 +204,14 @@ budget:
   # a worse outcome than the overspend it prevented. Still well below the ~$22 a
   # doubled per-ticker cost would reach, so a genuine runaway is still caught.
   #
-  # Raised 20 -> 30 with the Sonnet analyst. ESTIMATE, not measured: the analyst reads
+  # Raised 20 -> 25 with the Sonnet analyst. ESTIMATE, not measured: the analyst reads
   # the full bear + bull text (~35k tokens in) and writes the report plus medium
-  # thinking (~12k out), about $0.10 in + $0.18 out at $3/$15 = ~$0.28 a ticker versus
-  # ~$0.05 on flash. That puts a ticker near $0.55-0.60 and 30 tickers near $17-18.
-  # 30 leaves the same ~1.7x headroom the old 20 had over $11. Replace this with a
-  # measured number after the first real run (the run log's per-model breakdown).
-  per_run_usd: 30.00
-  per_day_usd: 40.00        # rolling window below, not calendar day
+  # thinking (~12k out), about $0.07 in + $0.12 out at $2/$10 = ~$0.19 a ticker versus
+  # ~$0.05 on flash. That puts a ticker near $0.50 and 30 tickers near $15. 25 keeps
+  # ~1.7x headroom over that. Replace this with a measured number after the first
+  # real run (the run log's per-model breakdown).
+  per_run_usd: 25.00
+  per_day_usd: 35.00        # rolling window below, not calendar day
   day_window_hours: 24
   on_exceed: "halt"
 
@@ -249,10 +249,10 @@ refinement:
   # without the matching increase every addition would quietly buy fewer rounds for
   # the same stated ceiling. The number restores review headroom rather than paying
   # for the derived documents out of it.
-  # Raised 2.45 -> 3.50 when the reviser moved to Sonnet: a revision rewrites the whole
-  # report (~$0.35 against ~$0.07 on flash), so without this the same stated ceiling
+  # Raised 2.45 -> 3.00 when the reviser moved to Sonnet: a revision rewrites the whole
+  # report (~$0.25 against ~$0.07 on flash), so without this the same stated ceiling
   # would buy one fewer review round. Restores headroom, does not add rounds.
-  max_budget_usd: 3.50      # ~4-6 agent turns, plus the advisory and the buy case
+  max_budget_usd: 3.00      # ~4-6 agent turns, plus the advisory and the buy case
   max_rounds: 3             # hard stop; the budget usually binds first
   # Cost estimates used ONLY for the first ceiling check, before either role has run
   # once and can be measured. After round 1 they are discarded in favour of the
@@ -268,7 +268,7 @@ refinement:
   # dearest observed round of each kind. Note only ONE revision has been measured,
   # and later-round revisions carry bigger prompts, so that one keeps more headroom.
   seed_critique_usd: 0.15   # the critic makes tool calls, so it is the dearer role
-  seed_revision_usd: 0.40   # Sonnet reviser, estimated; was 0.12 measured on flash
+  seed_revision_usd: 0.28   # Sonnet reviser, estimated; was 0.12 measured on flash
   estimate_headroom: 1.25   # rounds grow as findings and replies accumulate
   # Long-term memory (critic_memory): how much of this company's review history is
   # replayed into both agents' prompts each round. Sent twice per round, so raising
@@ -667,16 +667,17 @@ llm_pricing:
       confirmed: true
     # Sonnet 5.5 for the analyst and reviser. Thinking tokens bill at the output rate
     # and LiteLLM folds them into completion tokens, so no separate line is needed.
-    # UNCONFIRMED: rates are Anthropic's Sonnet-tier list prices ($3 in / $15 out,
-    # cache reads at 10% of input), not read from an invoice; the loud warning on each
-    # run is deliberate until they are checked. Listed under BOTH names because LiteLLM
+    # UNCONFIRMED: $2 in / $10 out is what third-party price trackers report for
+    # Sonnet 5.5 (2026-10-31), not Anthropic's own page or an invoice. Trackers
+    # disagree on cache reads ($0.10 vs $0.20), so the dearer one is used. The loud
+    # warning on each run is deliberate until these are checked. Listed under BOTH names because LiteLLM
     # may report either the prefixed string or the bare model id (or a dated variant)
     # as `model_version`; an unlisted spelling logs "No price configured" and drops
     # the tokens from the budget guard. Check the first run log and delete the unused key.
     "anthropic/claude-sonnet-5-5": &sonnet55
-      input_usd_per_1m: 3.00
-      output_usd_per_1m: 15.00
-      cached_input_usd_per_1m: 0.30
+      input_usd_per_1m: 2.00
+      output_usd_per_1m: 10.00
+      cached_input_usd_per_1m: 0.20
       confirmed: false
     "claude-sonnet-5-5": *sonnet55
   # Embeddings are billed per input token. Four vectors are generated per ticker
