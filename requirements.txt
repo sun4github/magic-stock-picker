@@ -1,11 +1,11 @@
 google-adk
-litellm>=1.106.6  # routes provider/model agents (Claude analyst, Ollama critic) through ADK. Older releases send the retired thinking.type.enabled to Sonnet 5.5, which the API rejects.
+litellm>=1.105.0,<1.106  # routes provider/model agents (Claude analyst, Ollama critic) through ADK. >=1.105: knows Sonnet 5.5's adaptive thinking (older sends the retired thinking.type.enabled). <1.106: 1.106+ imports mcp 2.x-only names whenever tools are passed, which breaks the critic under mcp 1.x.
+mcp<2  # src/mcp_app.py imports mcp.server.fastmcp.FastMCP, renamed in mcp 2.x
 requests
 pandas
 python-dotenv
 pyyaml
 edgartools
 sec-edgar-downloader
-mcp
 psycopg2-binary
 pgvector
