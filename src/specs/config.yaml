@@ -50,7 +50,7 @@ agents:
   # any agent whose responses do not carry usage metadata in the Gemini shape — that
   # is the silent failure to look for, because a model whose tokens never reach the
   # accounting is a model the budget guard cannot see.
-  critic_model: "ollama_chat/mistral-large-4:cloud"
+  critic_model: "ollama_chat/glm-5.3-flash:cloud"
 
   # The ANALYST (neutral judge) and the REVISER run on a stronger model than the
   # advocates. The analyst makes the one judgment the report exists for: it weighs
@@ -657,14 +657,18 @@ llm_pricing:
       output_usd_per_1m: 0.0
       cached_input_usd_per_1m: 0.0
       confirmed: true
-    # The new critic. Same subscription billing as GLM above, same reasoning for
-    # listing it at zero. The key is the full LiteLLM string; VERIFY against a live
-    # call that this is what `event.model_version` reports (the GLM entry needed it).
-    "ollama_chat/mistral-large-4:cloud":
-      input_usd_per_1m: 0.0
-      output_usd_per_1m: 0.0
-      cached_input_usd_per_1m: 0.0
-      confirmed: true
+    # The critic (glm-5.3-flash). Chosen over glm-5.3: better tool calling (Toolathlon
+    # 78.4 vs 73.0), near-equal intelligence index (57 vs 60), cheaper, lower latency.
+    # The key is the full LiteLLM string; VERIFY against a live call that this is what
+    # `event.model_version` reports (the GLM-5.2 entry needed exactly that).
+    # UNCONFIRMED: $0.15 / $0.50 per 1M is a third-party report of Ollama Cloud's rate.
+    # Ollama moved to dollar credits (Sept 2026), so critic tokens are no longer "free";
+    # a nonzero estimate keeps them visible to the budget guard. Check ollama.com/pricing.
+    "ollama_chat/glm-5.3-flash:cloud":
+      input_usd_per_1m: 0.15
+      output_usd_per_1m: 0.50
+      cached_input_usd_per_1m: 0.15
+      confirmed: false
     # Sonnet 5.5 for the analyst and reviser. Thinking tokens bill at the output rate
     # and LiteLLM folds them into completion tokens, so no separate line is needed.
     # UNCONFIRMED: $2 in / $10 out is what third-party price trackers report for

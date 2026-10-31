@@ -212,7 +212,7 @@ templated into the next agent's instruction. No agent calls another directly.
   succeeded. This is why the graph is a plain Python list rather than ADK's
   `SequentialAgent`.
 - **The critic may run on a different model family.** `agents.critic_model` points
-  Phase D's critic elsewhere (currently `ollama_chat/mistral-large-4:cloud`); the reviser
+  Phase D's critic elsewhere (currently `ollama_chat/glm-5.3-flash:cloud`); the reviser
   follows `agents.analyst_model` (currently Claude Sonnet via LiteLLM), because it
   *is* the analyst revising. The argument
   is decorrelation, not cost: a reviewer sharing its target's weights shares its
