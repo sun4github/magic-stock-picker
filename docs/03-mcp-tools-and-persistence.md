@@ -19,8 +19,8 @@ and [00-module-map.md](00-module-map.md) for the full layout.
 
 ## Are these actually MCP tools?
 
-Every function below is decorated `@mcp.tool()` against a `FastMCP` server
-instance (`mcp = FastMCP("MagicFormulaSkepticalDecomposer")`,
+Every function below is decorated `@mcp.tool()` against an `MCPServer` (mcp 2.x; called `FastMCP` in 1.x)
+instance (`mcp = MCPServer("MagicFormulaSkepticalDecomposer")`,
 `mcp_server.py:21`). That decoration registers each function so
 `mcp_server.py` **could** be run standalone as a real MCP server
 (`mcp_server.py:71-72`: `if __name__ == "__main__": mcp.run()`), speaking

@@ -101,7 +101,7 @@ This is the function every Phase B/C run eventually calls. Per ticker:
 2. Builds the agent list, dropping `sale_advisor_agent` if
    `skip_sale_advisor` (`pipeline/execution.py:84-85`).
 3. For each agent in order (`pipeline/execution.py:86-128`):
-   - Builds a fresh `Runner` via `_build_runner` (`agents/runtime.py:78-87`, attaches
+   - Builds a fresh `Runner` via `_build_runner` (`agents/runtime.py:50-59`, attaches
      context-cache config from `App` if `CONTEXT_CACHE_ENABLED`).
    - Runs it against the shared session; the agent's `output_key` (e.g.
      `"bear_data"`) writes its answer into session state.

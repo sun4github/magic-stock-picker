@@ -49,7 +49,9 @@ def snapshot(path):
             out.write(f"\n--- {tool.name}\n")
             out.write(f"description:\n{tool.description}\n")
             out.write("inputSchema:\n")
-            out.write(json.dumps(tool.inputSchema, indent=2, sort_keys=True) + "\n")
+            # mcp 1.x calls it inputSchema, 2.x input_schema
+            schema = getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None)
+            out.write(json.dumps(schema, indent=2, sort_keys=True) + "\n")
 
         # Two sections, because they are held to different standards.
         #

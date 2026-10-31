@@ -158,7 +158,7 @@ billed, so stopping halfway would waste rather than save). Reads
 `budget:` from `config.yaml` (`per_run_usd`, `per_day_usd` +
 `day_window_hours` as a rolling window via `db_spend_since`,
 `on_exceed: halt|warn`). On `halt`, raises `BudgetExceeded`
-(`settings.py:105`), caught in `_run_phase_b` (`main.py:253-310`), which marks
+(`settings.py:123`), caught in `_run_phase_b` (`main.py:253-310`), which marks
 the run `BUDGET_EXCEEDED` (not `COMPLETED`) but keeps everything already
 analyzed. `--no-budget` disables the guard for one invocation
 (`main.py:762`, flips the module-level `BUDGET_ENABLED`).

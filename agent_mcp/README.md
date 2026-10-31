@@ -760,7 +760,7 @@ redirected to a temporary directory, so running them never touches real job hist
 
 | File | Holds |
 | :--- | :--- |
-| `server.py` | The FastMCP server: all 21 tools, the confirmation gate, the transports |
+| `server.py` | The MCPServer: all 21 tools, the confirmation gate, the transports |
 | `catalog.py` | The operation catalogue — cost, duration, caveats. Data, not behaviour |
 | `jobs.py` | Launching, polling, tailing and cancelling background jobs |
 | `library.py` | Read-only access to reports, rankings and config |

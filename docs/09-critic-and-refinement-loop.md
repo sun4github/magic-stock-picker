@@ -336,7 +336,7 @@ or an analyst reintroducing something it already conceded, spends a paid round
 relitigating a lap already run. `critic_memory` (see
 [03-mcp-tools-and-persistence.md](03-mcp-tools-and-persistence.md)) is the fix —
 one row per finding, replayed into **both** agents' prompts every round via
-`format_past_corrections()` (`critic_agent.py:315`), assembled at `critic_agent.py:102`.
+`format_past_corrections()` (`critic_agent.py:315`), assembled at `critic_agent.py:103`.
 
 - **Retrieved by exact ticker + recency, not by vector similarity.** The retrieval
   key is known exactly (this company's own review history); semantic search would

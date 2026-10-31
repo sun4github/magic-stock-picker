@@ -28,7 +28,7 @@ run it after moving anything.
 | :--- | ---: | :--- |
 | `main.py` | 838 | The CLI, and the workflows that decide WHICH tickers to run |
 | `mcp_server.py` | 72 | Facade over `data/` + `persistence/`; run it to serve MCP |
-| `mcp_app.py` | 22 | The FastMCP instance and the `mcp_server` logger |
+| `mcp_app.py` | 22 | The MCPServer instance and the `mcp_server` logger |
 | `settings.py` | 106 | Everything read from `specs/config.yaml`, and the constants tuned beside it |
 | `usage.py` | 307 | What a run costs, and the ceiling on what it may cost |
 | `runstamp.py` | 16 | One per-process timestamp, shared by the log filename and session ids |

@@ -1,4 +1,4 @@
-"""The FastMCP server instance, and the logger every tool writes to.
+"""The MCP server instance, and the logger every tool writes to.
 
 Its own module for one reason: `data/` and `persistence/` both register tools with
 `@mcp.tool()`, and both log. If either owned the instance the other would have to
@@ -12,11 +12,11 @@ that predates this split.
 import logging
 
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer  # mcp 2.x name for what 1.x called FastMCP
 
 load_dotenv()
 
-mcp = FastMCP("MagicFormulaSkepticalDecomposer")
+mcp = MCPServer("MagicFormulaSkepticalDecomposer")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp_server")

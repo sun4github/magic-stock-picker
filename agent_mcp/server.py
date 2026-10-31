@@ -36,7 +36,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer  # mcp 2.x name for what 1.x called FastMCP
 
 # Absolute imports, so `python -m agent_mcp.server` and `python agent_mcp/server.py`
 # both work - the second only if the repo root is on the path, which the __main__
@@ -86,7 +86,7 @@ Two things to know before calling anything else:
    `job_status` and read progress with `job_log`.
 """
 
-mcp = FastMCP("magic-stock-picker", instructions=INSTRUCTIONS)
+mcp = MCPServer("magic-stock-picker", instructions=INSTRUCTIONS)
 
 
 # ==========================================================================
@@ -1370,34 +1370,38 @@ def _serve_http(host: str, port: int, token: Optional[str], stateless: bool = Fa
         # designed for, and the address list cannot go stale for 127.0.0.1.
         allowed, disable_rebinding, why = _local_host_names(host), False, "derived from local addresses"
 
-    mcp.settings.host = host
-    mcp.settings.port = port
+    # mcp 2.x removed `mcp.settings.host / port / stateless_http / transport_security`:
+    # they are arguments to `streamable_http_app()` now, so nothing is assigned to the
+    # server object and there is no private attribute to get wrong.
+    #
     # Stateless suits an always-on server with remote clients: every request stands
     # alone, so a restart does not strand a client holding a session id the server no
     # longer knows. Nothing is lost by it here - this layer keeps no per-session
     # state at all, only job files on disk.
-    mcp.settings.stateless_http = stateless
-    # `settings.transport_security`, NOT `_transport_security`. The session manager
-    # is constructed with `security_settings=self.settings.transport_security`, so
-    # that is the only field it reads; assigning to the private name silently creates
-    # an attribute nothing consults. Worse, FastMCP's __init__ has already populated
-    # settings.transport_security with a LOOPBACK-ONLY allowlist, because the host
-    # defaults to 127.0.0.1 at construction time - so the failure is not "no checking"
-    # but "checking against localhost", which is exactly the shape that lets a
-    # localhost smoke test pass and every real client get "Invalid Host header".
-    mcp.settings.transport_security = TransportSecuritySettings(
+    #
+    # The transport security MUST be passed in explicitly. The host defaults to
+    # 127.0.0.1, so leaving it out gets a LOOPBACK-ONLY allowlist - the failure is not
+    # "no checking" but "checking against localhost", which is exactly the shape that
+    # lets a localhost smoke test pass and every real client get "Invalid Host header".
+    security = TransportSecuritySettings(
         enable_dns_rebinding_protection=not disable_rebinding,
         allowed_hosts=allowed,
         allowed_origins=[f"http://{h}" for h in allowed] + [f"https://{h}" for h in allowed],
     )
 
-    app = mcp.streamable_http_app()
+    streamable_path = "/mcp"  # the library default, now stated rather than read from settings
+    app = mcp.streamable_http_app(
+        streamable_http_path=streamable_path,
+        stateless_http=stateless,
+        transport_security=security,
+        host=host,
+    )
     if token:
         app = _BearerAuth(app, token)
     # Outside the token gate, so an uptime check needs no credential.
     app = _Health(app)
 
-    endpoint = f"http://{host}:{port}{mcp.settings.streamable_http_path}"
+    endpoint = f"http://{host}:{port}{streamable_path}"
     logger.info("magic-stock-picker MCP server on %s", endpoint)
     logger.info("Authentication: %s", "bearer token required" if token else "NONE (loopback only)")
     logger.info("Session mode: %s", "stateless" if stateless else "session-tracked")
@@ -1487,10 +1491,9 @@ def main() -> None:
     elif args.transport == "http":
         _serve_http(args.host, args.port, token, stateless=args.stateless)
     else:
-        mcp.settings.host, mcp.settings.port = args.host, args.port
         if args.host not in _LOOPBACK and not token:
             raise SystemExit("Refusing a non-loopback SSE bind without a token. Set MSP_MCP_TOKEN.")
-        mcp.run(transport="sse")
+        mcp.run(transport="sse", host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
