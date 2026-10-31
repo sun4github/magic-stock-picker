@@ -50,7 +50,30 @@ agents:
   # any agent whose responses do not carry usage metadata in the Gemini shape — that
   # is the silent failure to look for, because a model whose tokens never reach the
   # accounting is a model the budget guard cannot see.
-  critic_model: "ollama_chat/glm-5.2:cloud"
+  critic_model: "ollama_chat/mistral-large-4:cloud"
+
+  # The ANALYST (neutral judge) and the REVISER run on a stronger model than the
+  # advocates. The analyst makes the one judgment the report exists for: it weighs
+  # {bear_data} against {bull_data} and issues the verdict, with no tools and one call
+  # per ticker, so a frontier model costs cents more per name where it matters most.
+  # The reviser follows it because it IS the analyst revising its own report
+  # (analyst_agent.instruction verbatim) and should be held to the rules by the model
+  # that wrote it. Empty means "use `model` above".
+  #
+  # Three families on purpose: Gemini argues (bear/bull), Claude judges, Mistral
+  # critiques. A reviewer that shares its target's weights shares its blind spots.
+  # Needs ANTHROPIC_API_KEY in the root .env (read by LiteLLM, never by this file).
+  # Prompts are unchanged, so `_prompt_version` does not move. It does NOT hash the
+  # model either, so cached analyses from before a swap are still reused inside
+  # reuse.max_age_hours — run with --force to get the new model's verdict early.
+  analyst_model: "anthropic/claude-sonnet-5-5"
+  # "medium": the evidence is already in the prompt and the work is weighing it, not
+  # searching. High buys more deliberation at the output rate for a task that is
+  # bounded by the input; raise it only if verdicts look shallow on a measured sample.
+  analyst_reasoning_effort: "medium"
+  # Anthropic needs an explicit cap, and it must cover thinking AND the report. A cap
+  # that is too low truncates the verdict section silently, which is the worst place.
+  analyst_max_tokens: 16000
 
   screener_agent:
     name: "Magic_Formula_Screener"
@@ -163,7 +186,8 @@ context_cache:
   min_tokens: 4096        # below this, cache storage costs more than it saves
   cache_intervals: 10     # invocations reusing one cache before it is refreshed
 
-# Spend ceilings. A 30-ticker screen is ~$11 at current rates, so a runaway loop or
+# Spend ceilings. A 30-ticker screen was ~$11 on an all-Gemini pipeline; the Sonnet
+# analyst raises it (see per_run_usd below). A 30-ticker screen is ~$11 at old rates, so a runaway loop or
 # a retry storm gets expensive quickly. Checked before each ticker starts, using the
 # run's accumulated cost plus what the DB shows was already spent in the window.
 #
@@ -179,8 +203,15 @@ budget:
   # with a partial candidate list — the run is not wasted, but it is short, which is
   # a worse outcome than the overspend it prevented. Still well below the ~$22 a
   # doubled per-ticker cost would reach, so a genuine runaway is still caught.
-  per_run_usd: 20.00
-  per_day_usd: 25.00        # rolling window below, not calendar day
+  #
+  # Raised 20 -> 30 with the Sonnet analyst. ESTIMATE, not measured: the analyst reads
+  # the full bear + bull text (~35k tokens in) and writes the report plus medium
+  # thinking (~12k out), about $0.10 in + $0.18 out at $3/$15 = ~$0.28 a ticker versus
+  # ~$0.05 on flash. That puts a ticker near $0.55-0.60 and 30 tickers near $17-18.
+  # 30 leaves the same ~1.7x headroom the old 20 had over $11. Replace this with a
+  # measured number after the first real run (the run log's per-model breakdown).
+  per_run_usd: 30.00
+  per_day_usd: 40.00        # rolling window below, not calendar day
   day_window_hours: 24
   on_exceed: "halt"
 
@@ -218,7 +249,10 @@ refinement:
   # without the matching increase every addition would quietly buy fewer rounds for
   # the same stated ceiling. The number restores review headroom rather than paying
   # for the derived documents out of it.
-  max_budget_usd: 2.45      # ~4-6 agent turns, plus the advisory and the buy case
+  # Raised 2.45 -> 3.50 when the reviser moved to Sonnet: a revision rewrites the whole
+  # report (~$0.35 against ~$0.07 on flash), so without this the same stated ceiling
+  # would buy one fewer review round. Restores headroom, does not add rounds.
+  max_budget_usd: 3.50      # ~4-6 agent turns, plus the advisory and the buy case
   max_rounds: 3             # hard stop; the budget usually binds first
   # Cost estimates used ONLY for the first ceiling check, before either role has run
   # once and can be measured. After round 1 they are discarded in favour of the
@@ -234,7 +268,7 @@ refinement:
   # dearest observed round of each kind. Note only ONE revision has been measured,
   # and later-round revisions carry bigger prompts, so that one keeps more headroom.
   seed_critique_usd: 0.15   # the critic makes tool calls, so it is the dearer role
-  seed_revision_usd: 0.12
+  seed_revision_usd: 0.40   # Sonnet reviser, estimated; was 0.12 measured on flash
   estimate_headroom: 1.25   # rounds grow as findings and replies accumulate
   # Long-term memory (critic_memory): how much of this company's review history is
   # replayed into both agents' prompts each round. Sent twice per round, so raising
@@ -623,6 +657,28 @@ llm_pricing:
       output_usd_per_1m: 0.0
       cached_input_usd_per_1m: 0.0
       confirmed: true
+    # The new critic. Same subscription billing as GLM above, same reasoning for
+    # listing it at zero. The key is the full LiteLLM string; VERIFY against a live
+    # call that this is what `event.model_version` reports (the GLM entry needed it).
+    "ollama_chat/mistral-large-4:cloud":
+      input_usd_per_1m: 0.0
+      output_usd_per_1m: 0.0
+      cached_input_usd_per_1m: 0.0
+      confirmed: true
+    # Sonnet 5.5 for the analyst and reviser. Thinking tokens bill at the output rate
+    # and LiteLLM folds them into completion tokens, so no separate line is needed.
+    # UNCONFIRMED: rates are Anthropic's Sonnet-tier list prices ($3 in / $15 out,
+    # cache reads at 10% of input), not read from an invoice; the loud warning on each
+    # run is deliberate until they are checked. Listed under BOTH names because LiteLLM
+    # may report either the prefixed string or the bare model id (or a dated variant)
+    # as `model_version`; an unlisted spelling logs "No price configured" and drops
+    # the tokens from the budget guard. Check the first run log and delete the unused key.
+    "anthropic/claude-sonnet-5-5": &sonnet55
+      input_usd_per_1m: 3.00
+      output_usd_per_1m: 15.00
+      cached_input_usd_per_1m: 0.30
+      confirmed: false
+    "claude-sonnet-5-5": *sonnet55
   # Embeddings are billed per input token. Four vectors are generated per ticker
   # (bear, bull, sale, final report), previously uncounted.
   #

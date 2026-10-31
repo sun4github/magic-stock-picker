@@ -2014,9 +2014,12 @@ its prompt:
   tends to misread it the same way. A different lineage decorrelates the errors,
   which is the one axis of independence a prompt cannot buy.
 
-  Only the critic moves. `reviser_agent` stays on `agents.model` because it IS the
-  analyst revising (below), so a model swap changes who CHALLENGES a report, never
-  who writes it. A replacement needs tool calling and a long context; a bare model
+  Only the critic moves with `critic_model`. `reviser_agent` follows
+  `agents.analyst_model` (falling back to `agents.model`) because it IS the analyst
+  revising (below), so that swap changes who CHALLENGES a report, never who writes it.
+  `analyst_model`, `analyst_reasoning_effort` and `analyst_max_tokens` move the
+  analyst and reviser together; the advocates and every other agent stay on
+  `agents.model`. A replacement needs tool calling and a long context; a bare model
   name is read by ADK as a Gemini model, so anything else carries a LiteLLM-style
   `provider/model` prefix that `agents.resolve_model()` routes on.
 

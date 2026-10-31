@@ -212,8 +212,9 @@ templated into the next agent's instruction. No agent calls another directly.
   succeeded. This is why the graph is a plain Python list rather than ADK's
   `SequentialAgent`.
 - **The critic may run on a different model family.** `agents.critic_model` points
-  Phase D's critic elsewhere (currently `ollama_chat/glm-5.2:cloud`); the reviser
-  stays on the analyst's model, because it *is* the analyst revising. The argument
+  Phase D's critic elsewhere (currently `ollama_chat/mistral-large-4:cloud`); the reviser
+  follows `agents.analyst_model` (currently Claude Sonnet via LiteLLM), because it
+  *is* the analyst revising. The argument
   is decorrelation, not cost: a reviewer sharing its target's weights shares its
   blind spots. See [09](09-critic-and-refinement-loop.md).
 - **Only the buy-side agents see forward-looking data.** Analyst estimates and the

@@ -36,7 +36,7 @@ Any replacement needs two things, both load-bearing:
 A bare model name is treated by ADK as a **Gemini** model, so anything else must
 carry a LiteLLM-style `provider/model` prefix — `agents.resolve_model()` routes on
 the `/` and wraps it in ADK's `LiteLlm`. Credentials come from the environment
-(`OLLAMA_API_BASE`, `OLLAMA_API_KEY`, ...), never from the committed config.
+(`OLLAMA_API_BASE`, `OLLAMA_API_KEY`, `ANTHROPIC_API_KEY`, ...), never from the committed config.
 
 ### Watch the meter after a swap
 

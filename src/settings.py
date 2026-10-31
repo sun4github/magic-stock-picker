@@ -64,6 +64,24 @@ AGENT_MODEL = config.get("agents", {}).get("model", "gemini-3.6-flash")
 _critic_model = str(config.get("agents", {}).get("critic_model", "") or "").strip()
 CRITIC_MODEL = _critic_model or AGENT_MODEL
 
+# The ANALYST (and the reviser, which IS the analyst revising its own report) may run
+# on a stronger model than the advocates: it makes the one judgment call the whole
+# report exists for, over a long structured input, with no tools. Empty means "the
+# same model as every other agent". Only the analyst and reviser move together; they
+# must, because the reviser is built from the analyst's instruction verbatim.
+_analyst_model = str(config.get("agents", {}).get("analyst_model", "") or "").strip()
+ANALYST_MODEL = _analyst_model or AGENT_MODEL
+# LiteLLM-routed models only (ignored for a bare Gemini name). "low" | "medium" | "high".
+ANALYST_REASONING_EFFORT = str(
+    config.get("agents", {}).get("analyst_reasoning_effort", "medium") or "medium").strip()
+# Anthropic requires an explicit output cap, and it must cover thinking AND the report.
+ANALYST_MAX_TOKENS = int(config.get("agents", {}).get("analyst_max_tokens", 16000))
+
+
+def analyst_model_kwargs() -> dict:
+    """LiteLLM call options for the analyst/reviser model (empty for Gemini)."""
+    return {"reasoning_effort": ANALYST_REASONING_EFFORT, "max_tokens": ANALYST_MAX_TOKENS}
+
 # LLM pricing (USD per 1M tokens), keyed by the RESOLVED model version the API
 # reports — see the commentary in specs/config.yaml. Pricing the alias instead of
 # the resolved model is what caused per-run spend to be understated ~2.4x once

@@ -57,10 +57,11 @@ from agents import (
 )
 from run_log import logger
 from settings import (
-    AGENT_MODEL,
+    ANALYST_MODEL,
     BASE_BACKOFF_SECONDS,
     CRITIC_MODEL,
     MAX_AGENT_RETRIES,
+    analyst_model_kwargs,
 )
 from usage import _add_event_usage, _check_metered, _new_usage
 from mcp_server import (
@@ -106,7 +107,7 @@ critic_agent = LlmAgent(
     # at which point the critic, and ONLY the critic, moves. A reviewer that shares
     # its target's weights shares its blind spots; see the note in config.yaml.
     #
-    # `reviser_agent` below deliberately stays on AGENT_MODEL: it is built from
+    # `reviser_agent` below follows ANALYST_MODEL, not AGENT_MODEL: it is built from
     # analyst_agent.instruction verbatim, so it IS the analyst revising its own work.
     model=resolve_model(CRITIC_MODEL),
     instruction=(
@@ -166,7 +167,7 @@ RESPONSE_MARKER = "<<<RESPONSE TO CRITIC>>>"
 
 reviser_agent = LlmAgent(
     name="reviser_agent",
-    model=AGENT_MODEL,
+    model=resolve_model(ANALYST_MODEL, **analyst_model_kwargs()),
     instruction=(
         # Identical rules to the pipeline analyst — see the module docstring.
         analyst_agent.instruction

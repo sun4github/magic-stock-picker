@@ -19,7 +19,9 @@ of why this wiring is the way it is.
 from google.adk.agents import LlmAgent
 
 from mcp_server import fmp_company_profile, fmp_stock_news, web_search_tool
-from settings import AGENT_MODEL
+from settings import AGENT_MODEL, ANALYST_MODEL, analyst_model_kwargs
+
+from .models import resolve_model
 
 
 # Agent instructions live in prompts/, one .md per agent, and are composed by
@@ -166,7 +168,10 @@ bull_agent = LlmAgent(
 # --- Judge: NEUTRAL analyst (no skeptical prompt) weighs bull vs bear ---
 analyst_agent = LlmAgent(
     name="analyst_agent",
-    model=AGENT_MODEL,
+    # ANALYST_MODEL, not AGENT_MODEL: the judge may run on a stronger model than the
+    # advocates (agents.analyst_model in config.yaml). The reviser in critic_agent.py
+    # follows it, because the reviser is this agent revising its own report.
+    model=resolve_model(ANALYST_MODEL, **analyst_model_kwargs()),
     instruction=load_prompt("analyst.md"),
     tools=[],
     output_key="final_report",

@@ -1,4 +1,5 @@
 google-adk
+litellm  # routes any provider/model agent (Claude analyst, Ollama critic) through ADK
 requests
 pandas
 python-dotenv
