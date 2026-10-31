@@ -671,18 +671,16 @@ llm_pricing:
       confirmed: false
     # Sonnet 5.5 for the analyst and reviser. Thinking tokens bill at the output rate
     # and LiteLLM folds them into completion tokens, so no separate line is needed.
-    # UNCONFIRMED: $2 in / $10 out is what third-party price trackers report for
-    # Sonnet 5.5 (2026-10-31), not Anthropic's own page or an invoice. Trackers
-    # disagree on cache reads ($0.10 vs $0.20), so the dearer one is used. The loud
-    # warning on each run is deliberate until these are checked. Listed under BOTH names because LiteLLM
+    # $2 in / $10 out / $0.10 cached, as in LiteLLM's model map (litellm 1.106.6),
+    # which cites Anthropic's pricing page. Not yet checked against an invoice. Listed under BOTH names because LiteLLM
     # may report either the prefixed string or the bare model id (or a dated variant)
     # as `model_version`; an unlisted spelling logs "No price configured" and drops
     # the tokens from the budget guard. Check the first run log and delete the unused key.
     "anthropic/claude-sonnet-5-5": &sonnet55
       input_usd_per_1m: 2.00
       output_usd_per_1m: 10.00
-      cached_input_usd_per_1m: 0.20
-      confirmed: false
+      cached_input_usd_per_1m: 0.10
+      confirmed: true
     "claude-sonnet-5-5": *sonnet55
   # Embeddings are billed per input token. Four vectors are generated per ticker
   # (bear, bull, sale, final report), previously uncounted.

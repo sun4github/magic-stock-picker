@@ -1,5 +1,5 @@
 google-adk
-litellm  # routes any provider/model agent (Claude analyst, Ollama critic) through ADK
+litellm>=1.106.6  # routes provider/model agents (Claude analyst, Ollama critic) through ADK. Older releases send the retired thinking.type.enabled to Sonnet 5.5, which the API rejects.
 requests
 pandas
 python-dotenv
